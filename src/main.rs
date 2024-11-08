@@ -5,8 +5,9 @@ use winit::{
     window::Window,
 };
 
+
 struct Context {
-    pipeline_screen: wgpu::RenderPipeline,
+    screen_pipeline: wgpu::RenderPipeline,
 }
 
 impl Context {
@@ -54,14 +55,14 @@ impl Context {
         });
 
         Context {
-            pipeline_screen: render_pipeline
+            screen_pipeline: render_pipeline
         }
     }
 }
 
 fn frame(device: &wgpu::Device, queue: &wgpu::Queue, surface: &wgpu::Surface, ctx: &Context) {
-    let frame = surface.get_current_texture().expect("Failed to acquire next swap chain texture");
-    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let surface_texture = surface.get_current_texture().expect("Failed to acquire next swap chain texture");
+    let view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: None,
         });
@@ -83,18 +84,21 @@ fn frame(device: &wgpu::Device, queue: &wgpu::Queue, surface: &wgpu::Surface, ct
     
     {
         let mut rpass = encoder.begin_render_pass(&rpassdesc);
-        rpass.set_pipeline(&ctx.pipeline_screen);
+        rpass.set_pipeline(&ctx.screen_pipeline);
         rpass.draw(0..3, 0..1);
     }
 
     queue.submit(Some(encoder.finish()));
-    frame.present();
+    surface_texture.present();
 }
 
 async fn run(event_loop: EventLoop<()>, window: Window) {
     let mut size = window.inner_size();
     size.width = size.width.max(1);
     size.height = size.height.max(1);
+
+    size.width = size.width.min(4096);
+    size.height = size.height.min(4096);
 
     let instance = wgpu::Instance::default();
 
@@ -145,6 +149,9 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                         // Reconfigure the surface with the new size
                         config.width = new_size.width.max(1);
                         config.height = new_size.height.max(1);
+                        config.width = config.width.min(4096);
+                        config.height = config.height.min(4096);
+
                         surface.configure(&device, &config);
                         // On macos the window needs to be redrawn manually after resizing
                         window.request_redraw();
@@ -166,6 +173,7 @@ pub fn main() {
     let mut builder = winit::window::WindowBuilder::new();
     #[cfg(target_arch = "wasm32")]
     {
+        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
         use wasm_bindgen::JsCast;
         use winit::platform::web::WindowBuilderExtWebSys;
         let canvas = web_sys::window()
@@ -187,7 +195,7 @@ pub fn main() {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+        
         console_log::init().expect("could not initialize logger");
         wasm_bindgen_futures::spawn_local(run(event_loop, window));
     }
