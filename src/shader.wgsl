@@ -6,6 +6,6 @@ fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 }
 
 @fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
+    return vec4<f32>(p.x / 500.0, p.y / 500.0, 0.0, 1.0);
 }
