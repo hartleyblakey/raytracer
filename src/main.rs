@@ -1,13 +1,78 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, num::NonZero};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
     window::Window,
 };
 
-
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct FrameUniforms {
+    res:    [u32;2],
+    frame:  u32,
+    time:   f32,
+}
 struct Context {
-    screen_pipeline: wgpu::RenderPipeline,
+    screen_pipeline:        wgpu::RenderPipeline,
+    framebuffer_pipeline:   wgpu::RenderPipeline,
+    frame_uniforms_binding: wgpu::BindGroup,
+    frame_uniforms_buffer:  wgpu::Buffer,
+    frame_uniforms:         FrameUniforms,
+}
+
+struct BGBuilder<'a> {
+    layout_entries: Vec<wgpu::BindGroupLayoutEntry>,
+    entries:        Vec<wgpu::BindGroupEntry<'a>>,
+}
+
+
+// struct BufferView {
+//     ty: wgpu::BufferBindingType,
+//     dynamic_offset_stride: Option<NonZero<u32>>,
+//     offset: u32,
+//     size: u32
+// }
+
+impl<'a> BGBuilder<'a> {
+    fn new() -> BGBuilder<'a> {
+        BGBuilder {
+            layout_entries: Vec::new(),
+            entries:        Vec::new(),
+        }
+    }
+
+    fn with_buffer(&mut self, buffer: &'a wgpu::Buffer, visibility: wgpu::ShaderStages) -> &mut Self{
+        let layout_entry = wgpu::BindGroupLayoutEntry {
+            binding: self.layout_entries.len() as u32,
+            count: None,
+            visibility,
+            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }
+        };
+        self.layout_entries.push(layout_entry);
+
+        let entry = wgpu::BindGroupEntry {
+            binding: self.entries.len() as u32,
+            resource: wgpu::BindingResource::Buffer(buffer.as_entire_buffer_binding()),
+        };
+        self.entries.push(entry);
+        self
+    }
+
+    fn finish(&self, device: &wgpu::Device) -> (wgpu::BindGroup, wgpu::BindGroupLayout) {
+        let layout_desc = wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: self.layout_entries.as_slice(),
+        };
+        let layout = device.create_bind_group_layout(&layout_desc);
+        
+        let desc = wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: self.entries.as_slice(),
+        };
+
+        (device.create_bind_group(&desc), layout)
+    }
 }
 
 impl Context {
@@ -17,6 +82,19 @@ impl Context {
     queue:      &wgpu::Queue, 
     surface:    &wgpu::Surface) -> Context {
 
+        let frame_uniforms_buffer : wgpu::BufferDescriptor = wgpu::BufferDescriptor{
+            label: Some("Frame Uniform Buffer"),
+            size: size_of::<FrameUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false
+        };
+
+        let frame_uniforms_buffer = device.create_buffer(&frame_uniforms_buffer);
+
+        let frame_uniforms_binding_layout = BGBuilder::new()
+            .with_buffer(&frame_uniforms_buffer, wgpu::ShaderStages::all())
+            .finish(device);
+
         // Load the shaders from disk
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
@@ -25,14 +103,14 @@ impl Context {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[],
+            bind_group_layouts: &[&frame_uniforms_binding_layout.1],
             push_constant_ranges: &[],
         });
         
         let surface_capabilities = surface.get_capabilities(&adapter);
         let surface_format = surface_capabilities.formats[0];
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let screen_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -54,13 +132,40 @@ impl Context {
             cache: None,
         });
 
+        let framebuffer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(surface_format.into())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+
         Context {
-            screen_pipeline: render_pipeline
+            screen_pipeline,
+            framebuffer_pipeline,
+            frame_uniforms: FrameUniforms { res: [512, 512], frame: 0, time: 0.0 },
+            frame_uniforms_buffer,
+            frame_uniforms_binding: frame_uniforms_binding_layout.0
         }
     }
 }
 
-fn frame(device: &wgpu::Device, queue: &wgpu::Queue, surface: &wgpu::Surface, ctx: &Context) {
+fn frame(device: &wgpu::Device, queue: &wgpu::Queue, surface: &wgpu::Surface, ctx: &mut Context) {
     let surface_texture = surface.get_current_texture().expect("Failed to acquire next swap chain texture");
     let view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -81,10 +186,17 @@ fn frame(device: &wgpu::Device, queue: &wgpu::Queue, surface: &wgpu::Surface, ct
         timestamp_writes: None,
         occlusion_query_set: None,
     };
+
+    ctx.frame_uniforms.frame += 1;
+    ctx.frame_uniforms.time += 1.0;
+
+    queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
     {
         let mut rpass = encoder.begin_render_pass(&rpassdesc);
         rpass.set_pipeline(&ctx.screen_pipeline);
+        rpass.set_bind_group(0, Some(&ctx.frame_uniforms_binding), &[]);
+        //rpass.set_bind_group(0, Some(&ctx.frame_uniforms_binding), &[]);
         rpass.draw(0..3, 0..1);
     }
 
@@ -131,9 +243,10 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
     let mut config = surface
         .get_default_config(&adapter, size.width, size.height)
         .unwrap();
+
     surface.configure(&device, &config);
 
-    let ctx = Context::init(&adapter, &device, &queue, &surface);
+    let mut ctx = Context::init(&adapter, &device, &queue, &surface);
 
     let window = &window;
     event_loop.run(
@@ -157,7 +270,9 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                         window.request_redraw();
                     }
                     WindowEvent::RedrawRequested => {
-                        frame(&device, &queue, &surface, &ctx);
+                        window.request_redraw();
+                        frame(&device, &queue, &surface, &mut ctx);
+                        
                     }
                     WindowEvent::CloseRequested => target.exit(),
                     _ => {}
