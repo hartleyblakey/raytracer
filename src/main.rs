@@ -101,43 +101,23 @@ impl<'a> BGBuilder<'a> {
 impl Context {
     fn init(gpu: &Gpu) -> Context {
 
-        let u_frame_buffer : wgpu::BufferDescriptor = wgpu::BufferDescriptor{
-            label: Some("Frame Uniform Buffer"),
-            size: size_of::<FrameUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false
+        let u_frame_0 = FrameUniforms {
+            frame: 0,
+            res: [512, 512],
+            time: 0.0
         };
 
-        let u_frame_buffer = gpu.device.create_buffer(&u_frame_buffer);
+        let u_frame_buffer = gpu.new_uniform_buffer(&u_frame_0).raw;
 
         let (u_frame_binding, u_frame_layout) = BGBuilder::new()
             .with_buffer(&u_frame_buffer, wgpu::ShaderStages::all())
             .finish(&gpu.device);
 
+        let buffer_size_mb = 128;
 
-        let triangles_ssbo : wgpu::BufferDescriptor = wgpu::BufferDescriptor{
-            label: Some("Frame Uniform Buffer"),
-            size: 127000000,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false
-        };
-        let triangles_ssbo = gpu.device.create_buffer(&triangles_ssbo);
-
-        let bvh_ssbo : wgpu::BufferDescriptor = wgpu::BufferDescriptor{
-            label: Some("Frame Uniform Buffer"),
-            size: 127000000,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false
-        };
-        let bvh_ssbo = gpu.device.create_buffer(&bvh_ssbo);
-
-        let screen_ssbo : wgpu::BufferDescriptor = wgpu::BufferDescriptor{
-            label: Some("Frame Uniform Buffer"),
-            size: 512 * 512 * 4 * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false
-        };
-        let screen_ssbo = gpu.device.create_buffer(&screen_ssbo);
+        let triangles_ssbo =    gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024).raw;
+        let bvh_ssbo =          gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024).raw;
+        let screen_ssbo =       gpu.new_storage_buffer(512 * 512 * 4 * 4).raw;
 
         let (rt_data_binding, rt_data_layout) = BGBuilder::new()
             .with_buffer(&triangles_ssbo, wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
@@ -239,7 +219,7 @@ fn frame(gpu: &Gpu, ctx: &mut Context) {
 
 
     ctx.frame_uniforms.frame += 1;
-    ctx.frame_uniforms.time += 1.0 / 16.0;
+    ctx.frame_uniforms.time += 1.0 / 60.0; // hack
 
     gpu.queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     

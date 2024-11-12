@@ -1,7 +1,7 @@
 @group(0) @binding(0) var<uniform> globals : FrameUniforms;
 
-@group(1) @binding(0) var<storage, read_write> triangles : u32;
-@group(1) @binding(1) var<storage, read_write> bvh : u32;
+@group(1) @binding(0) var<storage, read> triangles : u32;
+@group(1) @binding(1) var<storage, read> bvh : u32;
 @group(1) @binding(2) var<storage, read_write> screen : array<array<vec4f, 512>, 512>;
 
 struct FrameUniforms {
