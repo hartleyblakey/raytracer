@@ -12,6 +12,11 @@ struct FrameUniforms {
     frame:  u32,
     time:   f32,
 }
+
+mod gpu;
+use gpu::*;
+
+
 struct Context {
     screen_pipeline:        wgpu::RenderPipeline,
     raytrace_pipeline:      wgpu::ComputePipeline,
@@ -92,12 +97,9 @@ impl<'a> BGBuilder<'a> {
 
 
 
+
 impl Context {
-    fn init(
-    adapter:    &wgpu::Adapter, 
-    device:     &wgpu::Device, 
-    queue:      &wgpu::Queue, 
-    surface:    &wgpu::Surface) -> Context {
+    fn init(gpu: &Gpu) -> Context {
 
         let u_frame_buffer : wgpu::BufferDescriptor = wgpu::BufferDescriptor{
             label: Some("Frame Uniform Buffer"),
@@ -106,11 +108,11 @@ impl Context {
             mapped_at_creation: false
         };
 
-        let u_frame_buffer = device.create_buffer(&u_frame_buffer);
+        let u_frame_buffer = gpu.device.create_buffer(&u_frame_buffer);
 
         let (u_frame_binding, u_frame_layout) = BGBuilder::new()
             .with_buffer(&u_frame_buffer, wgpu::ShaderStages::all())
-            .finish(device);
+            .finish(&gpu.device);
 
 
         let triangles_ssbo : wgpu::BufferDescriptor = wgpu::BufferDescriptor{
@@ -119,7 +121,7 @@ impl Context {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false
         };
-        let triangles_ssbo = device.create_buffer(&triangles_ssbo);
+        let triangles_ssbo = gpu.device.create_buffer(&triangles_ssbo);
 
         let bvh_ssbo : wgpu::BufferDescriptor = wgpu::BufferDescriptor{
             label: Some("Frame Uniform Buffer"),
@@ -127,7 +129,7 @@ impl Context {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false
         };
-        let bvh_ssbo = device.create_buffer(&bvh_ssbo);
+        let bvh_ssbo = gpu.device.create_buffer(&bvh_ssbo);
 
         let screen_ssbo : wgpu::BufferDescriptor = wgpu::BufferDescriptor{
             label: Some("Frame Uniform Buffer"),
@@ -135,31 +137,31 @@ impl Context {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false
         };
-        let screen_ssbo = device.create_buffer(&screen_ssbo);
+        let screen_ssbo = gpu.device.create_buffer(&screen_ssbo);
 
         let (rt_data_binding, rt_data_layout) = BGBuilder::new()
             .with_buffer(&triangles_ssbo, wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&bvh_ssbo,       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&screen_ssbo,    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .finish(device);
+            .finish(&gpu.device);
 
 
         // Load the shaders from disk
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
         });
 
-        let screen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let screen_pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[&u_frame_layout, &rt_data_layout],
             push_constant_ranges: &[],
         });
 
-        let surface_capabilities = surface.get_capabilities(&adapter);
+        let surface_capabilities = gpu.surface.get_capabilities(&gpu.adapter);
         let surface_format = surface_capabilities.formats[0];
 
-        let screen_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let screen_pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
             layout: Some(&screen_pipeline_layout),
             vertex: wgpu::VertexState {
@@ -181,13 +183,13 @@ impl Context {
             cache: None,
         });
 
-        let raytrace_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
+        let raytrace_pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
             label: Some("raytrace compute pipeline layout"),
             bind_group_layouts: &[&u_frame_layout, &rt_data_layout],
             push_constant_ranges: &[],
         });
 
-        let raytrace_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let raytrace_pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("raytrace compute pipeline"),
             module: &shader,
             layout: Some(&raytrace_pipeline_layout),
@@ -213,10 +215,10 @@ impl Context {
     }
 }
 
-fn frame(device: &wgpu::Device, queue: &wgpu::Queue, surface: &wgpu::Surface, ctx: &mut Context) {
-    let surface_texture = surface.get_current_texture().expect("Failed to acquire next swap chain texture");
+fn frame(gpu: &Gpu, ctx: &mut Context) {
+    let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next swap chain texture");
     let view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: None,
         });
 
@@ -239,7 +241,7 @@ fn frame(device: &wgpu::Device, queue: &wgpu::Queue, surface: &wgpu::Surface, ct
     ctx.frame_uniforms.frame += 1;
     ctx.frame_uniforms.time += 1.0 / 16.0;
 
-    queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
+    gpu.queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
     {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
@@ -257,118 +259,58 @@ fn frame(device: &wgpu::Device, queue: &wgpu::Queue, surface: &wgpu::Surface, ct
         rpass.draw(0..3, 0..1);
     }
 
-    queue.submit(Some(encoder.finish()));
+    gpu.queue.submit(Some(encoder.finish()));
     surface_texture.present();
 }
 
-async fn run(event_loop: EventLoop<()>, window: Window) {
-    let mut size = window.inner_size();
-    size.width = size.width.max(1);
-    size.height = size.height.max(1);
-
-    size.width = size.width.min(4096);
-    size.height = size.height.min(4096);
-
-    let instance = wgpu::Instance::default();
-
-    let surface = instance.create_surface(&window).unwrap();
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            // Request an adapter which can render to our surface
-            compatible_surface: Some(&surface),
-        })
-        .await
-        .expect("Failed to find an appropriate adapter");
-
-
-    let device_desc = wgpu::DeviceDescriptor {
-        label: None,
-        required_features: wgpu::Features::empty(),
-        // Make sure we use the texture resolution limits from the adapter, so we can support images the size of the swapchain.
-        required_limits: wgpu::Limits::default()
-            .using_resolution(adapter.limits()),
-        memory_hints: wgpu::MemoryHints::MemoryUsage,
-    };
-
-    // Create the logical device and command queue
-    let (device, queue) = adapter.request_device(&device_desc, None)
-        .await
-        .expect("Failed to create device");
-
-    let mut config = surface
-        .get_default_config(&adapter, size.width, size.height)
-        .unwrap();
-
-    surface.configure(&device, &config);
-
-    let mut ctx = Context::init(&adapter, &device, &queue, &surface);
-
-    let window = &window;
-    event_loop.run(
-        move |event, target| {
-
-            if let Event::WindowEvent {
-                window_id: _,
-                event,
-            } = event
-            {
-                match event {
-                    WindowEvent::Resized(new_size) => {
-                        // Reconfigure the surface with the new size
-                        config.width = new_size.width.max(1);
-                        config.height = new_size.height.max(1);
-                        config.width = config.width.min(4096);
-                        config.height = config.height.min(4096);
-
-                        surface.configure(&device, &config);
-                        // On macos the window needs to be redrawn manually after resizing
-                        window.request_redraw();
-                    }
-                    WindowEvent::RedrawRequested => {
-                        window.request_redraw();
-                        frame(&device, &queue, &surface, &mut ctx);
-                        
-                    }
-                    WindowEvent::CloseRequested => target.exit(),
-                    _ => {}
-                };
-            }
-        })
-        .unwrap();
-}
-
-pub fn main() {
+async fn run() {
     let event_loop = EventLoop::new().unwrap();
-    #[allow(unused_mut)]
-    let mut builder = winit::window::WindowBuilder::new();
-    #[cfg(target_arch = "wasm32")]
-    {
-        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-        use wasm_bindgen::JsCast;
-        use winit::platform::web::WindowBuilderExtWebSys;
-        let canvas = web_sys::window()
-            .unwrap()
-            .document()
-            .unwrap()
-            .get_element_by_id("canvas")
-            .unwrap()
-            .dyn_into::<web_sys::HtmlCanvasElement>()
-            .unwrap();
-        builder = builder.with_canvas(Some(canvas));
-    }
-    let window = builder.build(&event_loop).unwrap();
+    let window = new_window(&event_loop);
+    let mut gpu = Gpu::new(&window).await;
+    let mut ctx = Context::init(&gpu);
+    event_loop.run(
+    move |event, target| {
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        env_logger::init();
-        pollster::block_on(run(event_loop, window));
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
+        if let Event::WindowEvent {
+            window_id: _,
+            event,
+        } = event
+        {
+            match event {
+                WindowEvent::Resized(new_size) => {
+                    // Reconfigure the surface with the new size
+                    gpu.surface_config.width = new_size.width.max(1);
+                    gpu.surface_config.height = new_size.height.max(1);
+                    gpu.surface_config.width = gpu.surface_config.width.min(4096);
+                    gpu.surface_config.height = gpu.surface_config.height.min(4096);
+
+                    gpu.surface.configure(&gpu.device, &gpu.surface_config);
+                    // On macos the window needs to be redrawn manually after resizing
+                    gpu.window.request_redraw();
+                }
+                WindowEvent::RedrawRequested => {
+                    gpu.window.request_redraw();
+                    frame(&gpu, &mut ctx);
+                }
+                WindowEvent::CloseRequested => target.exit(),
+                _ => {}
+            };
+        }
+    })
+    .unwrap();
+}
+pub fn main() {
+        {
+            #[cfg(not(target_arch = "wasm32"))]
+            env_logger::init();
+            #[cfg(not(target_arch = "wasm32"))]
+            pollster::block_on(run())
+        };
         
-        console_log::init().expect("could not initialize logger");
-        wasm_bindgen_futures::spawn_local(run(event_loop, window));
-    }
+        {
+            #[cfg(target_arch = "wasm32")]
+            console_log::init().expect("could not initialize logger");
+            #[cfg(target_arch = "wasm32")]
+            wasm_bindgen_futures::spawn_local(run().await);
+        };
 }
