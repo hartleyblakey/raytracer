@@ -1,4 +1,4 @@
-use std::{borrow::Cow};
+use std::{borrow::Cow, collections::HashMap};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
@@ -30,76 +30,14 @@ struct Context {
     frame_uniforms_binding: wgpu::BindGroup,
     frame_uniforms_buffer:  wgpu::Buffer,
     frame_uniforms:         FrameUniforms,
+
+    bg_layout_cache:        BGLayoutCache,
 }
-
-struct BGBuilder<'a> {
-    layout_entries: Vec<wgpu::BindGroupLayoutEntry>,
-    entries:        Vec<wgpu::BindGroupEntry<'a>>,
-}
-
-
-// struct BufferView {
-//     ty: wgpu::BufferBindingType,
-//     dynamic_offset_stride: Option<NonZero<u32>>,
-//     offset: u32,
-//     size: u32
-// }
-
-impl<'a> BGBuilder<'a> {
-    fn new() -> BGBuilder<'a> {
-        BGBuilder {
-            layout_entries: Vec::new(),
-            entries:        Vec::new(),
-        }
-    }
-
-    fn with_buffer(&mut self, buffer: &'a wgpu::Buffer, visibility: wgpu::ShaderStages) -> &mut Self{
-        let ty : wgpu::BufferBindingType = match buffer.usage() {
-            _ if buffer.usage().contains(wgpu::BufferUsages::UNIFORM)  => wgpu::BufferBindingType::Uniform,
-            _ if buffer.usage().contains(wgpu::BufferUsages::STORAGE)  => wgpu::BufferBindingType::Storage { read_only: false },
-            _ => panic!("Invalid buffer usage: expected uniform or storage"),
-        };
-
-        let layout_entry = wgpu::BindGroupLayoutEntry {
-            binding: self.layout_entries.len() as u32,
-            count: None,
-            visibility,
-            ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None }
-        };
-
-        self.layout_entries.push(layout_entry);
-
-        let entry = wgpu::BindGroupEntry {
-            binding: self.entries.len() as u32,
-            resource: wgpu::BindingResource::Buffer(buffer.as_entire_buffer_binding()),
-        };
-        self.entries.push(entry);
-        self
-    }
-
-
-    fn finish(&self, device: &wgpu::Device) -> (wgpu::BindGroup, wgpu::BindGroupLayout) {
-        let layout_desc = wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: self.layout_entries.as_slice(),
-        };
-        let layout = device.create_bind_group_layout(&layout_desc);
-        
-        let desc = wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &layout,
-            entries: self.entries.as_slice(),
-        };
-
-        (device.create_bind_group(&desc), layout)
-    }
-}
-
-
-
 
 impl Context {
     fn init(gpu: &Gpu) -> Context {
+
+        let mut cache = BGLayoutCache::new();
 
         let u_frame_0 = FrameUniforms {
             frame: 0,
@@ -107,24 +45,23 @@ impl Context {
             time: 0.0
         };
 
-        let u_frame_buffer = gpu.new_uniform_buffer(&u_frame_0).raw;
+        let u_frame_buffer = gpu.new_uniform_buffer(&u_frame_0);
 
-        let (u_frame_binding, u_frame_layout) = BGBuilder::new()
-            .with_buffer(&u_frame_buffer, wgpu::ShaderStages::all())
-            .finish(&gpu.device);
+        let u_frame = gpu.new_bind_group()
+            .with_buffer(&u_frame_buffer.view_all(), wgpu::ShaderStages::all())
+            .finish(&mut cache);
 
         let buffer_size_mb = 128;
 
-        let triangles_ssbo =    gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024).raw;
-        let bvh_ssbo =          gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024).raw;
-        let screen_ssbo =       gpu.new_storage_buffer(512 * 512 * 4 * 4).raw;
+        let triangles_ssbo =    gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
+        let bvh_ssbo =          gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
+        let screen_ssbo =       gpu.new_storage_buffer(512 * 512 * 4 * 4);
 
-        let (rt_data_binding, rt_data_layout) = BGBuilder::new()
-            .with_buffer(&triangles_ssbo, wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&bvh_ssbo,       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&screen_ssbo,    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .finish(&gpu.device);
-
+        let rt_data_bg = gpu.new_bind_group()
+            .with_buffer(&triangles_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&screen_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .finish(&mut cache);
 
         // Load the shaders from disk
         let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -134,7 +71,7 @@ impl Context {
 
         let screen_pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&u_frame_layout, &rt_data_layout],
+            bind_group_layouts: &[u_frame.layout.as_ref(), rt_data_bg.layout.as_ref()],
             push_constant_ranges: &[],
         });
 
@@ -165,7 +102,7 @@ impl Context {
 
         let raytrace_pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
             label: Some("raytrace compute pipeline layout"),
-            bind_group_layouts: &[&u_frame_layout, &rt_data_layout],
+            bind_group_layouts: &[&u_frame.layout, &rt_data_bg.layout],
             push_constant_ranges: &[],
         });
 
@@ -182,14 +119,15 @@ impl Context {
         Context {
             screen_pipeline,
             frame_uniforms: FrameUniforms { res: [512, 512], frame: 0, time: 0.0 },
-            frame_uniforms_buffer: u_frame_buffer,
-            frame_uniforms_binding: u_frame_binding,
+            frame_uniforms_buffer: u_frame_buffer.raw,
+            frame_uniforms_binding: u_frame.raw,
             
             raytrace_pipeline,
-            screen_ssbo,
-            bvh_ssbo,
-            triangles_ssbo,
-            rt_data_binding,
+            screen_ssbo: screen_ssbo.raw,
+            bvh_ssbo: bvh_ssbo.raw,
+            triangles_ssbo: triangles_ssbo.raw,
+            rt_data_binding: rt_data_bg.raw,
+            bg_layout_cache: cache,
             
         }
     }

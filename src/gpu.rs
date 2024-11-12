@@ -1,4 +1,4 @@
-use std::{borrow::Cow};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, num::NonZero, rc::Rc};
 use bytemuck::bytes_of;
 use pollster::FutureExt;
 use wgpu::util::DeviceExt;
@@ -28,6 +28,7 @@ pub fn new_window(event_loop: &EventLoop<()>) -> winit::window::Window {
     builder.build(&event_loop).unwrap()
 }
 
+pub type BGLayoutCache = HashMap<BindGroupLayoutEntries, Rc<wgpu::BindGroupLayout>>;
 pub struct Gpu<'a> {
     pub adapter: wgpu::Adapter, 
     pub device:  wgpu::Device, 
@@ -43,14 +44,135 @@ pub struct Buffer {
     pub size: u64,
 }
 
-struct BufferView<'a> {
+impl Buffer {
+    pub fn view<'a>(&'a self, offset: u64, size: u64) -> BufferView<'a> {
+        BufferView {
+            buffer: self,
+            offset,
+            size,
+            read_only: false
+        }
+    }
+
+    pub fn view_all<'a>(&'a self) -> BufferView<'a> {
+        BufferView {
+            buffer: self,
+            offset: 0,
+            size: self.size,
+            read_only: false
+        }
+    }
+
+    pub fn view_read<'a>(&'a self, offset: u64, size: u64) -> BufferView<'a> {
+        BufferView {
+            buffer: self,
+            offset,
+            size,
+            read_only: true
+        }
+    }
+}
+
+pub struct BufferView<'a> {
     pub buffer: &'a Buffer,
     pub offset: u64,
     pub size: u64,
     pub read_only: bool
 }
 
+impl<'a> BufferView<'a> {
+    fn binding(&self) -> wgpu::BufferBinding<'a> {
+        wgpu::BufferBinding {
+            buffer: &self.buffer.raw,
+            offset: self.offset,
+            size: NonZero::<u64>::new(self.size),
+        }
+    }
+}
+
+pub struct BGBuilder<'a> {
+    layout_entries: BindGroupLayoutEntries,
+    entries:        Vec<wgpu::BindGroupEntry<'a>>,
+    device:         &'a wgpu::Device,
+}
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+pub struct BindGroupLayoutEntries {
+    entries: Vec<wgpu::BindGroupLayoutEntry>
+}
+
+pub struct BindGroup {
+    pub raw: wgpu::BindGroup,
+    pub layout: Rc<wgpu::BindGroupLayout>,
+}
+
+
+// struct BufferView {
+//     ty: wgpu::BufferBindingType,
+//     dynamic_offset_stride: Option<NonZero<u32>>,
+//     offset: u32,
+//     size: u32
+// }
+
+impl<'a> BGBuilder<'a> {
+    pub fn with_buffer(&mut self, view: &'a BufferView, visibility: wgpu::ShaderStages) -> &mut Self{
+        let ty : wgpu::BufferBindingType = match view.buffer.raw.usage() {
+            _ if view.buffer.raw.usage().contains(wgpu::BufferUsages::UNIFORM)  => wgpu::BufferBindingType::Uniform,
+            _ if view.buffer.raw.usage().contains(wgpu::BufferUsages::STORAGE)  => wgpu::BufferBindingType::Storage { read_only: false },
+            _ => panic!("Invalid buffer usage: expected uniform or storage"),
+        };
+
+        let layout_entry = wgpu::BindGroupLayoutEntry {
+            binding: self.layout_entries.entries.len() as u32,
+            count: None,
+            visibility,
+            ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None }
+        };
+
+        self.layout_entries.entries.push(layout_entry);
+
+        let entry = wgpu::BindGroupEntry {
+            binding: self.entries.len() as u32,
+            resource: wgpu::BindingResource::Buffer(view.binding()),
+        };
+        self.entries.push(entry);
+        self
+    }
+
+    pub fn finish(&mut self, cache: &mut BGLayoutCache) -> BindGroup {
+        if !cache.contains_key(&self.layout_entries) {
+            let layout_desc = wgpu::BindGroupLayoutDescriptor {
+                label: None,
+                entries: self.layout_entries.entries.as_slice(),
+            };
+            cache.insert(self.layout_entries.clone(), Rc::new(self.device.create_bind_group_layout(&layout_desc)));
+        }
+
+        let layout = cache.get(&self.layout_entries).expect("hash get failed after insertion").clone();
+
+        let desc = wgpu::BindGroupDescriptor {
+            label: None,
+            layout: layout.as_ref(),
+            entries: self.entries.as_slice(),
+        };
+
+        BindGroup {
+            raw: self.device.create_bind_group(&desc),
+            layout
+        }
+    }
+}
+
+
 impl<'a> Gpu<'a> {
+    pub fn new_bind_group(&'a self) -> BGBuilder<'a> {
+        BGBuilder {
+            device: &self.device,
+            entries: Vec::new(),
+            layout_entries: BindGroupLayoutEntries{entries: Vec::new()},
+        }
+    }
+
     pub fn new_uniform_buffer<T: bytemuck::Pod>(&self, val: &T) -> Buffer {
         let size = size_of::<T>() as u64;
         let usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
@@ -132,10 +254,9 @@ impl<'a> Gpu<'a> {
             queue,
             surface,
             surface_config,
-            window
+            window,
         }
     }
-
     fn run(user_event_loop: fn(Event<()>, &winit::event_loop::EventLoopWindowTarget<()>) -> ()) {
 
     }
