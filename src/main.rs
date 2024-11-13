@@ -4,6 +4,7 @@ use winit::{
     event_loop::EventLoop,
     window::Window,
 };
+use glam::{Vec3, Mat3};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -15,6 +16,20 @@ struct FrameUniforms {
 
 mod gpu;
 use gpu::*;
+
+
+struct Tri {
+    vertices: [Vec3; 3],
+    centroid: Vec3,
+}
+
+struct Ray {
+    origin: Vec3,
+    direction: Vec3,
+    t: f32,
+}
+
+
 
 struct Context {
     screen_pipeline:        wgpu::RenderPipeline,

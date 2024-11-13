@@ -16,3 +16,4 @@ wasm-bindgen-futures = "0.4.45"
 wasm-bindgen-test = "0.3"
 web-sys = "0.3.72"
 bytemuck = {version = "1.19.0", features = [ "derive" ] }
+glam = "0.29.2"

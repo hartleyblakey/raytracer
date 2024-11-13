@@ -177,6 +177,13 @@ impl<'a> BGBuilder<'a> {
     }
 }
 
+struct RenderPipelineBuilder<'a> {
+    bind_groups: Vec<&'a BindGroup>,
+    color_targets: Vec<wgpu::ColorTargetState>,
+    depth_stencil: Option<wgpu::DepthStencilState>,
+    module: Option<&'a wgpu::ShaderModule>,
+}
+
 
 impl<'a> Gpu<'a> {
     pub fn new_bind_group(&'a self) -> BGBuilder<'a> {
@@ -196,6 +203,7 @@ impl<'a> Gpu<'a> {
         });
         layout
     }
+
 
     pub fn new_uniform_buffer<T: bytemuck::Pod>(&self, val: &T) -> Buffer {
         let size = size_of::<T>() as u64;
