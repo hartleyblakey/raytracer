@@ -16,7 +16,6 @@ struct FrameUniforms {
 mod gpu;
 use gpu::*;
 
-
 struct Context {
     screen_pipeline:        wgpu::RenderPipeline,
     raytrace_pipeline:      wgpu::ComputePipeline,
@@ -31,13 +30,13 @@ struct Context {
     frame_uniforms_buffer:  wgpu::Buffer,
     frame_uniforms:         FrameUniforms,
 
-    bg_layout_cache:        BGLayoutCache,
+    resources:        ResourceManager,
 }
 
 impl Context {
     fn init(gpu: &Gpu) -> Context {
 
-        let mut cache = BGLayoutCache::new();
+        let mut resources = ResourceManager::new();
 
         let u_frame_0 = FrameUniforms {
             frame: 0,
@@ -49,7 +48,7 @@ impl Context {
 
         let u_frame = gpu.new_bind_group()
             .with_buffer(&u_frame_buffer.view_all(), wgpu::ShaderStages::all())
-            .finish(&mut cache);
+            .finish(&mut resources);
 
         let buffer_size_mb = 128;
 
@@ -61,7 +60,7 @@ impl Context {
             .with_buffer(&triangles_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&screen_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .finish(&mut cache);
+            .finish(&mut resources);
 
         // Load the shaders from disk
         let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -69,11 +68,9 @@ impl Context {
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
         });
 
-        let screen_pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[u_frame.layout.as_ref(), rt_data_bg.layout.as_ref()],
-            push_constant_ranges: &[],
-        });
+        let screen_pipeline_layout = gpu.new_pipeline_layout(
+            &resources, &[&u_frame, &rt_data_bg]
+        );
 
         let surface_capabilities = gpu.surface.get_capabilities(&gpu.adapter);
         let surface_format = surface_capabilities.formats[0];
@@ -100,21 +97,20 @@ impl Context {
             cache: None,
         });
 
-        let raytrace_pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
-            label: Some("raytrace compute pipeline layout"),
-            bind_group_layouts: &[&u_frame.layout, &rt_data_bg.layout],
-            push_constant_ranges: &[],
-        });
+        let raytrace_pipeline_layout = gpu.new_pipeline_layout(
+            &resources, &[&u_frame, &rt_data_bg]
+        );
 
-        let raytrace_pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("raytrace compute pipeline"),
-            module: &shader,
-            layout: Some(&raytrace_pipeline_layout),
-            entry_point: Some("cs_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
+        let raytrace_pipeline = gpu.device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("raytrace compute pipeline"),
+                module: &shader,
+                layout: Some(&raytrace_pipeline_layout),
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            }
+        );
 
         Context {
             screen_pipeline,
@@ -127,8 +123,7 @@ impl Context {
             bvh_ssbo: bvh_ssbo.raw,
             triangles_ssbo: triangles_ssbo.raw,
             rt_data_binding: rt_data_bg.raw,
-            bg_layout_cache: cache,
-            
+            resources,
         }
     }
 }

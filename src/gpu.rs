@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, num::NonZero, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, hash::Hash, num::NonZero, rc::Rc};
 use bytemuck::bytes_of;
 use pollster::FutureExt;
 use wgpu::util::DeviceExt;
@@ -27,8 +27,22 @@ pub fn new_window(event_loop: &EventLoop<()>) -> winit::window::Window {
     }
     builder.build(&event_loop).unwrap()
 }
+pub struct ResourceManager {
+    bind_group_layouts: HashMap<BindGroupLayoutEntries, wgpu::BindGroupLayout>,
+}
+impl ResourceManager {
+    pub fn new() -> Self {
+        Self {
+            bind_group_layouts: HashMap::new(),
+        }
+    }
 
-pub type BGLayoutCache = HashMap<BindGroupLayoutEntries, Rc<wgpu::BindGroupLayout>>;
+    pub fn get_bind_group_layout(&self, layout_entries: &BindGroupLayoutEntries) -> Option<&wgpu::BindGroupLayout> {
+        self.bind_group_layouts.get(layout_entries)
+    }
+
+}
+
 pub struct Gpu<'a> {
     pub adapter: wgpu::Adapter, 
     pub device:  wgpu::Device, 
@@ -103,7 +117,7 @@ pub struct BindGroupLayoutEntries {
 
 pub struct BindGroup {
     pub raw: wgpu::BindGroup,
-    pub layout: Rc<wgpu::BindGroupLayout>,
+    pub entries: BindGroupLayoutEntries,
 }
 
 
@@ -139,26 +153,26 @@ impl<'a> BGBuilder<'a> {
         self
     }
 
-    pub fn finish(&mut self, cache: &mut BGLayoutCache) -> BindGroup {
-        if !cache.contains_key(&self.layout_entries) {
+    pub fn finish<'b>(&mut self, manager: &'b mut ResourceManager) -> BindGroup {
+        if !manager.bind_group_layouts.contains_key(&self.layout_entries) {
             let layout_desc = wgpu::BindGroupLayoutDescriptor {
                 label: None,
                 entries: self.layout_entries.entries.as_slice(),
             };
-            cache.insert(self.layout_entries.clone(), Rc::new(self.device.create_bind_group_layout(&layout_desc)));
+            manager.bind_group_layouts.insert(self.layout_entries.clone(), self.device.create_bind_group_layout(&layout_desc));
         }
 
-        let layout = cache.get(&self.layout_entries).expect("hash get failed after insertion").clone();
+        let layout = manager.get_bind_group_layout(&self.layout_entries).expect("hash get failed after insertion");
 
         let desc = wgpu::BindGroupDescriptor {
             label: None,
-            layout: layout.as_ref(),
+            layout,
             entries: self.entries.as_slice(),
         };
 
         BindGroup {
             raw: self.device.create_bind_group(&desc),
-            layout
+            entries: self.layout_entries.clone()
         }
     }
 }
@@ -171,6 +185,16 @@ impl<'a> Gpu<'a> {
             entries: Vec::new(),
             layout_entries: BindGroupLayoutEntries{entries: Vec::new()},
         }
+    }
+
+    pub fn new_pipeline_layout(&self, resources: &ResourceManager, bind_groups: &[&BindGroup]) -> wgpu::PipelineLayout {
+        let layouts: Vec<&wgpu::BindGroupLayout> = bind_groups.iter().map(|bg| resources.get_bind_group_layout(&bg.entries).unwrap()).collect();
+        let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &layouts,
+            push_constant_ranges: &[],
+        });
+        layout
     }
 
     pub fn new_uniform_buffer<T: bytemuck::Pod>(&self, val: &T) -> Buffer {
@@ -210,6 +234,8 @@ impl<'a> Gpu<'a> {
             usage
         }
     }
+
+
     pub async fn new(window: &'a Window) -> Self {
         let mut size = window.inner_size();
         size.width = size.width.max(1);
