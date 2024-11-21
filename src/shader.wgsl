@@ -1,7 +1,7 @@
 @group(0) @binding(0) var<uniform> globals : FrameUniforms;
 
-@group(1) @binding(0) var<storage, read> triangles : array<Tri, 32>;
-@group(1) @binding(1) var<storage, read> bvh : u32;
+@group(1) @binding(0) var<storage, read_write> triangles : array<Tri, 32>;
+@group(1) @binding(1) var<storage, read_write> bvh : u32;
 @group(1) @binding(2) var<storage, read_write> screen : array<array<vec4f, 512>, 512>;
 
 struct FrameUniforms {
@@ -21,6 +21,11 @@ struct Ray {
     origin: vec3f,
     dir: vec3f,
     idir: vec3f,
+}
+
+struct Hit {
+    t: f32,
+    idx: i32,
 }
 
 // https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
@@ -51,14 +56,17 @@ fn intersect (ray: Ray, tri: Tri) -> f32 {
     }
 }
 
-fn trace(ray: Ray) -> f32 {
-    var t = 999999.0;
+fn trace(_ray: Ray) -> Hit {
+    var ray = _ray;
+    ray.idir = 1.0 / ray.dir;
+    var t = Hit(99999.0, -1);
+
     var hit_idx = -1;
-    for (let i = 0; i < arrayLength(triangles); i++) {
+    for (var i = 0; i < 32; i++) {
         let t2 = intersect(ray, triangles[i]);
-        if (t2 < t) {
-            hit_idx = i;
-            t = t2;
+        if (t2 >= 0.0 && t2 < t.t) {
+            t.idx = i;
+            t.t = t2;
         }
     }
     return t;
@@ -67,8 +75,12 @@ fn trace(ray: Ray) -> f32 {
 @compute
 @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
-    
-    screen[id.x][id.y] = vec4f(0.2, 0.5, 0.6, 1.0);
+    var ray: Ray;
+    ray.dir = vec3f(1.0, 0.0, 0.0);
+    ray.origin = vec3f(0.0, f32(id.x) / 512.0, f32(id.y) / 512.0);
+    let hit = trace(ray);
+
+    screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);
 }
 
 
@@ -85,5 +97,6 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     if (up.x >= 512 || up.y >= 512) {
         return vec4f(0.5, 0.1, 0.1, 1.0);
     }
-    return screen[up.x][up.y];
+    let scr = screen[up.x][up.y];
+    return vec4f(scr.r / scr.a, scr.g / scr.a, scr.b / scr.a, 1.0);
 }

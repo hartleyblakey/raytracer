@@ -1,10 +1,11 @@
 use std::{borrow::Cow, collections::HashMap};
+use rand::random;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
     window::Window,
 };
-use glam::{Vec3, Mat3};
+use glam::{Vec3, Mat3, vec3};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -17,10 +18,29 @@ struct FrameUniforms {
 mod gpu;
 use gpu::*;
 
-
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Tri {
     vertices: [Vec3; 3],
     centroid: Vec3,
+}
+
+impl Tri {
+    fn new(p1: Vec3, p2: Vec3, p3: Vec3) -> Tri {
+        Tri {
+            vertices: [p1, p2, p3],
+            centroid: (p1 + p2 + p3) / 3.0,
+        }
+    }
+
+    fn dummy(c: Vec3, size: f32) -> Tri {
+        
+        Tri::new(
+            c + vec3(random(), random(), random()) * size,
+            c + vec3(random(), random(), random()) * size,
+            c + vec3(random(), random(), random()) * size,
+        )
+    }
 }
 
 struct Ray {
@@ -28,8 +48,6 @@ struct Ray {
     direction: Vec3,
     t: f32,
 }
-
-
 
 struct Context {
     screen_pipeline:        wgpu::RenderPipeline,
@@ -46,6 +64,8 @@ struct Context {
     frame_uniforms:         FrameUniforms,
 
     resources:        ResourceManager,
+
+    triangles: Vec<Tri>,
 }
 
 impl Context {
@@ -127,6 +147,14 @@ impl Context {
             }
         );
 
+        let mut triangles: Vec<Tri> = Vec::new();
+
+        for i in 0..32 {
+            triangles.push(Tri::dummy(vec3(random(), random(), random()), 0.1));
+        };
+
+        gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(triangles.as_slice()));
+
         Context {
             screen_pipeline,
             frame_uniforms: FrameUniforms { res: [512, 512], frame: 0, time: 0.0 },
@@ -139,6 +167,7 @@ impl Context {
             triangles_ssbo: triangles_ssbo.raw,
             rt_data_binding: rt_data_bg.raw,
             resources,
+            triangles
         }
     }
 }
