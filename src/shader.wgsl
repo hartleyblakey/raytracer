@@ -72,15 +72,61 @@ fn trace(_ray: Ray) -> Hit {
     return t;
 }
 
+// Hash without Sine https://www.shadertoy.com/view/4djSRW
+fn hash13(p: vec3f) -> f32
+{
+    var p3  = fract(p * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
+fn hash33(p: vec3f) -> vec3f
+{
+    var p3 = fract(p * vec3f(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yxz+33.33);
+    return fract((p3.xxy + p3.yxx)*p3.zyx);
+}
+
+var<private> seed: f32 = 123141.0;
+fn rand() -> f32 {
+    let old = seed;
+    seed = hash13(vec3f(seed, sin(seed), fract(seed) * 17.0));
+    return hash13(vec3f(old + seed, seed, cos(seed)));
+}
+
+fn sky(dir: vec3f) -> vec3f {
+    return vec3f(1.0, 0.9, 0.6) * max(dot(dir, vec3(0.0, 0.0, 1.0)), 0.0)
+         + vec3f(0.2, 0.4, 0.6) * max(dot(dir, vec3(0.0, 0.0, -1.0)), 0.0);
+}
+
 @compute
 @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     var ray: Ray;
-    ray.dir = vec3f(1.0, 0.0, 0.0);
-    ray.origin = vec3f(0.0, f32(id.x) / 512.0, f32(id.y) / 512.0);
-    let hit = trace(ray);
 
-    screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);
+    var lighting   = vec3f(0);
+    var throughput = vec3f(1);
+
+    seed = hash13(vec3f(globals.time, f32(id.x), f32(id.y)));
+
+    ray.dir = vec3f(1.0, 0.0, 0.0);
+    ray.origin = vec3f(0.0, (f32(id.x) + rand()) / 512.0, (f32(id.y) + rand()) / 512.0);
+
+    for (var i = 0; i < 4; i++) {
+        let hit = trace(ray);
+        if (hit.idx == -1) {
+            lighting += sky(ray.dir) * throughput;
+            break;
+        }
+        throughput *= 0.5;
+        ray.origin += ray.dir * (hit.t - 0.001);
+        ray.dir = normalize(vec3f(rand(), rand(), rand())) - 0.5;
+    }
+
+    let c = lighting * 2.0;
+
+
+    // screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);
+    screen[id.x][id.y] += vec4f(c.r, c.g, c.b, 1.0);
 }
 
 
