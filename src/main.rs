@@ -3,9 +3,9 @@ use rand::random;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
-    window::Window,
 };
-use glam::{vec3, vec4, Mat3, Vec3, Vec4};
+
+use glam::{vec3, vec4, Vec3, Vec4};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -73,7 +73,7 @@ impl Context {
     fn init(gpu: &Gpu) -> Context {
         let mut triangles: Vec<Tri> = Vec::new();
 
-        for i in 0..32 {
+        for _ in 0..32 {
             triangles.push(Tri::dummy(vec3(random(), random(), random()) * 0.125 + 0.5, 1.0));
         };
 
