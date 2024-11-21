@@ -177,14 +177,6 @@ impl<'a> BGBuilder<'a> {
     }
 }
 
-struct RenderPipelineBuilder<'a> {
-    bind_groups: Vec<&'a BindGroup>,
-    color_targets: Vec<wgpu::ColorTargetState>,
-    depth_stencil: Option<wgpu::DepthStencilState>,
-    module: Option<&'a wgpu::ShaderModule>,
-}
-
-
 impl<'a> Gpu<'a> {
     pub fn new_bind_group(&'a self) -> BGBuilder<'a> {
         BGBuilder {
@@ -195,7 +187,10 @@ impl<'a> Gpu<'a> {
     }
 
     pub fn new_pipeline_layout(&self, resources: &ResourceManager, bind_groups: &[&BindGroup]) -> wgpu::PipelineLayout {
-        let layouts: Vec<&wgpu::BindGroupLayout> = bind_groups.iter().map(|bg| resources.get_bind_group_layout(&bg.entries).unwrap()).collect();
+        let layouts: Vec<&wgpu::BindGroupLayout> = bind_groups.iter()
+            .map(|bg| resources.get_bind_group_layout(&bg.entries).unwrap())
+            .collect();
+
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &layouts,
@@ -290,9 +285,6 @@ impl<'a> Gpu<'a> {
             surface_config,
             window,
         }
-    }
-    fn run(user_event_loop: fn(Event<()>, &winit::event_loop::EventLoopWindowTarget<()>) -> ()) {
-
     }
 }
 

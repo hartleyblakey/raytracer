@@ -5,14 +5,16 @@ use winit::{
     event_loop::EventLoop,
     window::Window,
 };
-use glam::{Vec3, Mat3, vec3};
+use glam::{vec3, vec4, Mat3, Vec3, Vec4};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrameUniforms {
     res:    [u32;2],
     frame:  u32,
+    tri_count: u32,
     time:   f32,
+    _pad: f32,
 }
 
 mod gpu;
@@ -21,24 +23,23 @@ use gpu::*;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Tri {
-    vertices: [Vec3; 3],
-    centroid: Vec3,
+    vertices: [Vec4; 3],
 }
 
 impl Tri {
     fn new(p1: Vec3, p2: Vec3, p3: Vec3) -> Tri {
+        let c = (p1 + p2 + p3) / 3.0;
         Tri {
-            vertices: [p1, p2, p3],
-            centroid: (p1 + p2 + p3) / 3.0,
+            vertices: [vec4(p1.x, p1.y, p1.z, c.x), vec4(p2.x, p2.y, p2.z, c.x), vec4(p3.x, p3.y, p3.z, c.x)],
         }
     }
 
     fn dummy(c: Vec3, size: f32) -> Tri {
         
         Tri::new(
-            c + vec3(random(), random(), random()) * size,
-            c + vec3(random(), random(), random()) * size,
-            c + vec3(random(), random(), random()) * size,
+            c + vec3(random(), random(), random()) * size - size * 0.5,
+            c + vec3(random(), random(), random()) * size - size * 0.5,
+            c + vec3(random(), random(), random()) * size - size * 0.5,
         )
     }
 }
@@ -70,13 +71,28 @@ struct Context {
 
 impl Context {
     fn init(gpu: &Gpu) -> Context {
+        let mut triangles: Vec<Tri> = Vec::new();
+
+        for i in 0..32 {
+            triangles.push(Tri::dummy(vec3(random(), random(), random()) * 0.125 + 0.5, 1.0));
+        };
+
+        {
+            let floor_height = 0.0;
+            let s = 100.0;
+            triangles[0] = Tri::new(vec3(-s, -s, floor_height), vec3(-s, s, floor_height), vec3(s, -s, floor_height));
+            triangles[1] = Tri::new(vec3(-s, s, floor_height), vec3(s, s, floor_height), vec3(s, -s, floor_height));
+        }
+
 
         let mut resources = ResourceManager::new();
 
         let u_frame_0 = FrameUniforms {
             frame: 0,
             res: [512, 512],
-            time: 0.0
+            tri_count: triangles.len() as u32,
+            time: 0.0,
+            _pad: 0.0,
         };
 
         let u_frame_buffer = gpu.new_uniform_buffer(&u_frame_0);
@@ -147,17 +163,14 @@ impl Context {
             }
         );
 
-        let mut triangles: Vec<Tri> = Vec::new();
 
-        for i in 0..32 {
-            triangles.push(Tri::dummy(vec3(random(), random(), random()), 0.1));
-        };
+
 
         gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(triangles.as_slice()));
 
         Context {
             screen_pipeline,
-            frame_uniforms: FrameUniforms { res: [512, 512], frame: 0, time: 0.0 },
+            frame_uniforms: u_frame_0,
             frame_uniforms_buffer: u_frame_buffer.raw,
             frame_uniforms_binding: u_frame.raw,
             
@@ -268,6 +281,6 @@ pub fn main() {
             #[cfg(target_arch = "wasm32")]
             console_log::init().expect("could not initialize logger");
             #[cfg(target_arch = "wasm32")]
-            wasm_bindgen_futures::spawn_local(run().await);
+            wasm_bindgen_futures::spawn_local(run());
         };
 }
