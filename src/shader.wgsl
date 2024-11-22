@@ -4,6 +4,9 @@
 @group(1) @binding(1) var<storage, read_write> bvh : u32;
 @group(1) @binding(2) var<storage, read_write> screen : array<array<vec4f, 512>, 512>;
 
+const pi = 3.141592654;
+const sphere_area = 2.0 * pi;
+
 struct FrameUniforms {
     res:    vec2u,
     frame:  u32,
@@ -137,19 +140,24 @@ fn camera_ray(position: vec3f, forward: vec3f, pixel: vec2u) -> Ray {
 }
 
 
-fn shade (hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
+fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
+
+
     let backup = seed;
     seed = u32(hit.idx * 7);
     rand();
 
     var emissive = vec3f(0);
-    var albedo   = rand_color();
+    var albedo   = vec3f(0.5);
 
-    // if (hit.idx % 5 == 0) {
-    //     emissive = rand_color() * 2.0;
-    // } else if (hit.idx % 3 == 0) {
-    //     albedo = rand_color();
-    // }
+    if (hit.idx == -1) {
+        // miss
+        emissive = sky(dir);
+    } else if (hit.idx % 5 == 0) {
+        emissive = rand_color() * 2.0;
+    } else if (hit.idx % 3 == 0) {
+        albedo = rand_color();
+    }
 
     *lighting += *throughput * emissive;
     *throughput *= albedo;
@@ -160,6 +168,8 @@ fn shade (hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, ve
 @compute
 @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
+
+
     var lighting   = vec3f(0);
     var throughput = vec3f(1);
 
@@ -168,12 +178,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     var ray = camera_ray(vec3f(-1.0, 0.5, 0.5), vec3f(1.0, 0.0, 0.0), id.xy);
     for (var i = 0; i < 4; i++) {
         let hit = trace(ray);
+        shade(hit, ray.dir, &throughput, &lighting);
         if (hit.idx == -1) {
-            lighting += sky(ray.dir) * throughput;
             break;
         }
-        shade(hit, &throughput, &lighting);
         ray.origin += ray.dir * (hit.t - 0.001);
+
         ray.dir = rand_sphere();
     }
     // screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);
