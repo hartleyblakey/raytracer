@@ -45,6 +45,26 @@ impl Tri {
     }
 }
 
+struct BvhNode {
+    // child format:
+    // bits 1-0:
+    //  00: nothing
+    //  01: child is a bvh node
+    //  10: child is a triangle
+    // bits 32-2: index of triangles or bvh nodes 
+    children: [u32; 2],
+}
+impl BvhNode {
+    fn new() -> BvhNode {
+        BvhNode {
+            children: [0, 0]
+        }
+    }
+}
+struct Bvh {
+    data: Vec<BvhNode>,
+}
+
 struct Ray {
     origin: Vec3,
     direction: Vec3,
@@ -194,8 +214,7 @@ impl Context {
             &resources, &[&u_frame, &rt_data_bg]
         );
 
-        let surface_capabilities = gpu.surface.get_capabilities(&gpu.adapter);
-        let surface_format = surface_capabilities.formats[0];
+        let surface_format = gpu.surface_config.format;
 
         let screen_pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
@@ -210,7 +229,7 @@ impl Context {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(surface_format.into())],
+                targets: &[Some(surface_format.add_srgb_suffix().into())],
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
@@ -258,7 +277,11 @@ impl Context {
 
 fn frame(gpu: &Gpu, ctx: &mut Context) {
     let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next swap chain texture");
-    let view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let mut surface_view_desc = wgpu::TextureViewDescriptor::default();
+    surface_view_desc.format =  Some(gpu.surface_config.view_formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(gpu.surface_config.format));
+    let view = surface_texture.texture.create_view(&surface_view_desc);
+
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: None,
         });

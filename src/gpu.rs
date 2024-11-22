@@ -273,6 +273,15 @@ impl<'a> Gpu<'a> {
         let mut surface_config = surface
             .get_default_config(&adapter, size.width, size.height)
             .unwrap();
+        let surface_caps = surface.get_capabilities(&adapter);
+
+        // from https://sotrh.github.io/learn-wgpu/beginner/tutorial2-surface/#state-new
+        // get first srgb format, or the default format if no srgb formats are supported
+        surface_config.format = surface_caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(surface_caps.formats[0]);
+        if !surface_config.format.is_srgb() {
+            surface_config.view_formats.push(surface_config.format.add_srgb_suffix());
+        }   
+        
 
         surface.configure(&device, &surface_config);
 
