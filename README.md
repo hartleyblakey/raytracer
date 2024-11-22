@@ -15,7 +15,7 @@ For this project I will write a simple raytracer that can render a static model 
 
 - Week 3
 
-  add texture support
+  investigate texture support, at least add vertex colors.
 
 - Week 4
 
