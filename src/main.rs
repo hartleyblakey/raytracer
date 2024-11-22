@@ -1,4 +1,5 @@
 use std::{borrow::Cow, collections::HashMap};
+use gltf::Gltf;
 use rand::random;
 use winit::{
     event::{Event, WindowEvent},
@@ -69,20 +70,89 @@ struct Context {
     triangles: Vec<Tri>,
 }
 
+fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node) -> Vec<Tri> {
+    let mut triangles: Vec<Tri> = Vec::new();
+    if let Some(mesh) = node.mesh() {
+        for primitive in mesh.primitives() {
+            if primitive.mode() == gltf::mesh::Mode::Triangles {
+            
+                let mut idx = 0;
+                let mut triangle = [Vec3::new(0.0, 0.0, 0.0); 3];
+
+                // TODO: figure out what this lambda that I copied does
+                let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+
+                let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().collect();
+
+                if let Some(indices) = reader.read_indices() {
+                    // indexed mesh
+
+                    let indices = indices.into_u32();
+                    for index in indices {
+                        let position = positions[index as usize];
+                        triangle[idx] = Vec3::from_array(position);
+                        idx += 1;
+                        if idx > 2 {
+                            idx = 0;
+                            triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
+                            // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
+                        }
+                    }
+                }
+                else {
+                    // non-indexed mesh
+
+                    for position in positions {
+                        triangle[idx] = Vec3::from_array(position);
+                        idx += 1;
+                        if idx > 2 {
+                            idx = 0;
+                            triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
+                            // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
+                        }
+                    }
+                }
+
+                
+
+            } else {
+                panic!("Non-triangle primitive");
+            }
+        }
+    }
+    for child in node.children() {
+        triangles.append(&mut get_triangles(&buffers, child));
+    }
+    triangles
+}
+
 impl Context {
     fn init(gpu: &Gpu) -> Context {
         let mut triangles: Vec<Tri> = Vec::new();
+        {
+            let floor_height = -1.0;
+            let s = 300.0;
+            triangles.push(Tri::new(vec3(-s, -s, floor_height), vec3(-s, s, floor_height), vec3(s, -s, floor_height)));
+            triangles.push(Tri::new(vec3(-s, s, floor_height), vec3(s, s, floor_height), vec3(s, -s, floor_height)));
+        }
+        {
+            let (document, buffers, _) = gltf::import("resources/suzanne.glb").unwrap();
+            for scene in document.scenes(){
+                for node in scene.nodes() {
+                    triangles.append(&mut get_triangles(&buffers, node));
+                }
+            }
+            
 
-        for _ in 0..32 {
+        }
+
+        
+
+        for _ in 0..0 {
             triangles.push(Tri::dummy(vec3(random(), random(), random()) * 0.125 + 0.5, 1.0));
         };
 
-        {
-            let floor_height = 0.0;
-            let s = 100.0;
-            triangles[0] = Tri::new(vec3(-s, -s, floor_height), vec3(-s, s, floor_height), vec3(s, -s, floor_height));
-            triangles[1] = Tri::new(vec3(-s, s, floor_height), vec3(s, s, floor_height), vec3(s, -s, floor_height));
-        }
+
 
 
         let mut resources = ResourceManager::new();
