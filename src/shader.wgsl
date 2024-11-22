@@ -60,20 +60,18 @@ fn intersect (ray: Ray, tri: Tri) -> f32 {
     }
 }
 
-fn trace(_ray: Ray) -> Hit {
-    var ray = _ray;
-    ray.idir = 1.0 / ray.dir;
-    var t = Hit(99999.0, -1);
+fn trace(ray: Ray) -> Hit {
 
-    var hit_idx = -1;
+    var closest_hit = Hit(99999.0, -1);
+
     for (var i = 0; i < i32(globals.tri_count); i++) {
-        let t2 = intersect(ray, triangles[i]);
-        if (t2 >= 0.0 && t2 < t.t) {
-            t.idx = i;
-            t.t = t2;
+        let t = intersect(ray, triangles[i]);
+        if (t >= 0.0 && t < closest_hit.t) {
+            closest_hit.idx = i;
+            closest_hit.t = t;
         }
     }
-    return t;
+    return closest_hit;
 }
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
@@ -145,10 +143,10 @@ fn shade (hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, ve
     rand();
 
     var emissive = vec3f(0);
-    var albedo   = vec3f(0.7);
+    var albedo   = rand_color();
 
     // if (hit.idx % 5 == 0) {
-    //     emissive = rand_color();
+    //     emissive = rand_color() * 2.0;
     // } else if (hit.idx % 3 == 0) {
     //     albedo = rand_color();
     // }

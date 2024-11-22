@@ -192,7 +192,7 @@ fn frame(gpu: &Gpu, ctx: &mut Context) {
             label: None,
         });
 
-    let rpassdesc = wgpu::RenderPassDescriptor {
+    let rpass_desc = wgpu::RenderPassDescriptor {
         label: None,
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &view,
@@ -222,7 +222,7 @@ fn frame(gpu: &Gpu, ctx: &mut Context) {
     }
 
     {
-        let mut rpass = encoder.begin_render_pass(&rpassdesc);
+        let mut rpass = encoder.begin_render_pass(&rpass_desc);
         rpass.set_pipeline(&ctx.screen_pipeline);
         rpass.set_bind_group(0, Some(&ctx.frame_uniforms_binding), &[]);
         rpass.set_bind_group(1, Some(&ctx.rt_data_binding), &[]);
