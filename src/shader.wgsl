@@ -68,6 +68,9 @@ fn trace(ray: Ray) -> Hit {
     var closest_hit = Hit(99999.0, -1);
 
     for (var i = 0; i < i32(globals.tri_count); i++) {
+        // if (i % 2 == 0 && i > 0) {
+        //     continue;
+        // }
         let t = intersect(ray, triangles[i]);
         if (t >= 0.0 && t < closest_hit.t) {
             closest_hit.idx = i;
