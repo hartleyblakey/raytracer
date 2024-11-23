@@ -5,7 +5,8 @@
 @group(1) @binding(2) var<storage, read_write> screen : array<array<vec4f, 512>, 512>;
 
 const pi = 3.141592654;
-const sphere_area = 2.0 * pi;
+const hemisphere_area = 2.0 * pi;
+const sphere_area = 4.0 * pi;
 
 struct FrameUniforms {
     res:    vec2u,
@@ -68,9 +69,6 @@ fn trace(ray: Ray) -> Hit {
     var closest_hit = Hit(99999.0, -1);
 
     for (var i = 0; i < i32(globals.tri_count); i++) {
-        // if (i % 2 == 0 && i > 0) {
-        //     continue;
-        // }
         let t = intersect(ray, triangles[i]);
         if (t >= 0.0 && t < closest_hit.t) {
             closest_hit.idx = i;
@@ -101,12 +99,20 @@ fn rand() -> f32 {
 
 // https://math.stackexchange.com/questions/44689/how-to-find-a-random-axis-or-unit-vector-in-3d
 fn rand_sphere() -> vec3f {
-    const pi = 3.141592654;
+    
 
     let theta = rand() * 2.0 * pi;
     let z = rand() * 2.0 - 1.0;
-    let fac = sqrt(1.0 - z * z);
-    return (vec3f(fac * cos(theta), fac * sin(theta), z));
+    let radius = sqrt(1.0 - z * z);
+    return (vec3f(radius * cos(theta), radius * sin(theta), z));
+}
+
+fn rand_hemisphere(normal: vec3f) -> vec3f {
+    var sphere = rand_sphere();
+    if (dot(sphere, normal) < 0.0) {
+        sphere *= -1.0;
+    }
+    return sphere;
 }
 
 fn rand_color() -> vec3f {
@@ -158,7 +164,7 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
         emissive = sky(dir);
     } else if (hit.idx % 5 == 3) {
         emissive = rand_color() * 2.0;
-    } else if (hit.idx % 3 == 0) {
+    } else if (hit.idx % 3 == 1) {
         albedo = rand_color();
     }
 
@@ -186,7 +192,6 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
             break;
         }
         ray.origin += ray.dir * (hit.t - 0.001);
-
         ray.dir = rand_sphere();
     }
     // screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);

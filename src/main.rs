@@ -55,14 +55,21 @@ struct BvhNode {
     children: [u32; 2],
 }
 impl BvhNode {
+    const EMPTY: u32 = 0b00;
+    const NODE: u32 = 0b01;
+    const TRI: u32 = 0b10;
     fn new() -> BvhNode {
         BvhNode {
             children: [0, 0]
         }
     }
+    fn root(&self) -> bool {
+        self.children[0] & 0b11 != Self::NODE && self.children[1] & 0b11 != Self::NODE
+    }
 }
 struct Bvh {
-    data: Vec<BvhNode>,
+    nodes: Vec<BvhNode>,
+    triangles: Vec<Tri>,
 }
 
 struct Ray {
