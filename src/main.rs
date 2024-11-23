@@ -156,15 +156,15 @@ fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node) -> Vec<Tri
 impl Context {
     fn init(gpu: &Gpu) -> Context {
         let mut triangles: Vec<Tri> = Vec::new();
+        // {
+        //     let floor_height = -1.0;
+        //     let s = 300.0;
+        //     triangles.push(Tri::new(vec3(-s, -s, floor_height), vec3(s, -s, floor_height), vec3(0.0, s, floor_height)));
+        //     // triangles.push(Tri::new(vec3(-s, -s, floor_height), vec3(-s, s, floor_height), vec3(s, -s, floor_height)));
+        //     // triangles.push(Tri::new(vec3(-s, s, floor_height), vec3(s, s, floor_height), vec3(s, -s, floor_height)));
+        // }
         {
-            let floor_height = -1.0;
-            let s = 300.0;
-            triangles.push(Tri::new(vec3(-s, -s, floor_height), vec3(s, -s, floor_height), vec3(0.0, s, floor_height)));
-            // triangles.push(Tri::new(vec3(-s, -s, floor_height), vec3(-s, s, floor_height), vec3(s, -s, floor_height)));
-            // triangles.push(Tri::new(vec3(-s, s, floor_height), vec3(s, s, floor_height), vec3(s, -s, floor_height)));
-        }
-        {
-            let (document, buffers, _) = gltf::import_slice(include_bytes!("../resources/suzanne.glb")).unwrap();
+            let (document, buffers, _) = gltf::import_slice(include_bytes!("../resources/simple.glb")).unwrap();
             for scene in document.scenes(){
                 for node in scene.nodes() {
                     triangles.append(&mut get_triangles(&buffers, node));
