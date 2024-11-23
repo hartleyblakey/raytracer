@@ -6,7 +6,7 @@ use winit::{
     event_loop::EventLoop,
 };
 
-use glam::{vec3, vec4, Vec3, Vec4};
+use glam::{vec3, vec4, Mat4, Vec3, Vec4, Vec4Swizzles};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -97,7 +97,9 @@ struct Context {
     triangles: Vec<Tri>,
 }
 
-fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node) -> Vec<Tri> {
+fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack) -> Vec<Tri> {
+    ms.push();
+    ms.apply(&Mat4::from_cols_array_2d(&node.transform().matrix()));
     let mut triangles: Vec<Tri> = Vec::new();
     if let Some(mesh) = node.mesh() {
         for primitive in mesh.primitives() {
@@ -109,7 +111,7 @@ fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node) -> Vec<Tri
                 // TODO: figure out what this lambda that I copied does
                 let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
-                let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().collect();
+                let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().map(|p| ms.top().mul_vec4(Vec4::from_slice(&[p[0], p[1], p[2], 1.0])).xzy().to_array()).collect();
 
                 if let Some(indices) = reader.read_indices() {
                     // indexed mesh
@@ -148,9 +150,37 @@ fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node) -> Vec<Tri
         }
     }
     for child in node.children() {
-        triangles.append(&mut get_triangles(&buffers, child));
+        triangles.append(&mut get_triangles(&buffers, child, ms));
     }
+    ms.pop();
     triangles
+}
+
+struct MatrixStack {
+    stack: Vec<Mat4>,
+}
+
+impl MatrixStack {
+    fn new() -> Self {
+        Self {stack: vec![Mat4::IDENTITY]}
+    }
+    fn top(&mut self) -> &Mat4 {
+        self.stack.last().unwrap()
+    }
+    fn push(&mut self) {
+        self.stack.push(self.stack.last().copied().unwrap());
+    }
+    fn pop(&mut self) {
+        if self.stack.len() > 1 {
+            self.stack.pop();
+        }
+    }
+    fn apply(&mut self, t: &Mat4) {
+        if self.stack.len() == 1 {
+            self.push();
+        }
+        *self.stack.last_mut().unwrap() = self.top().mul_mat4(t);
+    }
 }
 
 impl Context {
@@ -164,10 +194,12 @@ impl Context {
         //     // triangles.push(Tri::new(vec3(-s, s, floor_height), vec3(s, s, floor_height), vec3(s, -s, floor_height)));
         // }
         {
+            let mut ms = MatrixStack::new();
             let (document, buffers, _) = gltf::import_slice(include_bytes!("../resources/simple.glb")).unwrap();
             for scene in document.scenes(){
                 for node in scene.nodes() {
-                    triangles.append(&mut get_triangles(&buffers, node));
+
+                    triangles.append(&mut get_triangles(&buffers, node, &mut ms));
                 }
             }
             

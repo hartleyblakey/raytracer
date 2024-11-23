@@ -126,7 +126,7 @@ fn rand_color() -> vec3f {
 fn sky(dir: vec3f) -> vec3f {
     let sun = normalize(vec3f(0.0, 0.0, 1.0));
     let col = vec3f(1.0, 0.995, 0.992);
-    return col * pow(max(dot(dir, sun), 0.0), 2.0) * 4.5;
+    return col * pow(max(dot(dir, sun), 0.0), 2.0) * 1.5;
     // return vec3f(1.0);
 }
 
@@ -162,7 +162,7 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
     if (hit.idx == -1) {
         // miss
         emissive = sky(dir);
-    } else if (hit.idx % 5 == 3) {
+    } else if (hit.idx % 5 == 2) {
         emissive = rand_color() * 2.0;
     } else if (hit.idx % 3 == 1) {
         albedo = rand_color();
