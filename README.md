@@ -4,6 +4,8 @@
 
 For this project I will write a simple raytracer that can render a static model from a gltf file. I will make a simple bvh to accelerate ray traversal, and would like to support textures.
 
+[The current state of the raytracer is hosted here (requires webgpu)](https://blue.cs.sonoma.edu/~hblakey/CS-375/Final-Project/generated/index.html)
+
 ## Schedule
 
 - Week 1
