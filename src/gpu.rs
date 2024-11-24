@@ -26,6 +26,10 @@ pub fn new_window(event_loop: &EventLoop<()>) -> winit::window::Window {
     }
     builder.build(&event_loop).unwrap()
 }
+
+/// Caches bind group layouts in probably the least efficient way possible
+/// 
+/// Not sure why I made this
 pub struct ResourceManager {
     bind_group_layouts: HashMap<BindGroupLayoutEntries, wgpu::BindGroupLayout>,
 }
@@ -42,6 +46,8 @@ impl ResourceManager {
 
 }
 
+/// Helper struct to hold the core wgpu resources in one place so they are easier 
+/// to construct and pass around
 pub struct Gpu<'a> {
     pub adapter: wgpu::Adapter, 
     pub device:  wgpu::Device, 
@@ -53,8 +59,6 @@ pub struct Gpu<'a> {
 
 pub struct Buffer {
     pub raw: wgpu::Buffer,
-    pub usage: wgpu::BufferUsages,
-    pub size: u64,
 }
 
 impl Buffer {
@@ -71,7 +75,7 @@ impl Buffer {
         BufferView {
             buffer: self,
             offset: 0,
-            size: self.size,
+            size: self.raw.size(),
             read_only: false
         }
     }
@@ -212,8 +216,6 @@ impl<'a> Gpu<'a> {
         self.queue.write_buffer(&buffer, 0, bytes_of(val));
         Buffer {
             raw: buffer,
-            size,
-            usage
         }
     }
 
@@ -232,8 +234,6 @@ impl<'a> Gpu<'a> {
 
         Buffer {
             raw: self.device.create_buffer(&desc),
-            size,
-            usage
         }
     }
 

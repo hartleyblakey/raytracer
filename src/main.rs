@@ -97,9 +97,14 @@ struct Context {
     triangles: Vec<Tri>,
 }
 
-fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack) -> Vec<Tri> {
+fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack, cameras: &mut Vec<Camera>) -> Vec<Tri> {
     ms.push();
     ms.apply(&Mat4::from_cols_array_2d(&node.transform().matrix()));
+
+    if let Some(camera) = node.camera() {
+        cameras.push(Camera::from_gltf(camera, ms.top()));
+    }
+
     let mut triangles: Vec<Tri> = Vec::new();
     if let Some(mesh) = node.mesh() {
         for primitive in mesh.primitives() {
@@ -150,7 +155,7 @@ fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut M
         }
     }
     for child in node.children() {
-        triangles.append(&mut get_triangles(&buffers, child, ms));
+        triangles.append(&mut get_triangles(&buffers, child, ms, cameras));
     }
     ms.pop();
     triangles
@@ -183,6 +188,36 @@ impl MatrixStack {
     }
 }
 
+struct Camera {
+    dir:    Vec3,
+    fovy:   f32,
+    origin: Vec3,
+    focus:  f32,
+}
+
+impl Camera {
+    fn from_gltf(gltf: gltf::Camera, transform: &Mat4) -> Camera {
+        // let dir = transform.to_scale_rotation_translation().1.mul_vec3(vec3(0.0, 0.0, 1.0));
+        let origin = transform.transform_point3(vec3(0.0, 0.0, 0.0));
+        let dir = transform.transform_vector3(vec3(0.0, 0.0, -1.0)).normalize();
+        let fovy = match gltf.projection() {
+            gltf::camera::Projection::Orthographic(orthographic) => {
+                panic!("Orthographic cameras are not supported");
+            },
+            gltf::camera::Projection::Perspective(perspective) => {
+                perspective.yfov()
+            },
+        };
+        let focus = 1.0;
+        Camera {
+            dir,
+            fovy,
+            origin,
+            focus,
+        }
+    }
+}
+
 impl Context {
     fn init(gpu: &Gpu) -> Context {
         let mut triangles: Vec<Tri> = Vec::new();
@@ -195,25 +230,31 @@ impl Context {
         // }
         {
             let mut ms = MatrixStack::new();
+            let mut cameras: Vec<Camera> = Vec::new();
             let (document, buffers, _) = gltf::import_slice(include_bytes!("../resources/simple.glb")).unwrap();
             for scene in document.scenes(){
                 for node in scene.nodes() {
 
-                    triangles.append(&mut get_triangles(&buffers, node, &mut ms));
+                    triangles.append(&mut get_triangles(&buffers, node, &mut ms, &mut cameras));
                 }
             }
-            
+            if cameras.is_empty() {
+                println!("No camera in scene, falling back to default");
+                // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
+                cameras.push(Camera {
+                    dir: vec3(1.0, 0.0, 0.0),
+                    origin: vec3(-3.5, -0.5, 0.5),
+                    fovy: 90.0,
+                    focus: 1.0,
+                })
+            }
 
         }
 
-        
-
-        for _ in 0..0 {
-            triangles.push(Tri::dummy(vec3(random(), random(), random()) * 0.125 + 0.5, 1.0));
-        };
-
-
-
+        // // random triangles
+        // for _ in 0..32 {
+        //     triangles.push(Tri::dummy(vec3(random(), random(), random()) * 0.125 + 0.5, 1.0));
+        // };
 
         let mut resources = ResourceManager::new();
 

@@ -126,7 +126,7 @@ fn rand_color() -> vec3f {
 fn sky(dir: vec3f) -> vec3f {
     let sun = normalize(vec3f(0.0, 0.0, 1.0));
     let col = vec3f(1.0, 0.995, 0.992);
-    return col * pow(max(dot(dir, sun), 0.0), 2.0) * 1.5;
+    return col * pow(max(dot(dir, sun), 0.0), 2.0) * 3.5;
     // return vec3f(1.0);
 }
 
@@ -163,11 +163,11 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
         // miss
         emissive = sky(dir);
     } else if (hit.idx % 5 == 2) {
-        emissive = rand_color() * 2.0;
+        // emissive = rand_color() * 2.0;
     } else if (hit.idx % 3 == 1) {
         albedo = rand_color();
     }
-
+    albedo = rand_color();
     *lighting += *throughput * emissive;
     *throughput *= albedo;
 
@@ -183,8 +183,8 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     var throughput = vec3f(1);
 
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
-
-    var ray = camera_ray(vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0), id.xy);
+    let camera = vec3f(3.0, 3.0, 1.5);
+    var ray = camera_ray(camera, normalize(vec3f(0.0, 0.0, 0.5) - camera), id.xy);
     for (var i = 0; i < 4; i++) {
         let hit = trace(ray);
         shade(hit, ray.dir, &throughput, &lighting);
