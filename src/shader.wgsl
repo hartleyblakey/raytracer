@@ -8,11 +8,24 @@ const pi = 3.141592654;
 const hemisphere_area = 2.0 * pi;
 const sphere_area = 4.0 * pi;
 
+const FORWARD = vec3f(1.0, 0.0, 0.0);
+const UP = vec3f(0.0, 0.0, 1.0);
+const RIGHT = vec3f(0.0, -1.0, 0.0);
+
+struct Camera {
+    dir: vec3f,
+    fovy: f32,
+    origin: vec3f,
+    focus: f32,
+}
+
 struct FrameUniforms {
+    camera: Camera,
     res:    vec2u,
     frame:  u32,
     tri_count: u32,
     time:   f32,
+    reject_hist: u32,
 }
 
 struct Tri {
@@ -130,19 +143,23 @@ fn sky(dir: vec3f) -> vec3f {
     // return vec3f(1.0);
 }
 
-fn camera_ray(position: vec3f, forward: vec3f, pixel: vec2u) -> Ray {
+fn camera_ray(pixel: vec2u) -> Ray {
     var ray: Ray;
-    ray.origin = position;
+
+    ray.origin = globals.camera.origin;
+    let forward = globals.camera.dir;
+    let fov_factor = (cos(globals.camera.fovy / 2.0) / sin(globals.camera.fovy / 2.0)) * 2.0;
+
     let unreachable = vec3(0.0, 0.0, 1.0);
-    let right = cross(forward, unreachable);
-    let up = cross(right, forward);
-    var pixel_pos = position + forward;
+    let right = normalize(cross(forward, unreachable));
+    let up = normalize(cross(right, forward));
+    var pixel_pos = ray.origin + forward;
 
     let aa_pixel = vec2f(pixel) + vec2f(rand(), rand());
-
-    pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5);
-    pixel_pos += up * (0.5 - aa_pixel.y / f32(globals.res.y));
-    ray.dir = normalize(pixel_pos - position);
+    
+    pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor;
+    pixel_pos += up * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
+    ray.dir = normalize(pixel_pos - ray.origin);
     ray.idir = 1.0 / ray.dir;
 
     return ray;
@@ -183,8 +200,8 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     var throughput = vec3f(1);
 
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
-    let camera = vec3f(3.0, 3.0, 1.5);
-    var ray = camera_ray(camera, normalize(vec3f(0.0, 0.0, 0.5) - camera), id.xy);
+
+    var ray = camera_ray(id.xy);
     for (var i = 0; i < 4; i++) {
         let hit = trace(ray);
         shade(hit, ray.dir, &throughput, &lighting);
@@ -194,8 +211,14 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
         ray.origin += ray.dir * (hit.t - 0.001);
         ray.dir = rand_sphere();
     }
+
     // screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);
-    screen[id.x][id.y] += vec4f(lighting, 1.0);
+
+    if (globals.reject_hist == 1) {
+        screen[id.x][id.y] = vec4f(lighting, 1.0);
+    } else {
+        screen[id.x][id.y] += vec4f(lighting, 1.0);
+    }
 }
 
 

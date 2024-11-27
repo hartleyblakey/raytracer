@@ -1,22 +1,40 @@
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::{HashMap, HashSet}};
 use gltf::Gltf;
 use rand::random;
 use winit::{
-    event::{Event, WindowEvent},
-    event_loop::EventLoop,
+    dpi::PhysicalPosition, event::{DeviceEvent, ElementState, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}
 };
 
-use glam::{vec3, vec4, Mat4, Vec3, Vec4, Vec4Swizzles};
+use glam::{vec2, vec3, vec4, Mat3, Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
+
+// arbitrary and probably not ideal but im not going to keep thinking about it
+// right handed
+const FORWARD: Vec3 = vec3(1.0, 0.0, 0.0);
+const UP: Vec3 = vec3(0.0, 0.0, 1.0);
+const RIGHT: Vec3 = vec3(0.0, -1.0, 0.0);
+const YAW_PITCH_ROLL: glam::EulerRot = glam::EulerRot::ZYX;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrameUniforms {
+    camera: GpuCamera,
     res:    [u32;2],
     frame:  u32,
     tri_count: u32,
     time:   f32,
-    _pad: f32,
+    reject_hist: u32,
+    _pad: [u32; 2],
 }
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuCamera {
+    dir:    Vec3,
+    fovy:   f32,
+    origin: Vec3,
+    focus:  f32,
+}
+
 
 mod gpu;
 use gpu::*;
@@ -78,6 +96,14 @@ struct Ray {
     t: f32,
 }
 
+struct InputState {
+    keys: HashSet<PhysicalKey>,
+    mouse_x: f64,
+    mouse_y: f64,
+    lmb: bool,
+    rmb: bool,
+    scroll: f64,
+}
 struct Context {
     screen_pipeline:        wgpu::RenderPipeline,
     raytrace_pipeline:      wgpu::ComputePipeline,
@@ -95,6 +121,8 @@ struct Context {
     resources:        ResourceManager,
 
     triangles: Vec<Tri>,
+
+    camera: Camera,
 }
 
 fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack, cameras: &mut Vec<Camera>) -> Vec<Tri> {
@@ -188,35 +216,169 @@ impl MatrixStack {
     }
 }
 
+
+#[derive(Copy, Clone)]
 struct Camera {
-    dir:    Vec3,
-    fovy:   f32,
-    origin: Vec3,
-    focus:  f32,
+    pitch: f32,
+    yaw: f32,
+    roll: f32,
+    position: Vec3,
+    focus: f32,
+    speed: f32,
+    fovy: f32,
+    aspect: Option<f32>,
+    moved: bool,
+    lmb_last: bool,
+    rmb_last: bool,
 }
 
 impl Camera {
+
+    fn forward(&self) -> Vec3 {
+        self.rot().mul_vec3(FORWARD).normalize()
+    }
+
+    fn up(&self) -> Vec3 {
+        self.rot().mul_vec3(UP)
+    }
+
+    fn right(&self) -> Vec3 {
+        self.rot().mul_vec3(RIGHT)
+    }
+
+    fn rot(&self) -> Mat3{
+        Mat3::from_euler(YAW_PITCH_ROLL, self.yaw, -self.pitch, self.roll)
+    }
+
+    fn to_gpu(&self) -> GpuCamera {
+        GpuCamera {
+            dir: self.forward(),
+            fovy: self.fovy,
+            origin: self.position,
+            focus: self.focus
+        }
+    }
+    
+    fn check_moved(&mut self) -> bool {
+        let tmp = self.moved;
+        self.moved = false;
+        tmp
+    }
+
+    fn rotate(&mut self, pitch: f32, yaw: f32) {
+        self.moved = true;
+        self.pitch += pitch;
+        self.yaw += yaw;
+        self.pitch = self.pitch.clamp(-f32::to_radians(80.0), f32::to_radians(80.0));
+    }
+
+    fn translate(&mut self, delta: Vec3) {
+        self.moved = true;
+        self.position += delta;
+    }
+
+    fn zoom(&mut self, delta: f32) {
+        self.moved = true;
+        self.fovy += delta;
+        self.fovy = self.fovy.clamp(f32::to_radians(1.0), f32::to_radians(179.0));
+    }
+
+    fn set_pos(&mut self, position: Vec3) {
+        self.moved = true;
+        self.position = position;
+    }
+
+    fn update(&mut self, input: &mut InputState, dt: f32) {
+        use KeyCode::*;
+        let s = if input.keys.contains(&PhysicalKey::Code(ControlLeft)) {
+            0.1
+        } else {
+            1.0
+        };
+        for key in input.keys.iter() {
+            if let PhysicalKey::Code(code) = key {
+                let forward = self.forward();
+                let forward = vec3(forward.x, forward.y, 0.0).normalize();
+                match code {
+                    KeyW =>      self.translate( forward      * self.speed * dt * s),
+                    KeyS =>      self.translate(-forward      * self.speed * dt * s),
+                    KeyA =>      self.translate(-self.right() * self.speed * dt * s),
+                    KeyD =>      self.translate( self.right() * self.speed * dt * s),
+                    ShiftLeft => self.translate(-UP           * self.speed * dt * s),
+                    Space =>     self.translate( UP           * self.speed * dt * s),
+                    _ => ()
+                }
+            }
+        }
+
+        // cancel camera rotation on first frame
+        if input.rmb && !self.rmb_last {
+            input.mouse_x = 0.0;
+            input.mouse_y = 0.0;
+        }
+
+        if input.rmb && (input.mouse_x != 0.0 || input.mouse_y != 0.0) {
+            self.rotate(-input.mouse_y as f32 * 0.003, -input.mouse_x as f32 * 0.003);
+            
+            input.mouse_x = 0.0;
+            input.mouse_y = 0.0;
+        }
+
+        if input.scroll != 0.0 {
+            self.zoom((input.scroll * 0.1) as f32);
+            input.scroll = 0.0;
+        }
+
+        self.rmb_last = input.rmb;
+        self.lmb_last = input.lmb;
+    }
+
+    fn default() -> Camera {
+        Camera {
+            pitch: f32::to_radians(-45.0),
+            yaw: f32::to_radians(0.0),
+            roll: 0.0,
+            position: vec3(0.0, 0.0, 0.0) - FORWARD * 5.0 + UP * 5.0,
+            focus: 1.0,
+            speed: 10.0,
+            fovy: f32::to_radians(90.0),
+            aspect: None,
+            moved: false,
+            lmb_last: true,
+            rmb_last: true,
+        }
+    }
+
     fn from_gltf(gltf: gltf::Camera, transform: &Mat4) -> Camera {
         // let dir = transform.to_scale_rotation_translation().1.mul_vec3(vec3(0.0, 0.0, 1.0));
         let origin = transform.transform_point3(vec3(0.0, 0.0, 0.0));
-        let dir = transform.transform_vector3(vec3(0.0, 0.0, -1.0)).normalize();
-        let fovy = match gltf.projection() {
+        let (_, rot, _) = transform.to_scale_rotation_translation();
+        let (yaw, pitch, roll) = rot.to_euler(YAW_PITCH_ROLL);
+
+        let (fovy, aspect) = match gltf.projection() {
             gltf::camera::Projection::Orthographic(orthographic) => {
                 panic!("Orthographic cameras are not supported");
             },
             gltf::camera::Projection::Perspective(perspective) => {
-                perspective.yfov()
+                (perspective.yfov(), perspective.aspect_ratio())
             },
         };
+        
         let focus = 1.0;
-        Camera {
-            dir,
-            fovy,
-            origin,
-            focus,
-        }
+        let mut camera = Camera::default();
+        camera.position = origin;
+        camera.pitch = pitch;
+        camera.yaw = yaw;
+        camera.roll = roll;
+        camera.focus = focus;
+        camera.speed = 5.0;
+        camera.fovy = fovy;
+        camera.aspect = aspect;
+
+        camera
     }
 }
+
 
 impl Context {
     fn init(gpu: &Gpu) -> Context {
@@ -228,9 +390,9 @@ impl Context {
         //     // triangles.push(Tri::new(vec3(-s, -s, floor_height), vec3(-s, s, floor_height), vec3(s, -s, floor_height)));
         //     // triangles.push(Tri::new(vec3(-s, s, floor_height), vec3(s, s, floor_height), vec3(s, -s, floor_height)));
         // }
+        let mut cameras: Vec<Camera> = Vec::new();
         {
             let mut ms = MatrixStack::new();
-            let mut cameras: Vec<Camera> = Vec::new();
             let (document, buffers, _) = gltf::import_slice(include_bytes!("../resources/simple.glb")).unwrap();
             for scene in document.scenes(){
                 for node in scene.nodes() {
@@ -241,12 +403,7 @@ impl Context {
             if cameras.is_empty() {
                 println!("No camera in scene, falling back to default");
                 // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
-                cameras.push(Camera {
-                    dir: vec3(1.0, 0.0, 0.0),
-                    origin: vec3(-3.5, -0.5, 0.5),
-                    fovy: 90.0,
-                    focus: 1.0,
-                })
+                cameras.push(Camera::default());
             }
 
         }
@@ -263,7 +420,9 @@ impl Context {
             res: [512, 512],
             tri_count: triangles.len() as u32,
             time: 0.0,
-            _pad: 0.0,
+            reject_hist: 1,
+            _pad: [0; 2],
+            camera: cameras[0].to_gpu(),
         };
 
         let u_frame_buffer = gpu.new_uniform_buffer(&u_frame_0);
@@ -350,7 +509,8 @@ impl Context {
             triangles_ssbo: triangles_ssbo.raw,
             rt_data_binding: rt_data_bg.raw,
             resources,
-            triangles
+            triangles,
+            camera: cameras[0]
         }
     }
 }
@@ -381,10 +541,13 @@ fn frame(gpu: &Gpu, ctx: &mut Context) {
         occlusion_query_set: None,
     };
 
+    // ctx.camera.rotate(f32::to_radians(0.0), f32::to_radians(5.0));
 
     ctx.frame_uniforms.frame += 1;
     ctx.frame_uniforms.time += 1.0 / 60.0; // hack
-
+    ctx.frame_uniforms.camera = ctx.camera.to_gpu();
+    ctx.frame_uniforms.reject_hist = ctx.camera.check_moved() as u32;
+    
     gpu.queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
     {
@@ -412,34 +575,82 @@ async fn run() {
     let window = new_window(&event_loop);
     let mut gpu = Gpu::new(&window).await;
     let mut ctx = Context::init(&gpu);
+    let mut input = InputState {
+        keys: HashSet::new(),
+        mouse_x: 0.0,
+        mouse_y: 0.0,
+        scroll: 0.0,
+        lmb: false,
+        rmb: false,
+    };
+    let mut this_frame = std::time::Instant::now();
+    let mut last_frame = std::time::Instant::now();
     event_loop.run(
     move |event, target| {
+        match event {
+            Event::DeviceEvent {
+                event: DeviceEvent::MouseMotion{ delta, },
+                .. // We're not using device_id currently
+            } => {
+                input.mouse_x += delta.0;
+                input.mouse_y += delta.1;
+            },
+            Event::WindowEvent { window_id, event } => {
+                match event {
+                    WindowEvent::Resized(new_size) => {
+                        // Reconfigure the surface with the new size
+                        gpu.surface_config.width = new_size.width.max(1);
+                        gpu.surface_config.height = new_size.height.max(1);
+                        gpu.surface_config.width = gpu.surface_config.width.min(4096);
+                        gpu.surface_config.height = gpu.surface_config.height.min(4096);
+    
+                        gpu.surface.configure(&gpu.device, &gpu.surface_config);
+                        // On macos the window needs to be redrawn manually after resizing
+                        gpu.window.request_redraw();
+                    }
 
-        if let Event::WindowEvent {
-            window_id: _,
-            event,
-        } = event
-        {
-            match event {
-                WindowEvent::Resized(new_size) => {
-                    // Reconfigure the surface with the new size
-                    gpu.surface_config.width = new_size.width.max(1);
-                    gpu.surface_config.height = new_size.height.max(1);
-                    gpu.surface_config.width = gpu.surface_config.width.min(4096);
-                    gpu.surface_config.height = gpu.surface_config.height.min(4096);
+                    WindowEvent::RedrawRequested => {
+                        this_frame = std::time::Instant::now();
+                        gpu.window.request_redraw();
+                        let dt = (this_frame - last_frame).as_secs_f32();
+                        ctx.camera.update(&mut input, dt);
+                        frame(&gpu, &mut ctx);
+                        last_frame = this_frame;
+                    },
+                    WindowEvent::MouseInput { device_id, state, button } => {
+                        match button {
+                            MouseButton::Left =>  input.lmb = state.is_pressed(),
+                            MouseButton::Right => input.rmb = state.is_pressed(),
+                            _ => (),
+                        }
+                    }
+                    WindowEvent::MouseWheel { device_id, delta, phase } => {
+                        match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => input.scroll += y as f64,
+                            winit::event::MouseScrollDelta::PixelDelta(physical_position) => input.scroll += physical_position.y,
+                        }
+                    }
+                    WindowEvent::CloseRequested => target.exit(),
+                    WindowEvent::KeyboardInput { device_id, event, is_synthetic } => {
+                        
+                        match event.physical_key {
+                            PhysicalKey::Code(code) => {
+                                if event.state.is_pressed() {
+                                    input.keys.insert(PhysicalKey::Code(code));
+                                } else {
+                                    input.keys.remove(&PhysicalKey::Code(code));
+                                }
+                            }
+                            _ => ()
+                        }
+                    },
+                    _ => {}
+                };
+            }
 
-                    gpu.surface.configure(&gpu.device, &gpu.surface_config);
-                    // On macos the window needs to be redrawn manually after resizing
-                    gpu.window.request_redraw();
-                }
-                WindowEvent::RedrawRequested => {
-                    gpu.window.request_redraw();
-                    frame(&gpu, &mut ctx);
-                }
-                WindowEvent::CloseRequested => target.exit(),
-                _ => {}
-            };
+            _ => (),
         }
+
     })
     .unwrap();
 }
