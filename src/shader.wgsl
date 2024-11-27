@@ -19,14 +19,46 @@ struct Camera {
     focus: f32,
 }
 
+struct PointLight {
+    position: vec4f,
+    intensity: vec4f,
+}
+
+struct DirectionalLight {
+    direction: vec4f,
+    intensity: vec4f,
+}
+
+struct Scene {
+    point_lights: array<PointLight, 12>,
+    directional_lights: array<DirectionalLight, 4>,
+    camera:   Camera,
+    tri_count: u32,
+    num_point_lights: u32,
+    num_directional_lights: u32,
+}
+
 struct FrameUniforms {
-    camera: Camera,
+    scene: Scene,
     res:    vec2u,
     frame:  u32,
-    tri_count: u32,
     time:   f32,
     reject_hist: u32,
 }
+
+// struct FrameUniforms {
+//     camera: Camera,
+//     res:    vec2u,
+//     frame:  u32,
+//     tri_count: u32,
+//     time:   f32,
+//     reject_hist: u32,
+//     num_point_lights: u32,
+//     num_directional_lights: u32,
+//     point_lights: array<PointLight, 12>,
+//     directional_lights: array<DirectionalLight, 4>,
+// }
+
 
 struct Tri {
     d0: vec4f,
@@ -81,7 +113,7 @@ fn trace(ray: Ray) -> Hit {
 
     var closest_hit = Hit(99999.0, -1);
 
-    for (var i = 0; i < i32(globals.tri_count); i++) {
+    for (var i = 0; i < i32(globals.scene.tri_count); i++) {
         let t = intersect(ray, triangles[i]);
         if (t >= 0.0 && t < closest_hit.t) {
             closest_hit.idx = i;
@@ -146,9 +178,9 @@ fn sky(dir: vec3f) -> vec3f {
 fn camera_ray(pixel: vec2u) -> Ray {
     var ray: Ray;
 
-    ray.origin = globals.camera.origin;
-    let forward = globals.camera.dir;
-    let fov_factor = (cos(globals.camera.fovy / 2.0) / sin(globals.camera.fovy / 2.0)) * 2.0;
+    ray.origin = globals.scene.camera.origin;
+    let forward = globals.scene.camera.dir;
+    let fov_factor = (cos(globals.scene.camera.fovy / 2.0) / sin(globals.scene.camera.fovy / 2.0)) * 2.0;
 
     let unreachable = vec3(0.0, 0.0, 1.0);
     let right = normalize(cross(forward, unreachable));

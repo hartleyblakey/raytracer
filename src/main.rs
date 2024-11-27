@@ -6,7 +6,7 @@ use winit::{
 };
 
 use glam::{vec2, vec3, vec4, Mat3, Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
-
+use web_time::{Instant, SystemTime};
 mod input;
 use input::*;
 
@@ -14,20 +14,33 @@ use input::*;
 // right handed
 
 
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrameUniforms {
-    camera: GpuCamera,
+    scene: GpuSceneUniform,
     res:    [u32;2],
     frame:  u32,
-    tri_count: u32,
     time:   f32,
     reject_hist: u32,
-    _pad: [u32; 2],
+    _pad: [u32; 3]
+
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct PointLight {
+    position: Vec4,
+    intensity: Vec4,
 }
 
 
-
+#[repr(C)]
+#[derive(Default, Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct DirectionalLight {
+    direction: Vec4,
+    intensity: Vec4,
+}
 
 mod gpu;
 use gpu::*;
@@ -105,73 +118,7 @@ struct Context {
 
     resources:        ResourceManager,
 
-    triangles: Vec<Tri>,
-
-    camera: Camera,
-}
-
-fn get_triangles(buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack, cameras: &mut Vec<Camera>) -> Vec<Tri> {
-    ms.push();
-    ms.apply(&Mat4::from_cols_array_2d(&node.transform().matrix()));
-
-    if let Some(camera) = node.camera() {
-        cameras.push(Camera::from_gltf(camera, ms.top()));
-    }
-
-    let mut triangles: Vec<Tri> = Vec::new();
-    if let Some(mesh) = node.mesh() {
-        for primitive in mesh.primitives() {
-            if primitive.mode() == gltf::mesh::Mode::Triangles {
-            
-                let mut idx = 0;
-                let mut triangle = [Vec3::new(0.0, 0.0, 0.0); 3];
-
-                // TODO: figure out what this lambda that I copied does
-                let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-
-                let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().map(|p| ms.top().mul_vec4(Vec4::from_slice(&[p[0], p[1], p[2], 1.0])).xzy().to_array()).collect();
-
-                if let Some(indices) = reader.read_indices() {
-                    // indexed mesh
-
-                    let indices = indices.into_u32();
-                    for index in indices {
-                        let position = positions[index as usize];
-                        triangle[idx] = Vec3::from_array(position);
-                        idx += 1;
-                        if idx > 2 {
-                            idx = 0;
-                            triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
-                            // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
-                        }
-                    }
-                }
-                else {
-                    // non-indexed mesh
-
-                    for position in positions {
-                        triangle[idx] = Vec3::from_array(position);
-                        idx += 1;
-                        if idx > 2 {
-                            idx = 0;
-                            triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
-                            // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
-                        }
-                    }
-                }
-
-                
-
-            } else {
-                panic!("Non-triangle primitive");
-            }
-        }
-    }
-    for child in node.children() {
-        triangles.append(&mut get_triangles(&buffers, child, ms, cameras));
-    }
-    ms.pop();
-    triangles
+    scene: FlatScene,
 }
 
 struct MatrixStack {
@@ -201,51 +148,142 @@ impl MatrixStack {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuSceneUniform {
+    point_lights: [PointLight; 12],
+    directional_lights: [DirectionalLight; 4],
+    camera: GpuCamera,
+    tri_count: u32,
+    num_point_lights: u32,
+    num_directional_lights: u32,
+    _pad: u32,
+}
 
+#[derive(Default)]
+struct FlatScene {
+    triangles: Vec<Tri>,
+    cameras:   Vec<Camera>,
+    point_lights: Vec<PointLight>,
+    directional_lights: Vec<DirectionalLight>,
+}
+
+impl FlatScene {
+    fn add_gltf_bytes(&mut self, bytes: &[u8]) {
+        let (document, buffers, _) = gltf::import_slice(include_bytes!("../resources/simple.glb")).unwrap();
+        let mut ms = MatrixStack::new();
+        for scene in document.scenes(){
+            for node in scene.nodes() {
+                self.add_gltf_node(&buffers, node, &mut ms);
+            }
+        }
+    }   
+
+    fn add_gltf_node(&mut self, buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack) {
+        ms.push();
+        ms.apply(&Mat4::from_cols_array_2d(&node.transform().matrix()));
+        
+        if let Some(camera) = node.camera() {
+            self.cameras.push(Camera::from_gltf(camera, ms.top()));
+        }
+    
+        if let Some(mesh) = node.mesh() {
+            for primitive in mesh.primitives() {
+                if primitive.mode() == gltf::mesh::Mode::Triangles {
+                
+                    let mut idx = 0;
+                    let mut triangle = [Vec3::new(0.0, 0.0, 0.0); 3];
+    
+                    // TODO: figure out what this lambda that I copied does
+                    let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+    
+                    let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().map(|p| ms.top().mul_vec4(Vec4::from_slice(&[p[0], p[1], p[2], 1.0])).xzy().to_array()).collect();
+    
+                    if let Some(indices) = reader.read_indices() {
+                        // indexed mesh
+    
+                        let indices = indices.into_u32();
+                        for index in indices {
+                            let position = positions[index as usize];
+                            triangle[idx] = Vec3::from_array(position);
+                            idx += 1;
+                            if idx > 2 {
+                                idx = 0;
+                                self.triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
+                                // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
+                            }
+                        }
+                    }
+                    else {
+                        // non-indexed mesh
+    
+                        for position in positions {
+                            triangle[idx] = Vec3::from_array(position);
+                            idx += 1;
+                            if idx > 2 {
+                                idx = 0;
+                                self.triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
+                                // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
+                            }
+                        }
+                    }
+                } else {
+                    panic!("Non-triangle primitive");
+                }
+            }
+        }
+
+        for child in node.children() {
+            self.add_gltf_node(buffers, child, ms);
+        }
+
+        ms.pop();
+    }
+
+    fn to_gpu(&self) -> GpuSceneUniform {
+        let mut point_lights = [PointLight::default(); 12];
+        let mut directional_lights = [DirectionalLight::default(); 4];
+
+        for i in 0..self.point_lights.len().min(point_lights.len()) {
+            point_lights[i] = self.point_lights[i];
+        }
+
+        for i in 0..self.directional_lights.len().min(directional_lights.len()) {
+            directional_lights[i] = self.directional_lights[i];
+        }
+
+        GpuSceneUniform {
+            _pad: 0,
+            camera: self.cameras[0].to_gpu(),
+            point_lights,
+            directional_lights,
+            num_directional_lights: self.directional_lights.len() as u32,
+            num_point_lights: self.point_lights.len() as u32,
+            tri_count: self.triangles.len() as u32,
+        }
+    }
+}
 
 impl Context {
     fn init(gpu: &Gpu) -> Context {
-        let mut triangles: Vec<Tri> = Vec::new();
-        // {
-        //     let floor_height = -1.0;
-        //     let s = 300.0;
-        //     triangles.push(Tri::new(vec3(-s, -s, floor_height), vec3(s, -s, floor_height), vec3(0.0, s, floor_height)));
-        //     // triangles.push(Tri::new(vec3(-s, -s, floor_height), vec3(-s, s, floor_height), vec3(s, -s, floor_height)));
-        //     // triangles.push(Tri::new(vec3(-s, s, floor_height), vec3(s, s, floor_height), vec3(s, -s, floor_height)));
-        // }
-        let mut cameras: Vec<Camera> = Vec::new();
-        {
-            let mut ms = MatrixStack::new();
-            let (document, buffers, _) = gltf::import_slice(include_bytes!("../resources/simple.glb")).unwrap();
-            for scene in document.scenes(){
-                for node in scene.nodes() {
+        let mut scene = FlatScene::default();
+        scene.add_gltf_bytes(include_bytes!("../resources/simple_with_camera.glb"));
 
-                    triangles.append(&mut get_triangles(&buffers, node, &mut ms, &mut cameras));
-                }
-            }
-            if cameras.is_empty() {
-                println!("No camera in scene, falling back to default");
-                // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
-                cameras.push(Camera::default());
-            }
-
+        if scene.cameras.is_empty() {
+            println!("No camera in scene, falling back to default");
+            // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
+            scene.cameras.push(Camera::default());
         }
-
-        // // random triangles
-        // for _ in 0..32 {
-        //     triangles.push(Tri::dummy(vec3(random(), random(), random()) * 0.125 + 0.5, 1.0));
-        // };
 
         let mut resources = ResourceManager::new();
 
         let u_frame_0 = FrameUniforms {
+            scene: scene.to_gpu(),
             frame: 0,
             res: [512, 512],
-            tri_count: triangles.len() as u32,
             time: 0.0,
             reject_hist: 1,
-            _pad: [0; 2],
-            camera: cameras[0].to_gpu(),
+            _pad: [0; 3],
         };
 
         let u_frame_buffer = gpu.new_uniform_buffer(&u_frame_0);
@@ -315,10 +353,11 @@ impl Context {
             }
         );
 
-        gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(triangles.as_slice()));
+        gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(scene.triangles.as_slice()));
 
         Context {
             screen_pipeline,
+
             frame_uniforms: u_frame_0,
             frame_uniforms_buffer: u_frame_buffer.raw,
             frame_uniforms_binding: u_frame.raw,
@@ -329,8 +368,7 @@ impl Context {
             triangles_ssbo: triangles_ssbo.raw,
             rt_data_binding: rt_data_bg.raw,
             resources,
-            triangles,
-            camera: cameras[0]
+            scene,
         }
     }
 }
@@ -363,10 +401,11 @@ fn frame(gpu: &Gpu, ctx: &mut Context) {
 
     // ctx.camera.rotate(f32::to_radians(0.0), f32::to_radians(5.0));
 
+    // TODO: fix time and camera situation
     ctx.frame_uniforms.frame += 1;
     ctx.frame_uniforms.time += 1.0 / 60.0; // hack
-    ctx.frame_uniforms.camera = ctx.camera.to_gpu();
-    ctx.frame_uniforms.reject_hist = ctx.camera.check_moved() as u32;
+    ctx.frame_uniforms.scene.camera = ctx.scene.cameras[0].to_gpu();
+    ctx.frame_uniforms.reject_hist = ctx.scene.cameras[0].check_moved() as u32;
     
     gpu.queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
@@ -403,8 +442,8 @@ async fn run() {
         lmb: false,
         rmb: false,
     };
-    let mut this_frame = std::time::Instant::now();
-    let mut last_frame = std::time::Instant::now();
+    let mut this_frame = Instant::now();
+    let mut last_frame = Instant::now();
     event_loop.run(
     move |event, target| {
         match event {
@@ -430,10 +469,10 @@ async fn run() {
                     }
 
                     WindowEvent::RedrawRequested => {
-                        this_frame = std::time::Instant::now();
+                        this_frame = Instant::now();
                         gpu.window.request_redraw();
                         let dt = (this_frame - last_frame).as_secs_f32();
-                        ctx.camera.update(&mut input, dt);
+                        ctx.scene.cameras[0].update(&mut input, dt);
                         frame(&gpu, &mut ctx);
                         last_frame = this_frame;
                     },
@@ -446,8 +485,8 @@ async fn run() {
                     }
                     WindowEvent::MouseWheel { device_id, delta, phase } => {
                         match delta {
-                            winit::event::MouseScrollDelta::LineDelta(_, y) => input.scroll += y as f64,
-                            winit::event::MouseScrollDelta::PixelDelta(physical_position) => input.scroll += physical_position.y,
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => input.scroll += y as f64 / 2.0,
+                            winit::event::MouseScrollDelta::PixelDelta(physical_position) => input.scroll += physical_position.y / 128.0,
                         }
                     }
                     WindowEvent::CloseRequested => target.exit(),
