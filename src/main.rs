@@ -1,6 +1,10 @@
-use std::{borrow::Cow, collections::{HashMap, HashSet}};
+use std::{borrow::Cow, collections::{HashMap, HashSet}, mem::swap, str::FromStr};
 use gltf::Gltf;
+use js_sys::ArrayBuffer;
 use rand::random;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
+use web_sys::Response;
 use winit::{
     dpi::PhysicalPosition, event::{DeviceEvent, ElementState, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}
 };
@@ -55,7 +59,7 @@ impl Tri {
     fn new(p1: Vec3, p2: Vec3, p3: Vec3) -> Tri {
         let c = (p1 + p2 + p3) / 3.0;
         Tri {
-            vertices: [vec4(p1.x, p1.y, p1.z, c.x), vec4(p2.x, p2.y, p2.z, c.x), vec4(p3.x, p3.y, p3.z, c.x)],
+            vertices: [vec4(p1.x, p1.y, p1.z, c.x), vec4(p2.x, p2.y, p2.z, c.y), vec4(p3.x, p3.y, p3.z, c.z)],
         }
     }
 
@@ -67,33 +71,195 @@ impl Tri {
             c + vec3(random(), random(), random()) * size - size * 0.5,
         )
     }
+
+    fn aabb(&self) -> Aabb {
+        Aabb::point(self.vertices[0].xyz())
+            .with(Aabb::point(self.vertices[1].xyz()))
+            .with(Aabb::point(self.vertices[2].xyz()))
+    }
+
+    fn centroid(&self) -> Vec3 {
+        // (self.vertices[0].xyz() + self.vertices[1].xyz() + self.vertices[2].xyz()) / 3.0
+        vec3(self.vertices[0][3], self.vertices[1][3], self.vertices[2][3])
+    }
 }
 
-struct BvhNode {
-    // child format:
-    // bits 1-0:
-    //  00: nothing
-    //  01: child is a bvh node
-    //  10: child is a triangle
-    // bits 32-2: index of triangles or bvh nodes 
-    children: [u32; 2],
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Aabb {
+    // alignment rules
+    data: [f32; 6]
 }
-impl BvhNode {
-    const EMPTY: u32 = 0b00;
-    const NODE: u32 = 0b01;
-    const TRI: u32 = 0b10;
-    fn new() -> BvhNode {
-        BvhNode {
-            children: [0, 0]
+
+impl Aabb {
+    fn new() -> Self {
+        Self {
+            data: [0.0; 6]
         }
     }
-    fn root(&self) -> bool {
-        self.children[0] & 0b11 != Self::NODE && self.children[1] & 0b11 != Self::NODE
+
+    fn with(&self, other: Self) -> Self {
+        Self {
+            data:  [self.data[0].min(other.data[0]),
+                    self.data[1].min(other.data[1]),
+                    self.data[2].min(other.data[2]),
+                    self.data[3].max(other.data[3]),
+                    self.data[4].max(other.data[4]),
+                    self.data[5].max(other.data[5])]
+        }
+    }
+
+    fn expand(&mut self, other: Self) {
+        self.data = self.with(other).data;
+    }
+
+    fn point(point: Vec3) -> Self {
+        Self {
+            data: [point.x, point.y, point.z, point.x, point.y, point.z]
+        }
+    }
+
+    fn min(&self) -> Vec3 {
+        vec3(self.data[0], self.data[1], self.data[2])
+    }
+
+    fn max(&self) -> Vec3 {
+        vec3(self.data[3], self.data[4], self.data[5])
     }
 }
-struct Bvh {
+
+// structure from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct BvhNode {
+    aabb: Aabb,
+
+    /// The index of the left child if count is 0. First triangle index otherwise
+    first: u32,
+
+    /// the number of triangles in the node
+    count: u32,
+}
+
+
+impl BvhNode {
+    fn new() -> BvhNode {
+        BvhNode {
+            first: 0,
+            count: 0,
+            aabb: Aabb::point(vec3(-100.0, -100.0, -100.0)),
+        }
+    }
+
+    fn from_tris(first: u32, count: u32, indices: &Vec<u32>, tris: &Vec<Tri>) -> Self {
+        let mut new = Self::new();
+        new.first = first;
+        new.count = count;
+        new.update_aabb(indices, tris);
+        new
+    }
+
+    fn update_aabb(&mut self, indices: &Vec<u32>, tris: &Vec<Tri> ) {
+        if self.count != 0 {
+            self.aabb = tris[indices[self.first as usize] as usize].aabb();
+            for i in self.first..self.first + self.count {
+                self.aabb.expand(tris[indices[i as usize] as usize].aabb());
+            }
+        }
+    }
+}
+struct Bvh<'a> {
     nodes: Vec<BvhNode>,
-    triangles: Vec<Tri>,
+    tris: &'a Vec<Tri>,
+    indices: Vec<u32>,
+}
+
+impl<'a> Bvh<'a> {
+    fn new(triangles: &'a Vec<Tri>) -> Self {
+        Self {
+            nodes: Vec::new(),
+            tris: triangles,
+            indices: (0..triangles.len() as u32).collect(),
+        }
+    }
+
+    fn build(&mut self) {
+        self.nodes.push(BvhNode::from_tris(0, self.tris.len() as u32, &self.indices, &self.tris));
+        self.subdivide(self.nodes.len() - 1);
+    }
+
+    /// remove the layer of indirection used to build the BVH
+    fn flat_triangles(&self) -> Vec<Tri> {
+        let mut tris = self.tris.clone();
+        for i in 0..tris.len() {
+            tris[i] = self.tris[self.indices[i] as usize];
+        }
+        tris
+    }
+
+    // algorithm from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
+    fn subdivide(&mut self, node_idx: usize) {
+        let node = self.nodes[node_idx];
+        // println!("first: {}, count: {}, bounds: {} to {}, {} to {}, {} to {}", node.first, node.count, node.aabb.min().x, node.aabb.max().x, node.aabb.min().y, node.aabb.max().y, node.aabb.min().z, node.aabb.max().z);
+        if node.count <= 2 {
+            return;
+        }
+
+        let mut best_axis = 0;
+        let mut best_size = -1.0;
+        let size = node.aabb.max() - node.aabb.min();
+        for axis in 0..3 {
+            if size[axis] >= best_size {
+                best_axis = axis;
+                best_size = size[axis];
+            }
+        }
+        let split_pos = node.aabb.min()[best_axis] + size[best_axis] * 0.5;
+        // println!("split: {split_pos}, axis: {best_axis}");
+        let mut i = node.first as usize;
+        let mut j = (node.first + node.count - 1) as usize;
+        while i <= j {
+            let first_idx = self.indices[i] as usize;
+            
+            if self.tris[first_idx].centroid()[best_axis] < split_pos {
+                i += 1;
+            } else {
+                // swap
+                let last_i = self.indices[i];
+                self.indices[i] = self.indices[j];
+                self.indices[j] = last_i;
+                j -= 1;
+            }
+        };
+        // println!("i: {i}, j: {j}");
+
+        let mut left = BvhNode::new();
+        left.first = node.first;
+        left.count = i  as u32 - node.first;
+        left.update_aabb(&self.indices, &self.tris);
+
+        // dont subdivide empty nodes
+        if left.count == 0 || left.count == node.count {
+            return;
+        }
+        
+
+        let mut right = BvhNode::new();
+        right.first = i as u32;
+        right.count = node.count - left.count;
+        right.update_aabb(&self.indices, &self.tris);
+
+        // we no longer hold any triangles
+        self.nodes[node_idx].count = 0;
+
+        let children_idx = self.nodes.len();
+
+        self.nodes.push(left);
+        self.nodes.push(right);
+
+        self.subdivide(children_idx);
+        self.subdivide(children_idx + 1);
+    }
 }
 
 struct Ray {
@@ -170,7 +336,7 @@ struct FlatScene {
 
 impl FlatScene {
     fn add_gltf_bytes(&mut self, bytes: &[u8]) {
-        let (document, buffers, _) = gltf::import_slice(include_bytes!("../resources/simple.glb")).unwrap();
+        let (document, buffers, _) = gltf::import_slice(bytes).unwrap();
         let mut ms = MatrixStack::new();
         for scene in document.scenes(){
             for node in scene.nodes() {
@@ -186,7 +352,7 @@ impl FlatScene {
         if let Some(camera) = node.camera() {
             self.cameras.push(Camera::from_gltf(camera, ms.top()));
         }
-    
+        
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 if primitive.mode() == gltf::mesh::Mode::Triangles {
@@ -298,6 +464,8 @@ impl Context {
         let bvh_ssbo =          gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
         let screen_ssbo =       gpu.new_storage_buffer(512 * 512 * 4 * 4);
 
+
+
         let rt_data_bg = gpu.new_bind_group()
             .with_buffer(&triangles_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
@@ -353,7 +521,11 @@ impl Context {
             }
         );
 
-        gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(scene.triangles.as_slice()));
+        let mut bvh = Bvh::new(&scene.triangles);
+        bvh.build();
+
+        gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(bvh.flat_triangles().as_slice()));
+        gpu.queue.write_buffer(&bvh_ssbo.raw, 0, bytemuck::cast_slice(bvh.nodes.as_slice()));
 
         Context {
             screen_pipeline,
@@ -407,6 +579,8 @@ fn frame(gpu: &Gpu, ctx: &mut Context) {
     ctx.frame_uniforms.scene.camera = ctx.scene.cameras[0].to_gpu();
     ctx.frame_uniforms.reject_hist = ctx.scene.cameras[0].check_moved() as u32;
     
+
+
     gpu.queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
     {
@@ -429,6 +603,33 @@ fn frame(gpu: &Gpu, ctx: &mut Context) {
     surface_texture.present();
 }
 
+async fn fetch_bytes(path: &str) -> Vec<u8> {
+    #[cfg(not(target_arch = "wasm32"))] 
+    {
+        
+        std::fs::read(path).unwrap()
+    }
+
+    
+    #[cfg(target_arch = "wasm32")] 
+    {
+        let mut web_path = String::from_str("../").unwrap();
+        web_path.push_str(path);
+        // let opts = web_sys::RequestInit::new();
+        // opts.set_method("GET");
+        // opts.set_mode(web_sys::RequestMode::Cors);
+        // let request = web_sys::Request::new_with_str_and_init(web_path.as_str(), &opts).unwrap();
+        let response: Response = JsFuture::from(web_sys::window().unwrap().fetch_with_str(web_path.as_str())).await.unwrap().dyn_into().unwrap();
+        let array_buf = JsFuture::from(response.array_buffer().unwrap()).await.unwrap();
+        // let response: ArrayBuffer = JsFuture::from(web_sys::window().unwrap().fetch_with_str(path)).await.unwrap().dyn_into().unwrap();
+        // assert!(wasm_bindgen::JsCast::is_instance_of::<ArrayBuffer>(&response));
+        let typed_arr = js_sys::Uint8Array::new(&array_buf);
+        // web_sys::console::log_1(&response);
+        // web_sys::console::log(&js_sys::Array::from(&typed_arr));
+        typed_arr.to_vec()
+    }
+}
+
 async fn run() {
     let event_loop = EventLoop::new().unwrap();
     let window = new_window(&event_loop);
@@ -442,6 +643,7 @@ async fn run() {
         lmb: false,
         rmb: false,
     };
+
     let mut this_frame = Instant::now();
     let mut last_frame = Instant::now();
     event_loop.run(

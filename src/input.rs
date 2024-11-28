@@ -78,7 +78,6 @@ impl Camera {
         self.moved = true;
         self.pitch += pitch;
         self.yaw += yaw;
-
         self.pitch = self.pitch.clamp(-f32::to_radians(80.0), f32::to_radians(80.0));
     }
 
@@ -141,7 +140,6 @@ impl Camera {
 
         self.rmb_last = input.rmb;
         self.lmb_last = input.lmb;
-
     }
 
     pub fn default() -> Camera {
