@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, f32::consts::PI};
 
 use glam::{vec3, Mat3, Mat4, Vec3};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -78,6 +78,7 @@ impl Camera {
         self.moved = true;
         self.pitch += pitch;
         self.yaw += yaw;
+
         self.pitch = self.pitch.clamp(-f32::to_radians(80.0), f32::to_radians(80.0));
     }
 
@@ -88,7 +89,7 @@ impl Camera {
 
     pub fn zoom(&mut self, delta: f32) {
         self.moved = true;
-        self.fovy += delta;
+        self.fovy -= delta;
         self.fovy = self.fovy.clamp(f32::to_radians(1.0), f32::to_radians(179.0));
     }
 
@@ -140,6 +141,7 @@ impl Camera {
 
         self.rmb_last = input.rmb;
         self.lmb_last = input.lmb;
+
     }
 
     pub fn default() -> Camera {
@@ -161,14 +163,16 @@ impl Camera {
     pub fn from_gltf(gltf: gltf::Camera, transform: &Mat4) -> Camera {
         // let dir = transform.to_scale_rotation_translation().1.mul_vec3(vec3(0.0, 0.0, 1.0));
         let origin = transform.transform_point3(vec3(0.0, 0.0, 0.0));
-        let (_, rot, _) = transform.to_scale_rotation_translation();
-        let (yaw, pitch, roll) = rot.to_euler(YAW_PITCH_ROLL);
-
+        let (yaw, pitch, roll) = transform.to_euler(YAW_PITCH_ROLL);
+        let pitch = pitch - 0.5 * PI;
+        let yaw = yaw - PI;
+        let roll = 0.0; // ignoring for now
         let (fovy, aspect) = match gltf.projection() {
             gltf::camera::Projection::Orthographic(orthographic) => {
                 panic!("Orthographic cameras are not supported");
             },
             gltf::camera::Projection::Perspective(perspective) => {
+                println!("Found perspective camera, yfov {} and aspect {:?}", perspective.yfov(), perspective.aspect_ratio());
                 (perspective.yfov(), perspective.aspect_ratio())
             },
         };
