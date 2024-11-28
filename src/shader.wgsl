@@ -1,7 +1,7 @@
 @group(0) @binding(0) var<uniform> globals : FrameUniforms;
 
 @group(1) @binding(0) var<storage, read_write> triangles : array<Tri>;
-@group(1) @binding(1) var<storage, read_write> bvh : u32;
+@group(1) @binding(1) var<storage, read_write> bvh : array<BvhNode>;
 @group(1) @binding(2) var<storage, read_write> screen : array<array<vec4f, 512>, 512>;
 
 const pi = 3.141592654;
@@ -59,6 +59,19 @@ struct FrameUniforms {
 //     directional_lights: array<DirectionalLight, 4>,
 // }
 
+struct Aabb {
+    data: array<f32, 6>
+}
+
+struct BvhNode {
+    aabb: Aabb,
+
+    /// The index of the left child if count is 0. First triangle index otherwise
+    first: u32,
+
+    /// the number of triangles in the node
+    count: u32,
+}
 
 struct Tri {
     d0: vec4f,
@@ -79,6 +92,8 @@ struct Ray {
 struct Hit {
     t: f32,
     idx: i32,
+    normal: vec3f,
+    bary: vec3f,
 }
 
 // https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
@@ -109,18 +124,62 @@ fn intersect (ray: Ray, tri: Tri) -> f32 {
     }
 }
 
-fn trace(ray: Ray) -> Hit {
+fn sign11(x: f32) -> f32 {
+    if (x < 0.0) {
+        return -1.0;
+    } else {
+        return 1.0;
+    }
+}
 
-    var closest_hit = Hit(99999.0, -1);
+fn intersect_full(ray: Ray, idx: i32) -> Hit {
+    let tri = triangles[idx];
+    var hit = Hit(0.0, -1, vec3f(0.0, 0.0, 1.0), vec3f(0.333, 0.333, 0.333));
+
+    let edge1 = tri.d1.xyz - tri.d0.xyz;
+    let edge2 = tri.d2.xyz - tri.d0.xyz;
+    let h = cross( ray.dir, edge2 );
+    let a = dot( edge1, h );
+    if (a > -0.0001f && a < 0.0001f) {
+        return hit;
+    }// ray parallel to triangle
+    let f = 1 / a;
+    let s = ray.origin - tri.d0.xyz;
+    let u = f * dot( s, h );
+    if (u < 0 || u > 1) {
+        return hit;
+    }   // miss?
+    let q = cross( s, edge1 );
+    let v = f * dot( ray.dir, q );
+    if (v < 0 || u + v > 1) {
+        return hit;
+    }   // miss?
+    let t = f * dot( edge2, q );
+    if (t <= 0.0001f) {
+        return hit;
+    }   // miss?
+
+    hit.normal = normalize(cross(edge1, edge2));
+    hit.normal *= -sign11(dot(hit.normal, ray.dir));
+    hit.idx = idx;
+    hit.t = t;
+    hit.bary = vec3f(u, v, (1.0 - u) - v);
+    return hit;
+}
+
+fn trace(ray: Ray) -> Hit {
+    var closest_idx = -1;
+    var closest_t = 999999999.0;
 
     for (var i = 0; i < i32(globals.scene.tri_count); i++) {
         let t = intersect(ray, triangles[i]);
-        if (t >= 0.0 && t < closest_hit.t) {
-            closest_hit.idx = i;
-            closest_hit.t = t;
+        if (t >= 0.0 && t < closest_t) {
+            closest_idx = i;
+            closest_t = t;
         }
     }
-    return closest_hit;
+
+    return intersect_full(ray, closest_idx);
 }
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
@@ -170,8 +229,9 @@ fn rand_color() -> vec3f {
 
 fn sky(dir: vec3f) -> vec3f {
     let sun = normalize(vec3f(0.0, 0.0, 1.0));
-    let col = vec3f(1.0, 0.995, 0.992);
-    return col * pow(max(dot(dir, sun), 0.0), 2.0) * 3.5;
+    let top = vec3f(1.0, 0.7995, 0.5992);
+    let horizon = vec3f(1.0 - top) * 0.5;
+    return mix(horizon, top, pow(max(dot(dir, sun), 0.0), 4.0)) * 2.5;
     // return vec3f(1.0);
 }
 
@@ -180,7 +240,7 @@ fn camera_ray(pixel: vec2u) -> Ray {
 
     ray.origin = globals.scene.camera.origin;
     let forward = globals.scene.camera.dir;
-    let fov_factor = (cos(globals.scene.camera.fovy / 2.0) / sin(globals.scene.camera.fovy / 2.0)) * 2.0;
+    let fov_factor = (sin(globals.scene.camera.fovy / 2.0) / cos(globals.scene.camera.fovy / 2.0)) * 2.0;
 
     let unreachable = vec3(0.0, 0.0, 1.0);
     let right = normalize(cross(forward, unreachable));
@@ -211,12 +271,21 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
     if (hit.idx == -1) {
         // miss
         emissive = sky(dir);
-    } else if (hit.idx % 5 == 2) {
-        // emissive = rand_color() * 2.0;
-    } else if (hit.idx % 3 == 1) {
-        albedo = rand_color();
+    } else {
+        if (hit.idx % 5 == 2) {
+            // emissive = rand_color() * 2.0;
+        } else if (hit.idx % 3 == 1) {
+            albedo = rand_color();
+        }
+        albedo = vec3f(0.7);
+
+        // albedo = vec3f(hit.bary, 0.0);
+        if (distance(length(hit.bary), 0.5) > 0.1) {
+            albedo = rand_color();
+        } else {
+            emissive = vec3f(1.0);
+        }
     }
-    albedo = rand_color();
     *lighting += *throughput * emissive;
     *throughput *= albedo;
 
@@ -240,8 +309,11 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
         if (hit.idx == -1) {
             break;
         }
-        ray.origin += ray.dir * (hit.t - 0.001);
-        ray.dir = rand_sphere();
+
+        ray.origin += ray.dir * hit.t + hit.normal * 0.001;
+
+        // from raytracing in one weekend
+        ray.dir = normalize(hit.normal + rand_sphere());
     }
 
     // screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);
