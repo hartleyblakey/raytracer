@@ -44,6 +44,7 @@ struct FrameUniforms {
     frame:  u32,
     time:   f32,
     reject_hist: u32,
+    node_count: u32,
 }
 
 // struct FrameUniforms {
@@ -59,10 +60,21 @@ struct FrameUniforms {
 //     directional_lights: array<DirectionalLight, 4>,
 // }
 
+////////////// aabb //////////////
 struct Aabb {
     data: array<f32, 6>
 }
+fn aabb_min(aabb: Aabb) -> vec3f {
+    return vec3f(aabb.data[0], aabb.data[1], aabb.data[2]);
+}
+fn aabb_max(aabb: Aabb) -> vec3f {
+    return vec3f(aabb.data[3], aabb.data[4], aabb.data[5]);
+}
+fn aabb_mid(aabb: Aabb) -> vec3f {
+    return 0.5 * vec3f(aabb.data[3] + aabb.data[0], aabb.data[4] + aabb.data[1], aabb.data[5] + aabb.data[2]);
+}
 
+////////////// bvh node //////////////
 struct BvhNode {
     aabb: Aabb,
 
@@ -73,22 +85,41 @@ struct BvhNode {
     count: u32,
 }
 
+////////////// triangle //////////////
 struct Tri {
     d0: vec4f,
     d1: vec4f,
     d2: vec4f,
 }
-
 fn centroid(tri: Tri) -> vec3f {
     return vec3f(tri.d0.w, tri.d1.w, tri.d2.w);
 }
 
+////////////// stack //////////////
+struct Stack {
+    data: array<u32, 24>,
+    size: u32,
+}
+fn push(stack: ptr<function, Stack>, val: u32) {
+    if ((*stack).size < 24) {
+        (*stack).data[(*stack).size] = val;
+        (*stack).size += 1u;
+    }
+}
+fn pop(stack: ptr<function, Stack>) -> u32 {
+    (*stack).size -= 1u;
+    return (*stack).data[(*stack).size];
+}
+
+
+////////////// ray //////////////
 struct Ray {
     origin: vec3f,
     dir: vec3f,
     idir: vec3f,
 }
 
+////////////// hit //////////////
 struct Hit {
     t: f32,
     idx: i32,
@@ -167,19 +198,132 @@ fn intersect_full(ray: Ray, idx: i32) -> Hit {
     return hit;
 }
 
+// from https://gist.github.com/DomNomNom/46bb1ce47f68d255fd5d
+fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
+
+    let bmin = aabb_min(aabb);
+    let bmax = aabb_max(aabb);
+
+    if all(ray.origin > bmin) && all(ray.origin < bmax) {
+        return 0.0;
+    }
+
+    let rmin = (bmin - ray.origin) / ray.dir;
+    let rmax = (bmax - ray.origin) / ray.dir;
+
+    let tmin = min(rmin, rmax);
+    let tmax = max(rmin, rmax);
+
+    let t0 = max(tmin.x, max(tmin.y, tmin.z));
+    let t1 = min(tmax.x, min(tmax.y, tmax.z));
+
+    if (t0 >= t1 || t0 < 0.0) {
+        return -1.0;
+    }
+
+    return t0;
+}
+
+var<private> debug: f32;
+
+fn trace_bvh(ray: Ray) -> i32 {
+    var stack: Stack;
+    stack.size = 0u;
+    push(&stack, 0u);
+    var best_t = 999999999.0;
+    var best_i: i32 = -1;
+    debug = 0.0;
+    // var iterations = 0;
+    while (stack.size > 0) {
+        // iterations++;
+        var node = bvh[pop(&stack)];
+        
+        let aabb_t = intersect_aabb(ray, node.aabb);
+        // if we dont intersect the node's aabb, skip it
+        if (aabb_t < -0.5 || aabb_t > best_t) {
+            continue;
+        }
+
+        // visualize bvh steps
+        debug += 1.0;
+        
+        if (node.count > 0) {
+            // debug += 1.0;
+            // debug = max(debug, f32(node.count));
+            // intersect triangles of node
+            for (var i = node.first; i < node.first + node.count; i++) {
+                
+                let t = intersect(ray, triangles[i]);
+                if (t >= 0.0 && t < best_t) {
+                    best_i = i32(i);
+                    best_t = t;
+                }
+            }
+        } else {
+            // push the nodes children onto the stack
+            push(&stack, node.first + 0u);
+            push(&stack, node.first + 1u);
+
+            // // try ordering the nodes
+            // let left  = aabb_mid(bvh[node.first + 0u].aabb);
+            // let right = aabb_mid(bvh[node.first + 1u].aabb);
+            // if distance(ray.origin, left) < distance(ray.origin, right) {
+            //     push(&stack, node.first + 1u);
+            //     push(&stack, node.first + 0u);
+            // } else {
+            //     push(&stack, node.first + 0u);
+            //     push(&stack, node.first + 1u);
+            // }
+
+        }
+    }
+    return i32(best_i);
+}
+
+
 fn trace(ray: Ray) -> Hit {
     var closest_idx = -1;
     var closest_t = 999999999.0;
 
-    for (var i = 0; i < i32(globals.scene.tri_count); i++) {
-        let t = intersect(ray, triangles[i]);
-        if (t >= 0.0 && t < closest_t) {
-            closest_idx = i;
-            closest_t = t;
-        }
-    }
+    // for (var i = 0; i < i32(globals.scene.tri_count); i++) {
+    //     let t = intersect(ray, triangles[i]);
+    //     if (t >= 0.0 && t < closest_t) {
+    //         closest_idx = i;
+    //         closest_t = t;
+    //     }
+    // }
 
+    closest_idx = trace_bvh(ray);
     return intersect_full(ray, closest_idx);
+
+    // // test header
+    // var hit: Hit;
+    // hit.bary = vec3f(0.33);
+    // hit.idx = -1;
+    // hit.normal = vec3f(0.0, 0.0, 1.0);
+    // hit.t = 0.0;
+    // debug = 0.0;
+
+    // // test aabb intersection
+    // aabb.data = array<f32, 6>(-1.0, -1.0, -1.0, 0.0, 0.0, 0.0);
+    // if (intersects_aabb(ray, aabb)) {
+    //     hit.t = 1.0;
+    //     hit.idx = 0;
+    //     debug += 1.0;
+    // }
+    // return hit;
+
+    // // visualize leaf nodes
+    // for (var i = 0u; i < globals.node_count; i++) {
+    //     let node = bvh[i];
+    //     if (node.count == 0) {
+    //         continue;
+    //     }
+    //     if (intersects_aabb(ray, node.aabb)) {
+    //         debug += 1.0;
+    //     }
+    // }
+    // return hit;
 }
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
@@ -257,6 +401,41 @@ fn camera_ray(pixel: vec2u) -> Ray {
     return ray;
 }
 
+// from https://www.shadertoy.com/view/XtGGzG
+fn plasma_quintic( _x: f32 ) -> vec3f {
+	let x = saturate( _x );
+	let x1 = vec4f( 1.0, x, x * x, x * x * x ); // 1 x x2 x3
+	let x2 = x1 * x1.w * x; // x4 x5 x6 x7
+	return vec3f(
+		dot( x1.xyzw, vec4f(0.063861086, 1.992659096, -1.023901152, -0.490832805 ) ) + dot( x2.xy, vec2f( 1.308442123, -0.914547012 ) ),
+		dot( x1.xyzw, vec4f(0.049718590, -0.791144343, 2.892305078, 0.811726816 ) ) + dot( x2.xy, vec2f( -4.686502417, 2.717794514 ) ),
+		dot( x1.xyzw, vec4f(0.513275779, 1.580255060, -5.164414457, 4.559573646 ) ) + dot( x2.xy, vec2f( -1.916810682, 0.570638854 ) ) );
+}
+// from https://www.shadertoy.com/view/XtGGzG
+fn magma_quintic( _x: f32 ) -> vec3f {
+	let x = saturate( _x );
+	let x1 = vec4f( 1.0, x, x * x, x * x * x ); // 1 x x2 x3
+	let x2 = x1 * x1.w * x; // x4 x5 x6 x7
+	return vec3f(
+		dot( x1.xyzw, vec4( -0.023226960, 1.087154378, -0.109964741, 6.333665763 ) ) + dot( x2.xy, vec2( -11.640596589, 5.337625354 ) ),
+		dot( x1.xyzw, vec4( 0.010680993, 0.176613780, 1.638227448, -6.743522237 ) ) + dot( x2.xy, vec2( 11.426396979, -5.523236379 ) ),
+		dot( x1.xyzw, vec4( -0.008260782, 2.244286052, 3.005587601, -24.279769818 ) ) + dot( x2.xy, vec2( 32.484310068, -12.688259703 ) ) );
+}
+
+fn to_linear(srgb: vec3f) -> vec3f {
+    // not correct but close enough for now
+    return pow(srgb, vec3f(2.2));
+}
+
+fn ramp(x: f32) -> vec3f {
+    if x < 0.0 {
+        return vec3f(0.0, 0.0, 1.0);
+    }
+    if x > 1.0 {
+        return vec3f(1.0, 1.0, 0.0);
+    }
+    return to_linear(clamp(magma_quintic(x), vec3f(0.0), vec3f(1.0)));
+}
 
 fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
 
@@ -283,9 +462,13 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
         if (distance(length(hit.bary), 0.5) > 0.1) {
             albedo = rand_color();
         } else {
-            emissive = vec3f(1.0);
+            // emissive = vec3f(1.0);
         }
     }
+
+    // // visualize bvh
+    // emissive = ramp(debug / 64.0);
+
     *lighting += *throughput * emissive;
     *throughput *= albedo;
 
@@ -305,7 +488,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     var ray = camera_ray(id.xy);
     for (var i = 0; i < 4; i++) {
         let hit = trace(ray);
+        
         shade(hit, ray.dir, &throughput, &lighting);
+
         if (hit.idx == -1) {
             break;
         }

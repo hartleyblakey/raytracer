@@ -9,7 +9,7 @@ use winit::{
     dpi::PhysicalPosition, event::{DeviceEvent, ElementState, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}
 };
 
-use glam::{vec2, vec3, vec4, Mat3, Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{vec2, vec3, vec4, FloatExt, Mat3, Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
 use web_time::{Instant, SystemTime};
 mod input;
 use input::*;
@@ -27,7 +27,8 @@ struct FrameUniforms {
     frame:  u32,
     time:   f32,
     reject_hist: u32,
-    _pad: [u32; 3]
+    node_count: u32,
+    _pad: [u32; 2]
 
 }
 
@@ -214,6 +215,7 @@ impl<'a> Bvh<'a> {
                 best_size = size[axis];
             }
         }
+        best_axis = (self.nodes.len() + 1) % 3;
         let split_pos = node.aabb.min()[best_axis] + size[best_axis] * 0.5;
         // println!("split: {split_pos}, axis: {best_axis}");
         let mut i = node.first as usize;
@@ -228,7 +230,12 @@ impl<'a> Bvh<'a> {
                 let last_i = self.indices[i];
                 self.indices[i] = self.indices[j];
                 self.indices[j] = last_i;
-                j -= 1;
+                if j == 0 {
+                    break;
+                } else {
+                    j -= 1;
+                }
+                
             }
         };
         // println!("i: {i}, j: {j}");
@@ -250,9 +257,9 @@ impl<'a> Bvh<'a> {
         right.update_aabb(&self.indices, &self.tris);
 
         // we no longer hold any triangles
-        self.nodes[node_idx].count = 0;
-
         let children_idx = self.nodes.len();
+        self.nodes[node_idx].count = 0;
+        self.nodes[node_idx].first = children_idx as u32;
 
         self.nodes.push(left);
         self.nodes.push(right);
@@ -335,8 +342,20 @@ struct FlatScene {
 }
 
 impl FlatScene {
-    fn add_gltf_bytes(&mut self, bytes: &[u8]) {
+    fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) {
         let (document, buffers, _) = gltf::import_slice(bytes).unwrap();
+        let mut ms = MatrixStack::new();
+        ms.push();
+        ms.apply(&transform);
+        for scene in document.scenes(){
+            for node in scene.nodes() {
+                self.add_gltf_node(&buffers, node, &mut ms);
+            }
+        }
+    }   
+
+    fn add_gltf(&mut self, path: &str) {
+        let (document, buffers, _) = gltf::import(path).unwrap();
         let mut ms = MatrixStack::new();
         for scene in document.scenes(){
             for node in scene.nodes() {
@@ -433,13 +452,18 @@ impl FlatScene {
 impl Context {
     fn init(gpu: &Gpu) -> Context {
         let mut scene = FlatScene::default();
-        scene.add_gltf_bytes(include_bytes!("../resources/simple_with_camera.glb"));
-
+        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/suzanne.glb"));
+        scene.add_gltf_bytes(&Mat4::from_translation(vec3(0.0, -3.0, 0.0)), include_bytes!("../resources/simple.glb"));
+        // scene.add_gltf("resources/large/sponza/Sponza.gltf");
+        
         if scene.cameras.is_empty() {
             println!("No camera in scene, falling back to default");
             // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
             scene.cameras.push(Camera::default());
         }
+
+        let mut bvh = Bvh::new(&scene.triangles);
+        bvh.build();
 
         let mut resources = ResourceManager::new();
 
@@ -449,7 +473,8 @@ impl Context {
             res: [512, 512],
             time: 0.0,
             reject_hist: 1,
-            _pad: [0; 3],
+            node_count: bvh.nodes.len() as u32,
+            _pad: [0; 2],
         };
 
         let u_frame_buffer = gpu.new_uniform_buffer(&u_frame_0);
@@ -521,11 +546,20 @@ impl Context {
             }
         );
 
-        let mut bvh = Bvh::new(&scene.triangles);
-        bvh.build();
 
         gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(bvh.flat_triangles().as_slice()));
         gpu.queue.write_buffer(&bvh_ssbo.raw, 0, bytemuck::cast_slice(bvh.nodes.as_slice()));
+
+        // sanity check for aabb gen
+        // let mut last = Aabb::new();
+        // for node in &bvh.nodes {
+        //     if node.aabb.min() != last.min() && node.aabb.max() != last.max() {
+        //         last = node.aabb;
+        //         println!("{}, {}, {} to {}, {}, {}", last.data[0], last.data[1], last.data[2], last.data[3], last.data[4], last.data[5]);
+        //     }
+        // }
+
+        
 
         Context {
             screen_pipeline,
