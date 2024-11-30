@@ -717,7 +717,10 @@ async fn fetch_bytes(path: &str) -> Vec<u8> {
 
 async fn run() {
     let event_loop = EventLoop::new().unwrap();
-    let window = new_window(&event_loop, [1280, 640]);
+
+    // default size
+    let window = new_window(&event_loop, [512, 512]);
+    
     let mut gpu = Gpu::new(&window).await;
     let mut ctx = Context::init(&gpu);
     let mut input = InputState {
