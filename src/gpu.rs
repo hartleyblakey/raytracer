@@ -6,9 +6,9 @@ use winit::{
     dpi::{PhysicalSize, Size}, event::{Event, WindowEvent}, event_loop::EventLoop, window::Window
 };
 
-pub fn new_window(event_loop: &EventLoop<()>) -> winit::window::Window {
+pub fn new_window(event_loop: &EventLoop<()>, res: [u32; 2]) -> winit::window::Window {
     let mut builder = winit::window::WindowBuilder::new()
-        .with_inner_size(PhysicalSize::new(512, 512));
+        .with_inner_size(PhysicalSize::new(res[0], res[1]));
     #[cfg(target_arch = "wasm32")]
     {
         std::panic::set_hook(Box::new(console_error_panic_hook::hook));

@@ -2,7 +2,7 @@
 
 @group(1) @binding(0) var<storage, read_write> triangles : array<Tri>;
 @group(1) @binding(1) var<storage, read_write> bvh : array<BvhNode>;
-@group(1) @binding(2) var<storage, read_write> screen : array<array<vec4f, 512>, 512>;
+@group(1) @binding(2) var<storage, read_write> screen : array<vec4f>;
 
 const pi = 3.141592654;
 const hemisphere_area = 2.0 * pi;
@@ -97,13 +97,15 @@ fn centroid(tri: Tri) -> vec3f {
 
 ////////////// stack //////////////
 struct Stack {
-    data: array<u32, 24>,
+    data: array<u32, 23>,
     size: u32,
 }
 fn push(stack: ptr<function, Stack>, val: u32) {
-    if ((*stack).size < 24) {
+    if ((*stack).size < 23) {
         (*stack).data[(*stack).size] = val;
         (*stack).size += 1u;
+    } else {
+        debug = -99999999.0;
     }
 }
 fn pop(stack: ptr<function, Stack>) -> u32 {
@@ -128,27 +130,28 @@ struct Hit {
 }
 
 // https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
+// epsilon stolen from https://www.shadertoy.com/view/wlsfRs
 fn intersect (ray: Ray, tri: Tri) -> f32 {
     let edge1 = tri.d1.xyz - tri.d0.xyz;
     let edge2 = tri.d2.xyz - tri.d0.xyz;
     let h = cross( ray.dir, edge2 );
     let a = dot( edge1, h );
-    if (a > -0.0001f && a < 0.0001f) {
+    if (a > -0.000002 && a < 0.000002) {
         return -1.0;
     }// ray parallel to triangle
-    let f = 1 / a;
+    let f = 1.0 / a;
     let s = ray.origin - tri.d0.xyz;
     let u = f * dot( s, h );
-    if (u < 0 || u > 1) {
+    if (u < 0.0 || u > 1.0) {
         return -1.0;
     }
     let q = cross( s, edge1 );
     let v = f * dot( ray.dir, q );
-    if (v < 0 || u + v > 1) {
+    if (v < 0.0 || u + v > 1.0) {
         return -1.0;
     }
     let t = f * dot( edge2, q );
-    if (t > 0.0001f) {
+    if (t > 0.000002) {
         return t;
     } else {
         return -1.0;
@@ -171,13 +174,13 @@ fn intersect_full(ray: Ray, idx: i32) -> Hit {
     let edge2 = tri.d2.xyz - tri.d0.xyz;
     let h = cross( ray.dir, edge2 );
     let a = dot( edge1, h );
-    if (a > -0.0001f && a < 0.0001f) {
+    if (a > -0.000002 && a < 0.000002) {
         return hit;
     }// ray parallel to triangle
-    let f = 1 / a;
+    let f = 1.0 / a;
     let s = ray.origin - tri.d0.xyz;
     let u = f * dot( s, h );
-    if (u < 0 || u > 1) {
+    if (u < 0 || u > 1.0) {
         return hit;
     }   // miss?
     let q = cross( s, edge1 );
@@ -186,7 +189,7 @@ fn intersect_full(ray: Ray, idx: i32) -> Hit {
         return hit;
     }   // miss?
     let t = f * dot( edge2, q );
-    if (t <= 0.0001f) {
+    if (t <= 0.000002) {
         return hit;
     }   // miss?
 
@@ -243,13 +246,13 @@ fn trace_bvh(ray: Ray) -> i32 {
         if (aabb_t < -0.5 || aabb_t > best_t) {
             continue;
         }
-
-        // visualize bvh steps
-        debug += 1.0;
+        // debug = max(debug, f32(stack.size + 1));
+        // // visualize bvh steps
+        // debug += 1.0;
         
         if (node.count > 0) {
             // debug += 1.0;
-            // debug = max(debug, f32(node.count));
+            debug = max(debug, f32(node.count));
             // intersect triangles of node
             for (var i = node.first; i < node.first + node.count; i++) {
                 
@@ -285,13 +288,7 @@ fn trace(ray: Ray) -> Hit {
     var closest_idx = -1;
     var closest_t = 999999999.0;
 
-    // for (var i = 0; i < i32(globals.scene.tri_count); i++) {
-    //     let t = intersect(ray, triangles[i]);
-    //     if (t >= 0.0 && t < closest_t) {
-    //         closest_idx = i;
-    //         closest_t = t;
-    //     }
-    // }
+
 
     closest_idx = trace_bvh(ray);
     return intersect_full(ray, closest_idx);
@@ -301,8 +298,10 @@ fn trace(ray: Ray) -> Hit {
     // hit.bary = vec3f(0.33);
     // hit.idx = -1;
     // hit.normal = vec3f(0.0, 0.0, 1.0);
-    // hit.t = 0.0;
+    // hit.t = 99999999.0;
     // debug = 0.0;
+
+
 
     // // test aabb intersection
     // aabb.data = array<f32, 6>(-1.0, -1.0, -1.0, 0.0, 0.0, 0.0);
@@ -314,16 +313,34 @@ fn trace(ray: Ray) -> Hit {
     // return hit;
 
     // // visualize leaf nodes
-    // for (var i = 0u; i < globals.node_count; i++) {
+    // let start = (globals.frame * 1u) % (globals.node_count - 128u);
+    // for (var i = start; i < start + 128u; i++) {
     //     let node = bvh[i];
-    //     if (node.count == 0) {
-    //         continue;
+    //     if (node.count != 0) {
+    //         if (intersect_aabb(ray, node.aabb) >= 0.0) {
+    //             debug += 1.0;
+    //             for (var j = node.first; j < node.first + node.count; j++) {
+    //                 let t = intersect(ray, triangles[j]);
+    //                 if (t >= 0.0) {
+    //                     debug += 1.0;
+    //                 }
+    //             }
+    //         }
     //     }
-    //     if (intersects_aabb(ray, node.aabb)) {
-    //         debug += 1.0;
+
+    // }
+    // return hit;
+
+    // for (var i = 0; i < i32(globals.scene.tri_count); i++) {
+    //     let t = intersect(ray, triangles[i]);
+    //     if (t >= 0.0 && t < hit.t) {
+    //         hit.idx = i;
+    //         hit.t = t;
     //     }
     // }
     // return hit;
+    // return intersect_full(ray, hit.idx);
+    
 }
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
@@ -392,8 +409,9 @@ fn camera_ray(pixel: vec2u) -> Ray {
     var pixel_pos = ray.origin + forward;
 
     let aa_pixel = vec2f(pixel) + vec2f(rand(), rand());
-    
-    pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor;
+    let aspect = f32(globals.res.x) / f32(globals.res.y);
+
+    pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor * aspect;
     pixel_pos += up * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
     ray.dir = normalize(pixel_pos - ray.origin);
     ray.idir = 1.0 / ray.dir;
@@ -458,16 +476,20 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
         }
         albedo = vec3f(0.7);
 
-        // albedo = vec3f(hit.bary, 0.0);
-        if (distance(length(hit.bary), 0.5) > 0.1) {
-            albedo = rand_color();
-        } else {
-            // emissive = vec3f(1.0);
+        if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
+            albedo = vec3f(0.4);
         }
+
+        // albedo = vec3f(hit.bary, 0.0);
+        // if (distance(length(hit.bary), 0.5) > 0.1) {
+        //     albedo = rand_color();
+        // } else {
+        //     // emissive = vec3f(1.0);
+        // }
     }
 
-    // // visualize bvh
-    // emissive = ramp(debug / 64.0);
+    // visualize bvh
+    // emissive = ramp(tanh(debug / 8.0));
 
     *lighting += *throughput * emissive;
     *throughput *= albedo;
@@ -478,7 +500,9 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
 @compute
 @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
-
+    if (id.x > globals.res.x || id.y > globals.res.y) {
+        return;
+    }
 
     var lighting   = vec3f(0);
     var throughput = vec3f(1);
@@ -501,12 +525,16 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
         ray.dir = normalize(hit.normal + rand_sphere());
     }
 
+    if (debug < 0.0) {
+        lighting = vec3f(1.0, 1.0, 0.0);
+    }
+
     // screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);
 
     if (globals.reject_hist == 1) {
-        screen[id.x][id.y] = vec4f(lighting, 1.0);
+        screen[id.x + globals.res.x * id.y] = vec4f(lighting, 1.0);
     } else {
-        screen[id.x][id.y] += vec4f(lighting, 1.0);
+        screen[id.x + globals.res.x * id.y] += vec4f(lighting, 1.0);
     }
 }
 
@@ -524,11 +552,11 @@ fn tonemap(in: vec3f) -> vec3f {
 
 @fragment
 fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
-    let up = vec2u(p.xy);
-    if (up.x >= 512 || up.y >= 512) {
+    let id = vec2u(p.xy);
+    if (id.x >= globals.res.x || id.y >= globals.res.y) {
         return vec4f(0.5, 0.1, 0.1, 1.0);
     }
-    let scr = screen[up.x][up.y];
+    let scr = screen[id.x + globals.res.x * id.y];
     var col = scr.rgb / scr.a;
     // col = tonemap(col);
     return vec4f(col, 1.0);

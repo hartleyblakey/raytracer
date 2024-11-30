@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::{HashMap, HashSet}, mem::swap, str::FromStr};
+use std::{borrow::Cow, collections::{HashMap, HashSet}, f32::consts::PI, mem::swap, str::FromStr};
 use gltf::Gltf;
 use js_sys::ArrayBuffer;
 use rand::random;
@@ -101,12 +101,12 @@ impl Aabb {
 
     fn with(&self, other: Self) -> Self {
         Self {
-            data:  [self.data[0].min(other.data[0]),
-                    self.data[1].min(other.data[1]),
-                    self.data[2].min(other.data[2]),
-                    self.data[3].max(other.data[3]),
-                    self.data[4].max(other.data[4]),
-                    self.data[5].max(other.data[5])]
+            data:  [self.data[0].min(other.data[0]) - 0.001,
+                    self.data[1].min(other.data[1]) - 0.001,
+                    self.data[2].min(other.data[2]) - 0.001,
+                    self.data[3].max(other.data[3]) + 0.001,
+                    self.data[4].max(other.data[4]) + 0.001,
+                    self.data[5].max(other.data[5]) + 0.001]
         }
     }
 
@@ -116,7 +116,7 @@ impl Aabb {
 
     fn point(point: Vec3) -> Self {
         Self {
-            data: [point.x, point.y, point.z, point.x, point.y, point.z]
+            data: [point.x - 0.001, point.y - 0.001, point.z - 0.001, point.x + 0.001, point.y + 0.001, point.z + 0.001]
         }
     }
 
@@ -186,7 +186,7 @@ impl<'a> Bvh<'a> {
 
     fn build(&mut self) {
         self.nodes.push(BvhNode::from_tris(0, self.tris.len() as u32, &self.indices, &self.tris));
-        self.subdivide(self.nodes.len() - 1);
+        self.subdivide(self.nodes.len() - 1, -1);
     }
 
     /// remove the layer of indirection used to build the BVH
@@ -199,7 +199,7 @@ impl<'a> Bvh<'a> {
     }
 
     // algorithm from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
-    fn subdivide(&mut self, node_idx: usize) {
+    fn subdivide(&mut self, node_idx: usize, skip: i32) {
         let node = self.nodes[node_idx];
         // println!("first: {}, count: {}, bounds: {} to {}, {} to {}, {} to {}", node.first, node.count, node.aabb.min().x, node.aabb.max().x, node.aabb.min().y, node.aabb.max().y, node.aabb.min().z, node.aabb.max().z);
         if node.count <= 2 {
@@ -210,12 +210,15 @@ impl<'a> Bvh<'a> {
         let mut best_size = -1.0;
         let size = node.aabb.max() - node.aabb.min();
         for axis in 0..3 {
+            if skip >= 0 && skip as usize == axis {
+                continue;
+            }
             if size[axis] >= best_size {
                 best_axis = axis;
                 best_size = size[axis];
             }
         }
-        best_axis = (self.nodes.len() + 1) % 3;
+        // best_axis = (self.nodes.len() + 1) % 3;
         let split_pos = node.aabb.min()[best_axis] + size[best_axis] * 0.5;
         // println!("split: {split_pos}, axis: {best_axis}");
         let mut i = node.first as usize;
@@ -230,11 +233,12 @@ impl<'a> Bvh<'a> {
                 let last_i = self.indices[i];
                 self.indices[i] = self.indices[j];
                 self.indices[j] = last_i;
+
                 if j == 0 {
                     break;
-                } else {
-                    j -= 1;
                 }
+
+                j -= 1;
                 
             }
         };
@@ -247,6 +251,9 @@ impl<'a> Bvh<'a> {
 
         // dont subdivide empty nodes
         if left.count == 0 || left.count == node.count {
+            if skip < 0 {
+                self.subdivide(node_idx, best_axis as i32);
+            }
             return;
         }
         
@@ -256,6 +263,14 @@ impl<'a> Bvh<'a> {
         right.count = node.count - left.count;
         right.update_aabb(&self.indices, &self.tris);
 
+
+        // if left.count < right.count / 8 || left.count > right.count * 8 {
+        //     if skip < 0 {
+        //         self.subdivide(node_idx, best_axis as i32);
+        //     }
+        //     return;
+        // }
+
         // we no longer hold any triangles
         let children_idx = self.nodes.len();
         self.nodes[node_idx].count = 0;
@@ -264,8 +279,8 @@ impl<'a> Bvh<'a> {
         self.nodes.push(left);
         self.nodes.push(right);
 
-        self.subdivide(children_idx);
-        self.subdivide(children_idx + 1);
+        self.subdivide(children_idx, -1);
+        self.subdivide(children_idx + 1, -1);
     }
 }
 
@@ -279,15 +294,19 @@ struct Context {
     screen_pipeline:        wgpu::RenderPipeline,
     raytrace_pipeline:      wgpu::ComputePipeline,
 
-    triangles_ssbo:         wgpu::Buffer,
-    bvh_ssbo:               wgpu::Buffer,
-    screen_ssbo:            wgpu::Buffer,
+    shader_module:          wgpu::ShaderModule,
 
-    rt_data_binding:        wgpu::BindGroup,
+    triangles_ssbo:         Buffer,
+    bvh_ssbo:               Buffer,
+    screen_ssbo:            Buffer,
 
-    frame_uniforms_binding: wgpu::BindGroup,
-    frame_uniforms_buffer:  wgpu::Buffer,
+    rt_data_binding:        BindGroup,
+
+    frame_uniforms_binding: BindGroup,
+    frame_uniforms_buffer:  Buffer,
     frame_uniforms:         FrameUniforms,
+
+
 
     resources:        ResourceManager,
 
@@ -345,14 +364,22 @@ impl FlatScene {
     fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) {
         let (document, buffers, _) = gltf::import_slice(bytes).unwrap();
         let mut ms = MatrixStack::new();
-        ms.push();
-        ms.apply(&transform);
+        // ms.push();
+        // ms.apply(&transform);
         for scene in document.scenes(){
             for node in scene.nodes() {
                 self.add_gltf_node(&buffers, node, &mut ms);
             }
         }
     }   
+
+    fn from_gltf(mat: &Mat4) -> Mat4 {
+        Mat4::from_euler(glam::EulerRot::XZY, 0.5 * PI, 0.5 * PI, 0.0).mul_mat4(mat)
+    }
+
+    fn from_gltf_vec3(v: Vec3) -> Vec3 {
+        vec3(v.z, v.x, v.y)
+    }
 
     fn add_gltf(&mut self, path: &str) {
         let (document, buffers, _) = gltf::import(path).unwrap();
@@ -382,7 +409,12 @@ impl FlatScene {
                     // TODO: figure out what this lambda that I copied does
                     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
     
-                    let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().map(|p| ms.top().mul_vec4(Vec4::from_slice(&[p[0], p[1], p[2], 1.0])).xzy().to_array()).collect();
+                    let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().map(
+                        |p| 
+                        Self::from_gltf_vec3(
+                            ms.top().transform_point3(Vec3::from_slice(&[p[0], p[1], p[2]]))
+                        ).to_array()
+                    ).collect();
     
                     if let Some(indices) = reader.read_indices() {
                         // indexed mesh
@@ -450,10 +482,28 @@ impl FlatScene {
 }
 
 impl Context {
+
+    fn update_resolution(&mut self, gpu: &Gpu) {
+        let res = [gpu.surface_config.width, gpu.surface_config.height];
+        self.frame_uniforms.res = res;
+        println!("x: {}, y: {}", res[0], res[1]);
+        self.screen_ssbo = gpu.new_storage_buffer(res[0] as u64 * res[1]  as u64 * 4 * 4);
+
+        self.rt_data_binding = gpu.new_bind_group()
+            .with_buffer(&self.triangles_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.screen_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .finish(&mut self.resources);
+    }
+
     fn init(gpu: &Gpu) -> Context {
         let mut scene = FlatScene::default();
-        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/suzanne.glb"));
-        scene.add_gltf_bytes(&Mat4::from_translation(vec3(0.0, -3.0, 0.0)), include_bytes!("../resources/simple.glb"));
+        // scene.add_gltf_bytes(&Mat4::from_rotation_x(-90.0_f32.to_radians()), include_bytes!("../resources/suzanne.glb"));
+        // scene.add_gltf_bytes(&Mat4::from_translation(vec3(0.0, -3.0, 0.0)), include_bytes!("../resources/simple.glb"));
+
+        // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/DragonAttenuation.glb"));
+        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
+
         // scene.add_gltf("resources/large/sponza/Sponza.gltf");
         
         if scene.cameras.is_empty() {
@@ -470,7 +520,7 @@ impl Context {
         let u_frame_0 = FrameUniforms {
             scene: scene.to_gpu(),
             frame: 0,
-            res: [512, 512],
+            res: [gpu.surface_config.width, gpu.surface_config.height],
             time: 0.0,
             reject_hist: 1,
             node_count: bvh.nodes.len() as u32,
@@ -487,7 +537,7 @@ impl Context {
 
         let triangles_ssbo =    gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
         let bvh_ssbo =          gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
-        let screen_ssbo =       gpu.new_storage_buffer(512 * 512 * 4 * 4);
+        let screen_ssbo =       gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
 
 
@@ -498,7 +548,7 @@ impl Context {
             .finish(&mut resources);
 
         // Load the shaders from disk
-        let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
         });
@@ -513,13 +563,13 @@ impl Context {
             label: None,
             layout: Some(&screen_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &shader_module,
                 entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &shader_module,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(surface_format.add_srgb_suffix().into())],
@@ -538,7 +588,7 @@ impl Context {
         let raytrace_pipeline = gpu.device.create_compute_pipeline(
             &wgpu::ComputePipelineDescriptor {
                 label: Some("raytrace compute pipeline"),
-                module: &shader,
+                module: &shader_module,
                 layout: Some(&raytrace_pipeline_layout),
                 entry_point: Some("cs_main"),
                 compilation_options: Default::default(),
@@ -563,16 +613,17 @@ impl Context {
 
         Context {
             screen_pipeline,
+            shader_module,
 
             frame_uniforms: u_frame_0,
-            frame_uniforms_buffer: u_frame_buffer.raw,
-            frame_uniforms_binding: u_frame.raw,
+            frame_uniforms_buffer: u_frame_buffer,
+            frame_uniforms_binding: u_frame,
             
             raytrace_pipeline,
-            screen_ssbo: screen_ssbo.raw,
-            bvh_ssbo: bvh_ssbo.raw,
-            triangles_ssbo: triangles_ssbo.raw,
-            rt_data_binding: rt_data_bg.raw,
+            screen_ssbo: screen_ssbo,
+            bvh_ssbo: bvh_ssbo,
+            triangles_ssbo: triangles_ssbo,
+            rt_data_binding: rt_data_bg,
             resources,
             scene,
         }
@@ -615,21 +666,21 @@ fn frame(gpu: &Gpu, ctx: &mut Context) {
     
 
 
-    gpu.queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
+    gpu.queue.write_buffer(&ctx.frame_uniforms_buffer.raw, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
     {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&ctx.raytrace_pipeline);
-        cpass.set_bind_group(0, &ctx.frame_uniforms_binding, &[]);
-        cpass.set_bind_group(1, &ctx.rt_data_binding, &[]);
-        cpass.dispatch_workgroups(64, 64, 1);
+        cpass.set_bind_group(0, &ctx.frame_uniforms_binding.raw, &[]);
+        cpass.set_bind_group(1, &ctx.rt_data_binding.raw, &[]);
+        cpass.dispatch_workgroups((ctx.frame_uniforms.res[0] + 7) / 8, (ctx.frame_uniforms.res[1] + 7) / 8, 1);
     }
 
     {
         let mut rpass = encoder.begin_render_pass(&rpass_desc);
         rpass.set_pipeline(&ctx.screen_pipeline);
-        rpass.set_bind_group(0, Some(&ctx.frame_uniforms_binding), &[]);
-        rpass.set_bind_group(1, Some(&ctx.rt_data_binding), &[]);
+        rpass.set_bind_group(0, Some(&ctx.frame_uniforms_binding.raw), &[]);
+        rpass.set_bind_group(1, Some(&ctx.rt_data_binding.raw), &[]);
         rpass.draw(0..3, 0..1);
     }
 
@@ -666,7 +717,7 @@ async fn fetch_bytes(path: &str) -> Vec<u8> {
 
 async fn run() {
     let event_loop = EventLoop::new().unwrap();
-    let window = new_window(&event_loop);
+    let window = new_window(&event_loop, [1280, 640]);
     let mut gpu = Gpu::new(&window).await;
     let mut ctx = Context::init(&gpu);
     let mut input = InputState {
@@ -700,6 +751,7 @@ async fn run() {
                         gpu.surface_config.height = gpu.surface_config.height.min(4096);
     
                         gpu.surface.configure(&gpu.device, &gpu.surface_config);
+                        ctx.update_resolution(&gpu);
                         // On macos the window needs to be redrawn manually after resizing
                         gpu.window.request_redraw();
                     }
