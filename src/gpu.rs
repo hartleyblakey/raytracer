@@ -281,7 +281,7 @@ impl<'a> Gpu<'a> {
         if !surface_config.format.is_srgb() {
             surface_config.view_formats.push(surface_config.format.add_srgb_suffix());
         }   
-        
+        surface_config.present_mode = wgpu::PresentMode::AutoNoVsync;
 
         surface.configure(&device, &surface_config);
 

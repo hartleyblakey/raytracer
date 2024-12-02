@@ -6,7 +6,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::Response;
 use winit::{
-    dpi::PhysicalPosition, event::{DeviceEvent, ElementState, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}
+    dpi::PhysicalPosition, event::{DeviceEvent, ElementState, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode
 };
 
 use glam::{vec2, vec3, vec4, FloatExt, Mat3, Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
@@ -99,14 +99,25 @@ impl Aabb {
         }
     }
 
+    fn invalid() -> Self {
+        Self {
+            data: [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN]
+        }
+    }
+
+    fn surface(&self) -> f32 {
+        let size = self.max() - self.min();
+        (size.x * size.y + size.y * size.z + size.z * size.x) * 2.0
+    } 
+
     fn with(&self, other: Self) -> Self {
         Self {
-            data:  [self.data[0].min(other.data[0]) - 0.001,
-                    self.data[1].min(other.data[1]) - 0.001,
-                    self.data[2].min(other.data[2]) - 0.001,
-                    self.data[3].max(other.data[3]) + 0.001,
-                    self.data[4].max(other.data[4]) + 0.001,
-                    self.data[5].max(other.data[5]) + 0.001]
+            data:  [self.data[0].min(other.data[0]),
+                    self.data[1].min(other.data[1]),
+                    self.data[2].min(other.data[2]),
+                    self.data[3].max(other.data[3]),
+                    self.data[4].max(other.data[4]),
+                    self.data[5].max(other.data[5])]
         }
     }
 
@@ -116,7 +127,7 @@ impl Aabb {
 
     fn point(point: Vec3) -> Self {
         Self {
-            data: [point.x - 0.001, point.y - 0.001, point.z - 0.001, point.x + 0.001, point.y + 0.001, point.z + 0.001]
+            data: [point.x - 0.00001, point.y - 0.00001, point.z - 0.00001, point.x + 0.00001, point.y + 0.00001, point.z + 0.00001]
         }
     }
 
@@ -198,6 +209,75 @@ impl<'a> Bvh<'a> {
         tris
     }
 
+    fn evaluate_split(&self, node: &BvhNode, axis: usize, split: f32) -> f32 {
+        let mut left_aabb = Aabb::invalid();
+        let mut right_aabb = Aabb::invalid();
+        let mut left_count = 0.0;
+        let mut right_count = 0.0;
+
+        for i in (node.first)..(node.first + node.count) {
+            let tri = self.tris[self.indices[i as usize] as usize];
+            if tri.centroid()[axis] < split {
+                left_count += 1.0;
+                left_aabb.expand(tri.aabb());
+            } else {
+                right_count += 1.0;
+                right_aabb.expand(tri.aabb());
+            }
+
+        }
+
+        let cost = left_count * left_aabb.surface() + right_count * right_aabb.surface();
+
+        if cost > 0.0 {
+            cost
+        } else {
+            f32::MAX
+        }
+    }
+
+    fn find_best_split(&self, node: &BvhNode) -> (usize, f32) {
+        let mut best_axis = 0;
+        let mut best_split = 0.0;
+        let mut best_cost = f32::MAX;
+
+        for axis in 0..3  as usize {
+            for idx in (node.first)..(node.first + node.count) {
+                let tri = self.tris[self.indices[idx as usize] as usize];
+                let split = tri.centroid()[axis as usize];
+                let cost = self.evaluate_split(node, axis, split);
+                if cost < best_cost {
+                    best_axis = axis;
+                    best_cost = cost;
+                    best_split = split;
+                }
+            }
+        }
+
+        (best_axis, best_split)
+    }
+
+    fn find_split_approx(&self, node: &BvhNode, count: usize) -> (usize, f32) {
+        let mut best_axis = 0;
+        let mut best_split = 0.0;
+        let mut best_cost = f32::MAX;
+
+        for axis in 0..3  as usize {
+            for i in 0..count {
+                let split = node.aabb.min()[axis] + ((i as f32 + 0.5) / count as f32) * (node.aabb.max()[axis]-node.aabb.min()[axis]);
+                let cost = self.evaluate_split(node, axis, split);
+                if cost < best_cost {
+                    best_axis = axis;
+                    best_cost = cost;
+                    best_split = split;
+                }
+            }
+        }
+
+        (best_axis, best_split)
+    }
+
+
     // algorithm from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
     fn subdivide(&mut self, node_idx: usize, skip: i32) {
         let node = self.nodes[node_idx];
@@ -206,27 +286,30 @@ impl<'a> Bvh<'a> {
             return;
         }
 
-        let mut best_axis = 0;
-        let mut best_size = -1.0;
-        let size = node.aabb.max() - node.aabb.min();
-        for axis in 0..3 {
-            if skip >= 0 && skip as usize == axis {
-                continue;
-            }
-            if size[axis] >= best_size {
-                best_axis = axis;
-                best_size = size[axis];
-            }
-        }
-        // best_axis = (self.nodes.len() + 1) % 3;
-        let split_pos = node.aabb.min()[best_axis] + size[best_axis] * 0.5;
+        // let mut best_axis = 0;
+        // let mut best_size = -1.0;
+        // let size = node.aabb.max() - node.aabb.min();
+        // for axis in 0..3 {
+        //     if skip >= 0 && skip as usize == axis {
+        //         continue;
+        //     }
+        //     if size[axis] >= best_size {
+        //         best_axis = axis;
+        //         best_size = size[axis];
+        //     }
+        // }
+        // // best_axis = (self.nodes.len() + 1) % 3;
+        // let split_pos = node.aabb.min()[best_axis] + size[best_axis] * 0.5;
+
+        let (axis, split) = self.find_split_approx(&node, 8);
+
         // println!("split: {split_pos}, axis: {best_axis}");
         let mut i = node.first as usize;
         let mut j = (node.first + node.count - 1) as usize;
         while i <= j {
             let first_idx = self.indices[i] as usize;
             
-            if self.tris[first_idx].centroid()[best_axis] < split_pos {
+            if self.tris[first_idx].centroid()[axis] < split {
                 i += 1;
             } else {
                 // swap
@@ -251,9 +334,9 @@ impl<'a> Bvh<'a> {
 
         // dont subdivide empty nodes
         if left.count == 0 || left.count == node.count {
-            if skip < 0 {
-                self.subdivide(node_idx, best_axis as i32);
-            }
+            // if skip < 0  && node.count > 2 {
+            //     self.subdivide(node_idx, best_axis as i32);
+            // }
             return;
         }
         
@@ -403,7 +486,7 @@ impl FlatScene {
             for primitive in mesh.primitives() {
                 if primitive.mode() == gltf::mesh::Mode::Triangles {
                 
-                    let mut idx = 0;
+                    let mut tri_vert_idx = 0;
                     let mut triangle = [Vec3::new(0.0, 0.0, 0.0); 3];
     
                     // TODO: figure out what this lambda that I copied does
@@ -422,10 +505,10 @@ impl FlatScene {
                         let indices = indices.into_u32();
                         for index in indices {
                             let position = positions[index as usize];
-                            triangle[idx] = Vec3::from_array(position);
-                            idx += 1;
-                            if idx > 2 {
-                                idx = 0;
+                            triangle[tri_vert_idx] = Vec3::from_array(position);
+                            tri_vert_idx += 1;
+                            if tri_vert_idx > 2 {
+                                tri_vert_idx = 0;
                                 self.triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
                                 // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
                             }
@@ -435,10 +518,10 @@ impl FlatScene {
                         // non-indexed mesh
     
                         for position in positions {
-                            triangle[idx] = Vec3::from_array(position);
-                            idx += 1;
-                            if idx > 2 {
-                                idx = 0;
+                            triangle[tri_vert_idx] = Vec3::from_array(position);
+                            tri_vert_idx += 1;
+                            if tri_vert_idx > 2 {
+                                tri_vert_idx = 0;
                                 self.triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
                                 // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
                             }
@@ -501,10 +584,10 @@ impl Context {
         // scene.add_gltf_bytes(&Mat4::from_rotation_x(-90.0_f32.to_radians()), include_bytes!("../resources/suzanne.glb"));
         // scene.add_gltf_bytes(&Mat4::from_translation(vec3(0.0, -3.0, 0.0)), include_bytes!("../resources/simple.glb"));
 
-        // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/DragonAttenuation.glb"));
-        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
+        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/DragonAttenuation.glb"));
+        // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
 
-        // scene.add_gltf("resources/large/sponza/Sponza.gltf");
+       // scene.add_gltf("resources/large/sponza/Sponza.gltf");
         
         if scene.cameras.is_empty() {
             println!("No camera in scene, falling back to default");
@@ -720,7 +803,7 @@ async fn run() {
 
     // default size
     let window = new_window(&event_loop, [512, 512]);
-    
+
     let mut gpu = Gpu::new(&window).await;
     let mut ctx = Context::init(&gpu);
     let mut input = InputState {
@@ -734,6 +817,9 @@ async fn run() {
 
     let mut this_frame = Instant::now();
     let mut last_frame = Instant::now();
+    let mut last_second = Instant::now();
+    let mut frames_in_second: u32 = 0;
+    let mut last_cursor_pos = PhysicalPosition::new(0.0, 0.0);
     event_loop.run(
     move |event, target| {
         match event {
@@ -761,17 +847,35 @@ async fn run() {
 
                     WindowEvent::RedrawRequested => {
                         this_frame = Instant::now();
+                        frames_in_second += 1;
                         gpu.window.request_redraw();
                         let dt = (this_frame - last_frame).as_secs_f32();
                         ctx.scene.cameras[0].update(&mut input, dt);
+
+                        if this_frame.duration_since(last_second).as_secs_f32() >= 1.0 {
+                            println!("fps: {}", frames_in_second);
+                            frames_in_second = 0;
+                            last_second = this_frame;
+                        }
+                        
                         frame(&gpu, &mut ctx);
                         last_frame = this_frame;
                     },
+                    WindowEvent::CursorMoved { device_id, position } => if !input.rmb {last_cursor_pos = position},
                     WindowEvent::MouseInput { device_id, state, button } => {
                         match button {
                             MouseButton::Left =>  input.lmb = state.is_pressed(),
                             MouseButton::Right => input.rmb = state.is_pressed(),
                             _ => (),
+                        }
+
+                        if input.rmb {
+                            gpu.window.set_cursor_visible(false);
+                            gpu.window.set_cursor_grab(CursorGrabMode::Confined);
+                        } else {
+                            gpu.window.set_cursor_position(last_cursor_pos);
+                            gpu.window.set_cursor_visible(true);
+                            gpu.window.set_cursor_grab(CursorGrabMode::None);
                         }
                     }
                     WindowEvent::MouseWheel { device_id, delta, phase } => {

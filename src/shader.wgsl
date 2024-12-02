@@ -95,6 +95,13 @@ fn centroid(tri: Tri) -> vec3f {
     return vec3f(tri.d0.w, tri.d1.w, tri.d2.w);
 }
 
+fn assert(condition: bool) {
+    if !condition {
+        debug = -99999999.0;
+    }
+}
+
+
 ////////////// stack //////////////
 struct Stack {
     data: array<u32, 23>,
@@ -105,7 +112,7 @@ fn push(stack: ptr<function, Stack>, val: u32) {
         (*stack).data[(*stack).size] = val;
         (*stack).size += 1u;
     } else {
-        debug = -99999999.0;
+        assert(false);
     }
 }
 fn pop(stack: ptr<function, Stack>) -> u32 {
@@ -211,8 +218,8 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
         return 0.0;
     }
 
-    let rmin = (bmin - ray.origin) / ray.dir;
-    let rmax = (bmax - ray.origin) / ray.dir;
+    let rmin = (bmin - ray.origin) * ray.idir;
+    let rmax = (bmax - ray.origin) * ray.idir;
 
     let tmin = min(rmin, rmax);
     let tmax = max(rmin, rmax);
@@ -243,40 +250,45 @@ fn trace_bvh(ray: Ray) -> i32 {
         
         let aabb_t = intersect_aabb(ray, node.aabb);
         // if we dont intersect the node's aabb, skip it
-        if (aabb_t < -0.5 || aabb_t > best_t) {
+        if aabb_t < -0.5 || aabb_t > best_t {
             continue;
         }
         // debug = max(debug, f32(stack.size + 1));
         // // visualize bvh steps
-        // debug += 1.0;
+        debug += 1.0;
         
-        if (node.count > 0) {
+        if node.count > 0 {
             // debug += 1.0;
-            debug = max(debug, f32(node.count));
+            // debug = max(debug, f32(node.count));
             // intersect triangles of node
             for (var i = node.first; i < node.first + node.count; i++) {
                 
                 let t = intersect(ray, triangles[i]);
-                if (t >= 0.0 && t < best_t) {
+                if t >= 0.0 && t < best_t {
                     best_i = i32(i);
                     best_t = t;
                 }
             }
         } else {
-            // push the nodes children onto the stack
-            push(&stack, node.first + 0u);
-            push(&stack, node.first + 1u);
+            // // push the nodes children onto the stack
+            // push(&stack, node.first + 0u);
+            // push(&stack, node.first + 1u);
 
-            // // try ordering the nodes
-            // let left  = aabb_mid(bvh[node.first + 0u].aabb);
-            // let right = aabb_mid(bvh[node.first + 1u].aabb);
-            // if distance(ray.origin, left) < distance(ray.origin, right) {
-            //     push(&stack, node.first + 1u);
-            //     push(&stack, node.first + 0u);
-            // } else {
-            //     push(&stack, node.first + 0u);
-            //     push(&stack, node.first + 1u);
-            // }
+            // try ordering the nodes
+            let left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
+            let right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
+
+            if left < -0.5 {
+                push(&stack, node.first + 1u);
+            } else if right < -0.5 {
+                push(&stack, node.first + 0u);
+            } else if left < right {
+                push(&stack, node.first + 1u);
+                push(&stack, node.first + 0u);
+            } else {
+                push(&stack, node.first + 0u);
+                push(&stack, node.first + 1u);
+            }
 
         }
     }
@@ -389,10 +401,11 @@ fn rand_color() -> vec3f {
 }
 
 fn sky(dir: vec3f) -> vec3f {
-    let sun = normalize(vec3f(0.0, 0.0, 1.0));
+    let sun = normalize(vec3f(0.0, -1.0, 1.0));
     let top = vec3f(1.0, 0.7995, 0.5992);
     let horizon = vec3f(1.0 - top) * 0.5;
     return mix(horizon, top, pow(max(dot(dir, sun), 0.0), 4.0)) * 2.5;
+    // return to_linear(dir * 0.5 + 0.5);
     // return vec3f(1.0);
 }
 
@@ -463,21 +476,27 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
     rand();
 
     var emissive = vec3f(0);
-    var albedo   = vec3f(0.5);
+    var albedo   = vec3f(0.7);
 
     if (hit.idx == -1) {
         // miss
         emissive = sky(dir);
     } else {
-        if (hit.idx % 5 == 2) {
-            // emissive = rand_color() * 2.0;
+        if (hit.idx % 135 == 2) {
+            // emissive = rand_color() * 14.0;
         } else if (hit.idx % 3 == 1) {
-            albedo = rand_color();
+            // albedo = rand_color();
         }
-        albedo = vec3f(0.7);
+        // if hit.normal.z > 0.95 {
+        //     emissive = to_linear(rand_color()) * 8.0;
+        // }
+        // albedo = vec3f(0.7);
 
         if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
             albedo = vec3f(0.4);
+            // if (hit.idx % 25 == 2) {
+            //   emissive = rand_color() * 2.0;
+            // }
         }
 
         // albedo = vec3f(hit.bary, 0.0);
@@ -488,25 +507,33 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
         // }
     }
 
-    // visualize bvh
-    // emissive = ramp(tanh(debug / 8.0));
+    // // visualize bvh
+    // emissive = ramp(debug / 128.0);
 
+    // // visualize normals
+    // emissive = to_linear(hit.normal * 0.5 + 0.5);
+    
     *lighting += *throughput * emissive;
     *throughput *= albedo;
 
     seed = backup;
 }
 
+fn scatter(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>) {
+    // from raytracing in one weekend
+    (*ray).dir = normalize(hit.normal + rand_sphere());
+    (*ray).idir = vec3f(1.0) / (*ray).dir;
+}
+
 @compute
 @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
-    if (id.x > globals.res.x || id.y > globals.res.y) {
-        return;
-    }
+if (id.x < globals.res.x && id.y < globals.res.y) {
 
     var lighting   = vec3f(0);
     var throughput = vec3f(1);
 
+    // let samples = u32(screen[id.x + globals.res.x * id.y].a);
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
 
     var ray = camera_ray(id.xy);
@@ -521,8 +548,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
         ray.origin += ray.dir * hit.t + hit.normal * 0.001;
 
-        // from raytracing in one weekend
-        ray.dir = normalize(hit.normal + rand_sphere());
+        scatter(&ray, hit, &throughput);
     }
 
     if (debug < 0.0) {
@@ -536,6 +562,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     } else {
         screen[id.x + globals.res.x * id.y] += vec4f(lighting, 1.0);
     }
+}
 }
 
 

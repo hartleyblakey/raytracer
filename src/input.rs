@@ -1,6 +1,6 @@
 use std::{collections::HashSet, f32::consts::PI};
 
-use glam::{vec3, Mat3, Mat4, Vec3};
+use glam::{vec3, vec4, Mat3, Mat4, Vec3, Vec3Swizzles};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 pub const FORWARD: Vec3 = vec3(1.0, 0.0, 0.0);
@@ -160,10 +160,17 @@ impl Camera {
 
     pub fn from_gltf(gltf: gltf::Camera, transform: &Mat4) -> Camera {
         // let dir = transform.to_scale_rotation_translation().1.mul_vec3(vec3(0.0, 0.0, 1.0));
-        let origin = transform.transform_point3(vec3(0.0, 0.0, 0.0));
-        let (yaw, pitch, roll) = transform.to_euler(YAW_PITCH_ROLL);
-        let pitch = pitch - 0.5 * PI;
-        let yaw = yaw - PI;
+        let origin = transform.transform_point3(vec3(0.0, 0.0, 0.0)).zxy();
+        let my_transform = Mat4::from_cols(transform.z_axis, transform.x_axis, transform.y_axis, transform.w_axis);
+        // let origin = my_transform.transform_point3(vec3(0.0, 0.0, 0.0));
+        let forward = transform.transform_point3(vec3(0.0, 0.0, 1.0)).zxy();
+
+        let t2 = Mat4::from_cols(vec4(0.0, 0.0, 1.0, 0.0), vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0)).transpose();
+
+
+        let (yaw, pitch, roll) = t2.mul_mat4(transform).to_euler(YAW_PITCH_ROLL);
+        let pitch = -(pitch - PI) - PI * 1.2;
+        let yaw = yaw + PI / 2.0;
         let roll = 0.0; // ignoring for now
         let (fovy, aspect) = match gltf.projection() {
             gltf::camera::Projection::Orthographic(orthographic) => {
