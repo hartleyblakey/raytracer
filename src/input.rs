@@ -41,10 +41,35 @@ pub struct Camera {
     rmb_last: bool,
 }
 
+/*
+GLTF vectors in my space
+    
+    x (left)    : (0.0, 1.0, 0.0)
+    y (up)      : (0.0, 0.0, 1.0)
+    z (forward) : (1.0, 0.0, 0.0)
+    
+My basis vectors in GLTF space
+    x (forward) : (0.0, 0.0, 1.0)
+    y (left)    : (1.0, 0.0, 0.0)
+    z (up)      : (0.0, 1.0, 0.0)
+*/
+
+// https://en.m.wikipedia.org/wiki/Change_of_basis
+pub fn from_gltf_mat4(gltf: &Mat4) -> Mat4 {
+    // column major not row major, misleading layout
+    let from_gltf = Mat4::from_cols(
+        vec4(0.0, 1.0, 0.0, 0.0), 
+        vec4(0.0, 0.0, 1.0, 0.0), 
+        vec4(1.0, 0.0, 0.0, 0.0), 
+        vec4(0.0, 0.0, 0.0, 1.0)
+    );
+    from_gltf.mul_mat4(&gltf.mul_mat4(&from_gltf.transpose()))
+}
+
 impl Camera {
 
     pub fn forward(&self) -> Vec3 {
-        self.rot().mul_vec3(FORWARD).normalize()
+        self.rot().mul_vec3(FORWARD)
     }
 
     pub fn up(&self) -> Vec3 {
@@ -90,11 +115,6 @@ impl Camera {
         self.moved = true;
         self.fovy -= delta;
         self.fovy = self.fovy.clamp(f32::to_radians(1.0), f32::to_radians(179.0));
-    }
-
-    pub fn set_pos(&mut self, position: Vec3) {
-        self.moved = true;
-        self.position = position;
     }
 
     pub fn update(&mut self, input: &mut InputState, dt: f32) {
@@ -158,22 +178,19 @@ impl Camera {
         }
     }
 
-    pub fn from_gltf(gltf: gltf::Camera, transform: &Mat4) -> Camera {
-        // let dir = transform.to_scale_rotation_translation().1.mul_vec3(vec3(0.0, 0.0, 1.0));
-        let origin = transform.transform_point3(vec3(0.0, 0.0, 0.0)).zxy();
-        let my_transform = Mat4::from_cols(transform.z_axis, transform.x_axis, transform.y_axis, transform.w_axis);
-        // let origin = my_transform.transform_point3(vec3(0.0, 0.0, 0.0));
-        let forward = transform.transform_point3(vec3(0.0, 0.0, 1.0)).zxy();
 
-        let t2 = Mat4::from_cols(vec4(0.0, 0.0, 1.0, 0.0), vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0)).transpose();
+    pub fn from_gltf(gltf: gltf::Camera, gltf_transform: &Mat4) -> Camera {
 
+        let transform = from_gltf_mat4(gltf_transform);
+        let origin = transform.transform_point3(vec3(0.0, 0.0, 0.0));
 
-        let (yaw, pitch, roll) = t2.mul_mat4(transform).to_euler(YAW_PITCH_ROLL);
-        let pitch = -(pitch - PI) - PI * 1.2;
-        let yaw = yaw + PI / 2.0;
-        let roll = 0.0; // ignoring for now
+        let (yaw, pitch, roll) = transform.to_euler(YAW_PITCH_ROLL);
+
+        // yaw is off for some reason
+        let yaw = yaw - PI;
+
         let (fovy, aspect) = match gltf.projection() {
-            gltf::camera::Projection::Orthographic(orthographic) => {
+            gltf::camera::Projection::Orthographic(_) => {
                 panic!("Orthographic cameras are not supported");
             },
             gltf::camera::Projection::Perspective(perspective) => {
