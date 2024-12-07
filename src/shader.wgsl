@@ -239,24 +239,20 @@ var<private> debug: f32;
 fn trace_bvh(ray: Ray) -> i32 {
     var stack: Stack;
     stack.size = 0u;
-    push(&stack, 0u);
+    var node = bvh[0];
     var best_t = 999999999.0;
     var best_i: i32 = -1;
+    if intersect_aabb(ray, node.aabb) < -0.5 {
+        return best_i;
+    }
     debug = 0.0;
     // var iterations = 0;
-    while (stack.size > 0) {
-        // iterations++;
-        var node = bvh[pop(&stack)];
-        
-        let aabb_t = intersect_aabb(ray, node.aabb);
-        // if we dont intersect the node's aabb, skip it
-        if aabb_t < -0.5 || aabb_t > best_t {
-            continue;
-        }
-        // debug = max(debug, f32(stack.size + 1));
+    while (true) {
+        // debug = max(debug, f32(stack.size + 1u));
         // // visualize bvh steps
-        debug += 1.0;
-        
+        // debug += 1.0;
+
+
         if node.count > 0 {
             // debug += 1.0;
             // debug = max(debug, f32(node.count));
@@ -269,6 +265,10 @@ fn trace_bvh(ray: Ray) -> i32 {
                     best_t = t;
                 }
             }
+            if stack.size == 0u {
+                break;
+            }
+            node = bvh[pop(&stack)];
         } else {
             // // push the nodes children onto the stack
             // push(&stack, node.first + 0u);
@@ -277,17 +277,22 @@ fn trace_bvh(ray: Ray) -> i32 {
             // try ordering the nodes
             let left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
             let right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
-
-            if left < -0.5 {
-                push(&stack, node.first + 1u);
-            } else if right < -0.5 {
-                push(&stack, node.first + 0u);
+    
+            if (left < -0.5 || left > best_t) && (right < -0.5 || right > best_t) {
+                if stack.size == 0u {
+                    break;
+                }
+                node = bvh[pop(&stack)];
+            } else if (left < -0.5 || left > best_t) {
+                node = bvh[node.first + 1u];
+            } else if (right < -0.5 || right > best_t) {
+                node = bvh[node.first + 0u];
             } else if left < right {
                 push(&stack, node.first + 1u);
-                push(&stack, node.first + 0u);
+                node = bvh[node.first + 0u];
             } else {
                 push(&stack, node.first + 0u);
-                push(&stack, node.first + 1u);
+                node = bvh[node.first + 1u];
             }
 
         }
@@ -300,8 +305,6 @@ fn trace(ray: Ray) -> Hit {
     var closest_idx = -1;
     var closest_t = 999999999.0;
 
-
-
     closest_idx = trace_bvh(ray);
     return intersect_full(ray, closest_idx);
 
@@ -312,8 +315,6 @@ fn trace(ray: Ray) -> Hit {
     // hit.normal = vec3f(0.0, 0.0, 1.0);
     // hit.t = 99999999.0;
     // debug = 0.0;
-
-
 
     // // test aabb intersection
     // aabb.data = array<f32, 6>(-1.0, -1.0, -1.0, 0.0, 0.0, 0.0);
@@ -367,6 +368,8 @@ fn hash21(in: vec2u) -> u32 {
 var<private> seed: u32 = 12378231;
 fn rand() -> f32 {
     let old = seed;
+
+    // no basis in anything
     seed = hash21(vec2u(seed, seed ^ 39213742u));
 
     // uint to 0-1 float from
@@ -376,8 +379,6 @@ fn rand() -> f32 {
 
 // https://math.stackexchange.com/questions/44689/how-to-find-a-random-axis-or-unit-vector-in-3d
 fn rand_sphere() -> vec3f {
-    
-
     let theta = rand() * 2.0 * pi;
     let z = rand() * 2.0 - 1.0;
     let radius = sqrt(1.0 - z * z);
@@ -412,21 +413,21 @@ fn sky(dir: vec3f) -> vec3f {
 fn camera_ray(pixel: vec2u) -> Ray {
     var ray: Ray;
 
-    ray.origin = globals.scene.camera.origin;
+    ray.origin  = globals.scene.camera.origin;
     let forward = globals.scene.camera.dir;
     let fov_factor = (sin(globals.scene.camera.fovy / 2.0) / cos(globals.scene.camera.fovy / 2.0)) * 2.0;
 
     let unreachable = vec3(0.0, 0.0, 1.0);
     let right = normalize(cross(forward, unreachable));
-    let up = normalize(cross(right, forward));
+    let up    = normalize(cross(right,   forward));
     var pixel_pos = ray.origin + forward;
 
     let aa_pixel = vec2f(pixel) + vec2f(rand(), rand());
     let aspect = f32(globals.res.x) / f32(globals.res.y);
 
     pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor * aspect;
-    pixel_pos += up * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
-    ray.dir = normalize(pixel_pos - ray.origin);
+    pixel_pos += up    * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
+    ray.dir  = normalize(pixel_pos - ray.origin);
     ray.idir = 1.0 / ray.dir;
 
     return ray;
@@ -470,7 +471,6 @@ fn ramp(x: f32) -> vec3f {
 
 fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
 
-
     let backup = seed;
     seed = u32(hit.idx * 7);
     rand();
@@ -512,6 +512,9 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
 
     // // visualize normals
     // emissive = to_linear(hit.normal * 0.5 + 0.5);
+
+    // // visualize albedo
+    // emissive = albedo * (dot(hit.normal, vec3f(0.0, 0.0, 1.0)) * 0.4 + 0.6);
     
     *lighting += *throughput * emissive;
     *throughput *= albedo;
@@ -537,7 +540,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
 
     var ray = camera_ray(id.xy);
-    for (var i = 0; i < 4; i++) {
+    for (var i = 0; i < 3; i++) {
         let hit = trace(ray);
         
         shade(hit, ray.dir, &throughput, &lighting);
