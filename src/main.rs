@@ -9,7 +9,7 @@ use winit::{
     dpi::PhysicalPosition, event::{DeviceEvent, ElementState, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode
 };
 
-use glam::{vec2, vec3, vec4, FloatExt, Mat3, Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{uvec2, vec2, vec3, vec4, FloatExt, Mat3, Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
 use web_time::{Instant, SystemTime};
 mod input;
 use input::*;
@@ -301,7 +301,7 @@ impl<'a> Bvh<'a> {
         // // best_axis = (self.nodes.len() + 1) % 3;
         // let split_pos = node.aabb.min()[best_axis] + size[best_axis] * 0.5;
 
-        let (axis, split) = self.find_split_approx(&node, 8);
+        let (axis, split) = self.find_split_approx(&node, 16);
 
         // println!("split: {split_pos}, axis: {best_axis}");
         let mut i = node.first as usize;
@@ -382,18 +382,16 @@ struct Context {
     triangles_ssbo:         Buffer,
     bvh_ssbo:               Buffer,
     screen_ssbo:            Buffer,
-
+    triangles_ext_ssbo:     Buffer,
     rt_data_binding:        BindGroup,
 
     frame_uniforms_binding: BindGroup,
     frame_uniforms_buffer:  Buffer,
     frame_uniforms:         FrameUniforms,
 
+    resources:              ResourceManager,
 
-
-    resources:        ResourceManager,
-
-    scene: FlatScene,
+    scene:                  FlatScene,
 }
 
 struct MatrixStack {
@@ -415,6 +413,15 @@ impl MatrixStack {
             self.stack.pop();
         }
     }
+    fn rotate_y(&mut self, rad: f32) {
+        self.apply(&Mat4::from_rotation_y(rad));
+    }
+    fn translate(&mut self, delta: Vec3) {
+        self.apply(&Mat4::from_translation(delta));
+    }
+    fn scale(&mut self, scale: Vec3) {
+        self.apply(&Mat4::from_scale(scale));
+    }
     fn apply(&mut self, t: &Mat4) {
         if self.stack.len() == 1 {
             self.push();
@@ -435,9 +442,47 @@ struct GpuSceneUniform {
     _pad: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuTexcoord {
+    offset: u32,
+    size: u32,
+    pos: Vec2,
+}
+
+impl GpuTexcoord {
+    fn new(offset: u32, size: UVec2, pos: Vec2) -> Self {
+        let size = (size.x << 16) | size.y;
+        Self {
+            offset,
+            size,
+            pos
+        }
+    }
+    fn size(&self) -> UVec2 {
+        uvec2(self.size & 0xFF, self.size >> 16)
+    }
+
+    fn index(&self) -> u32 {
+        let size = self.size();
+        let upos = uvec2((self.pos.x * size.x as f32) as u32, (self.pos.y * size.y as f32) as u32);
+        self.offset + upos.x + upos.y * size.x
+    }
+}
+
+struct GpuVertexExt {
+    tex0: GpuTexcoord,
+}
+
+struct TriExt {
+    vertices: [GpuVertexExt; 3]
+}
+
+
 #[derive(Default)]
 struct FlatScene {
     triangles: Vec<Tri>,
+    triangles_ext: Vec<TriExt>,
     cameras:   Vec<Camera>,
     point_lights: Vec<PointLight>,
     directional_lights: Vec<DirectionalLight>,
@@ -447,8 +492,8 @@ impl FlatScene {
     fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) {
         let (document, buffers, _) = gltf::import_slice(bytes).unwrap();
         let mut ms = MatrixStack::new();
-        // ms.push();
-        // ms.apply(&transform);
+        ms.push();
+        ms.apply(&transform);
         for scene in document.scenes(){
             for node in scene.nodes() {
                 self.add_gltf_node(&buffers, node, &mut ms);
@@ -485,46 +530,27 @@ impl FlatScene {
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 if primitive.mode() == gltf::mesh::Mode::Triangles {
-                
-                    let mut tri_vert_idx = 0;
-                    let mut triangle = [Vec3::new(0.0, 0.0, 0.0); 3];
-    
                     // TODO: figure out what this lambda that I copied does
                     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
     
-                    let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().map(
+                    let positions: Vec<Vec3> = reader.read_positions().unwrap().map(
                         |p| 
                         Self::from_gltf_vec3(
                             ms.top().transform_point3(Vec3::from_slice(&[p[0], p[1], p[2]]))
-                        ).to_array()
+                        )
                     ).collect();
     
                     if let Some(indices) = reader.read_indices() {
                         // indexed mesh
-    
-                        let indices = indices.into_u32();
-                        for index in indices {
-                            let position = positions[index as usize];
-                            triangle[tri_vert_idx] = Vec3::from_array(position);
-                            tri_vert_idx += 1;
-                            if tri_vert_idx > 2 {
-                                tri_vert_idx = 0;
-                                self.triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
-                                // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
-                            }
+                        let mut indices = indices.into_u32();
+                        while let (Some(a), Some(b), Some(c)) = (indices.next(), indices.next(), indices.next()) {
+                            self.triangles.push(Tri::new(positions[a as usize], positions[b as usize], positions[c as usize]));
                         }
                     }
                     else {
                         // non-indexed mesh
-    
-                        for position in positions {
-                            triangle[tri_vert_idx] = Vec3::from_array(position);
-                            tri_vert_idx += 1;
-                            if tri_vert_idx > 2 {
-                                tri_vert_idx = 0;
-                                self.triangles.push(Tri::new(triangle[0], triangle[1], triangle[2]));
-                                // println!("loaded triangle at ({}, {}, {})", triangle[0].x, triangle[0].y, triangle[0].z);
-                            }
+                        for p in positions.chunks(3) {
+                            self.triangles.push(Tri::new(p[0], p[1], p[2]));
                         }
                     }
                 } else {
@@ -583,9 +609,25 @@ impl Context {
         let mut scene = FlatScene::default();
         // scene.add_gltf_bytes(&Mat4::from_rotation_x(-90.0_f32.to_radians()), include_bytes!("../resources/suzanne.glb"));
         // scene.add_gltf_bytes(&Mat4::from_translation(vec3(0.0, -3.0, 0.0)), include_bytes!("../resources/simple.glb"));
+        let mut ms = MatrixStack::new();
+    
+        println!("building scene");
+        // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/large/DragonAttenuation.glb"));
+ 
 
-        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/DragonAttenuation.glb"));
-        // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
+        // ms.push();
+        // ms.translate(vec3(0.0, 0.0, 10.0));
+        // ms.rotate_y(180.0f32.to_radians());
+        // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/large/DragonAttenuation.glb"));
+        // ms.pop();
+
+        // ms.push();
+        // ms.translate(vec3(0.0, 0.0, 5.0));
+        // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/suzanne.glb"));
+        // ms.pop();
+
+
+        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
 
        // scene.add_gltf("resources/large/sponza/Sponza.gltf");
         
@@ -594,10 +636,14 @@ impl Context {
             // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
             scene.cameras.push(Camera::default());
         }
-
+        
+        println!("Tri count: {}", scene.triangles.len());
+        println!("Tri size : {} mb", (scene.triangles.len() * size_of::<Tri>()) / (1000 * 1000));
+        println!();
+        println!("building bvh");
         let mut bvh = Bvh::new(&scene.triangles);
         bvh.build();
-
+        println!("Bvh size : {} mb", (bvh.nodes.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
 
         let u_frame_0 = FrameUniforms {
@@ -618,11 +664,10 @@ impl Context {
 
         let buffer_size_mb = 128;
 
-        let triangles_ssbo =    gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
-        let bvh_ssbo =          gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
-        let screen_ssbo =       gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
-
-
+        let triangles_ssbo =        gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
+        let bvh_ssbo =              gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
+        let triangles_ext_ssbo =    gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
+        let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
         let rt_data_bg = gpu.new_bind_group()
             .with_buffer(&triangles_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
@@ -703,10 +748,12 @@ impl Context {
             frame_uniforms_binding: u_frame,
             
             raytrace_pipeline,
-            screen_ssbo: screen_ssbo,
-            bvh_ssbo: bvh_ssbo,
-            triangles_ssbo: triangles_ssbo,
+            screen_ssbo,
+            bvh_ssbo,
+            triangles_ssbo,
+            triangles_ext_ssbo,
             rt_data_binding: rt_data_bg,
+
             resources,
             scene,
         }
