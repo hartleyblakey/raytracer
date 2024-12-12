@@ -12,6 +12,9 @@ const FORWARD = vec3f(1.0, 0.0, 0.0);
 const UP = vec3f(0.0, 0.0, 1.0);
 const RIGHT = vec3f(0.0, -1.0, 0.0);
 
+const SUN_DIR = vec3f(0.0, -0.707106781187, 0.707106781187);
+const SUN_COL = vec3f(1.0, 0.7995, 0.5992);
+
 struct Camera {
     dir: vec3f,
     fovy: f32,
@@ -249,8 +252,8 @@ fn trace_bvh(ray: Ray) -> i32 {
     // var iterations = 0;
     while (true) {
         // debug = max(debug, f32(stack.size + 1u));
-        // // visualize bvh steps
-        // debug += 1.0;
+        // visualize bvh steps
+        debug += 1.0;
 
 
         if node.count > 0 {
@@ -298,6 +301,51 @@ fn trace_bvh(ray: Ray) -> i32 {
         }
     }
     return i32(best_i);
+}
+fn trace_bvh_shadow(ray: Ray) -> bool {
+    var stack: Stack;
+    stack.size = 0u;
+    var node = bvh[0];
+    if intersect_aabb(ray, node.aabb) < -0.5 {
+        return false;
+    }
+    while (true) {
+        if node.count > 0 {
+            for (var i = node.first; i < node.first + node.count; i++) {
+                
+                let t = intersect(ray, triangles[i]);
+                if t >= 0.0 {
+                    return true;
+                }
+            }
+            if stack.size == 0u {
+                break;
+            }
+            node = bvh[pop(&stack)];
+        } else {
+            let left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
+            let right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
+    
+            if left < -0.5 && right < -0.5 {
+                if stack.size == 0u {
+                    break;
+                }
+                node = bvh[pop(&stack)];
+            } else if left < -0.5 {
+                node = bvh[node.first + 1u];
+            } else if right < -0.5 {
+                node = bvh[node.first + 0u];
+            } else if left < right {
+                push(&stack, node.first + 1u);
+                node = bvh[node.first + 0u];
+            } else {
+                push(&stack, node.first + 0u);
+                node = bvh[node.first + 1u];
+            }
+
+        }
+    }
+    return false;
 }
 
 
@@ -402,10 +450,8 @@ fn rand_color() -> vec3f {
 }
 
 fn sky(dir: vec3f) -> vec3f {
-    let sun = normalize(vec3f(0.0, -1.0, 1.0));
-    let top = vec3f(1.0, 0.7995, 0.5992);
-    let horizon = vec3f(1.0 - top) * 0.5;
-    return mix(horizon, top, pow(max(dot(dir, sun), 0.0), 4.0)) * 2.5;
+    let horizon = vec3f(1.0 - SUN_COL);
+    return mix(horizon, SUN_COL,pow(max(dot(dir, SUN_DIR), 0.0), 3.0)) * 1.00;
     // return to_linear(dir * 0.5 + 0.5);
     // return vec3f(1.0);
 }
@@ -422,11 +468,17 @@ fn camera_ray(pixel: vec2u) -> Ray {
     let up    = normalize(cross(right,   forward));
     var pixel_pos = ray.origin + forward;
 
+    let a = rand() * pi * 2.0;
+    let m = rand();
     let aa_pixel = vec2f(pixel) + vec2f(rand(), rand());
     let aspect = f32(globals.res.x) / f32(globals.res.y);
 
     pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor * aspect;
     pixel_pos += up    * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
+
+    pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
+    pixel_pos += up             * sin(a) * pow(m, 150.0);
+
     ray.dir  = normalize(pixel_pos - ray.origin);
     ray.idir = 1.0 / ray.dir;
 
@@ -495,7 +547,7 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
         if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
             albedo = vec3f(0.4);
             // if (hit.idx % 25 == 2) {
-            //   emissive = rand_color() * 2.0;
+            //   emissive = rand_color() * 500.0;
             // }
         }
 
@@ -528,6 +580,10 @@ fn scatter(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>) 
     (*ray).idir = vec3f(1.0) / (*ray).dir;
 }
 
+fn lambert(dir: vec3f, normal:  vec3f) -> f32 {
+    return max(dot(dir, normal), 0.0) / pi;
+}
+
 @compute
 @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
@@ -549,9 +605,22 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             break;
         }
 
-        ray.origin += ray.dir * hit.t + hit.normal * 0.001;
-
-        scatter(&ray, hit, &throughput);
+        ray.origin += ray.dir * hit.t + hit.normal * 0.00001;
+        const SHADOW_PROB = 0.5;
+        if rand() < SHADOW_PROB {
+            throughput /= SHADOW_PROB;
+            // shadow raw
+            ray.dir = normalize(SUN_DIR + rand_sphere() * 0.01);
+            ray.idir = vec3f(1.0) / ray.dir;
+            if !trace_bvh_shadow(ray) {
+                lighting += throughput * SUN_COL * 6.0 * lambert(SUN_DIR, hit.normal);
+            }
+            break;
+        } else {
+            throughput /= (1.0 - SHADOW_PROB);
+            scatter(&ray, hit, &throughput);
+        }
+        
     }
 
     if (debug < 0.0) {
@@ -577,7 +646,7 @@ fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 }
 
 fn tonemap(in: vec3f) -> vec3f {
-    return vec3f(1.0 - pow(vec3f(0.25), in));
+    return vec3f(pow(1.0 - pow(vec3f(0.25), in), vec3f(1.1)));
 }
 
 @fragment
@@ -588,6 +657,6 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     }
     let scr = screen[id.x + globals.res.x * id.y];
     var col = scr.rgb / scr.a;
-    // col = tonemap(col);
+    col = tonemap(col / 5.0);
     return vec4f(col, 1.0);
 }
