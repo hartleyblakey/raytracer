@@ -183,14 +183,16 @@ impl BvhNode {
 struct Bvh<'a> {
     nodes: Vec<BvhNode>,
     tris: &'a Vec<Tri>,
+    tri_exts: &'a Vec<TriExt>,
     indices: Vec<u32>,
 }
 
 impl<'a> Bvh<'a> {
-    fn new(triangles: &'a Vec<Tri>) -> Self {
+    fn new(triangles: &'a Vec<Tri>, exts: &'a Vec<TriExt>) -> Self {
         Self {
             nodes: Vec::new(),
             tris: triangles,
+            tri_exts: exts,
             indices: (0..triangles.len() as u32).collect(),
         }
     }
@@ -201,12 +203,14 @@ impl<'a> Bvh<'a> {
     }
 
     /// remove the layer of indirection used to build the BVH
-    fn flat_triangles(&self) -> Vec<Tri> {
+    fn flat_triangles(&self) -> (Vec<Tri>, Vec<TriExt>) {
         let mut tris = self.tris.clone();
+        let mut exts = self.tri_exts.clone();
         for i in 0..tris.len() {
             tris[i] = self.tris[self.indices[i] as usize];
+            exts[i] = self.tri_exts[self.indices[i] as usize];
         }
-        tris
+        (tris, exts)
     }
 
     fn evaluate_split(&self, node: &BvhNode, axis: usize, split: f32) -> f32 {
@@ -443,7 +447,7 @@ struct GpuSceneUniform {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuTexcoord {
     offset: u32,
     size: u32,
@@ -459,6 +463,16 @@ impl GpuTexcoord {
             pos
         }
     }
+
+    fn zero() -> Self {
+        Self {
+            offset: 0,
+            size: 0,
+            pos: vec2(0.0, 0.0)
+        }
+    }
+
+
     fn size(&self) -> UVec2 {
         uvec2(self.size & 0xFF, self.size >> 16)
     }
@@ -470,10 +484,18 @@ impl GpuTexcoord {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuVertexExt {
     tex0: GpuTexcoord,
+    normal: Vec2,
+    color: u32,
+    _pad: f32
 }
 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct TriExt {
     vertices: [GpuVertexExt; 3]
 }
@@ -533,24 +555,46 @@ impl FlatScene {
                     // TODO: figure out what this lambda that I copied does
                     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
     
-                    let positions: Vec<Vec3> = reader.read_positions().unwrap().map(
-                        |p| 
-                        Self::from_gltf_vec3(
-                            ms.top().transform_point3(Vec3::from_slice(&[p[0], p[1], p[2]]))
-                        )
+                    let positions: Vec<Vec3> = reader.read_positions().unwrap()
+                    .map( |p| 
+                        Self::from_gltf_vec3(ms.top().transform_point3(Vec3::from_slice(&p)))
                     ).collect();
-    
+                    
+                    
+                    let mut colors = reader.read_colors(0);
+                    let mut colors = if colors.is_some() {
+                        Some(colors.unwrap().into_rgba_u8().map(|c| *bytemuck::from_bytes::<u32>(&c)))
+                    } else {
+                        None
+                    };
+                    
                     if let Some(indices) = reader.read_indices() {
                         // indexed mesh
                         let mut indices = indices.into_u32();
                         while let (Some(a), Some(b), Some(c)) = (indices.next(), indices.next(), indices.next()) {
+                            let mut ext = TriExt::default();
+                            ext.vertices[0].color = 0x00A0A0FF;
+                            ext.vertices[1].color = 0xA000A0FF;
+                            ext.vertices[2].color = 0xA0A000FF;
+                            if let Some(ref mut colors) = colors {
+                                ext.vertices[0].color = colors.next().unwrap_or(0);
+                                ext.vertices[1].color = colors.next().unwrap_or(0);
+                                ext.vertices[2].color = colors.next().unwrap_or(0);
+                            }
                             self.triangles.push(Tri::new(positions[a as usize], positions[b as usize], positions[c as usize]));
+                            self.triangles_ext.push(ext);
                         }
                     }
                     else {
                         // non-indexed mesh
                         for p in positions.chunks(3) {
+                            let c = [0, 0, 0];
+                            let mut ext = TriExt::default();
+                            ext.vertices[0].color = c[0];
+                            ext.vertices[1].color = c[1];
+                            ext.vertices[2].color = c[2];
                             self.triangles.push(Tri::new(p[0], p[1], p[2]));
+                            self.triangles_ext.push(ext);
                         }
                     }
                 } else {
@@ -600,6 +644,7 @@ impl Context {
 
         self.rt_data_binding = gpu.new_bind_group()
             .with_buffer(&self.triangles_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.triangles_ext_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.screen_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut self.resources);
@@ -641,7 +686,7 @@ impl Context {
         println!("Tri size : {} mb", (scene.triangles.len() * size_of::<Tri>()) / (1000 * 1000));
         println!();
         println!("building bvh");
-        let mut bvh = Bvh::new(&scene.triangles);
+        let mut bvh = Bvh::new(&scene.triangles, &scene.triangles_ext);
         bvh.build();
         println!("Bvh size : {} mb", (bvh.nodes.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
@@ -671,6 +716,7 @@ impl Context {
 
         let rt_data_bg = gpu.new_bind_group()
             .with_buffer(&triangles_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&triangles_ext_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&screen_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut resources);
@@ -724,8 +770,9 @@ impl Context {
             }
         );
 
-
-        gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(bvh.flat_triangles().as_slice()));
+        let (flat_tris, flat_exts) = bvh.flat_triangles();
+        gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(flat_tris.as_slice()));
+        gpu.queue.write_buffer(&triangles_ext_ssbo.raw, 0, bytemuck::cast_slice(flat_exts.as_slice()));
         gpu.queue.write_buffer(&bvh_ssbo.raw, 0, bytemuck::cast_slice(bvh.nodes.as_slice()));
 
         // sanity check for aabb gen

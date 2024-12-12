@@ -1,8 +1,9 @@
 @group(0) @binding(0) var<uniform> globals : FrameUniforms;
 
 @group(1) @binding(0) var<storage, read_write> triangles : array<Tri>;
-@group(1) @binding(1) var<storage, read_write> bvh : array<BvhNode>;
-@group(1) @binding(2) var<storage, read_write> screen : array<vec4f>;
+@group(1) @binding(1) var<storage, read_write> tri_exts : array<TriExt>;
+@group(1) @binding(2) var<storage, read_write> bvh : array<BvhNode>;
+@group(1) @binding(3) var<storage, read_write> screen : array<vec4f>;
 
 const pi = 3.141592654;
 const hemisphere_area = 2.0 * pi;
@@ -62,6 +63,53 @@ struct FrameUniforms {
 //     point_lights: array<PointLight, 12>,
 //     directional_lights: array<DirectionalLight, 4>,
 // }
+
+struct GpuTexcoord {
+    offset: u32,
+    size: u32,
+    pos: vec2f,
+}
+
+struct GpuVertexExt {
+    tex0: GpuTexcoord,
+    normal: vec2f,
+    color: u32,
+    _pad: f32
+}
+
+struct ExtSample {
+    tex0: vec4f,
+    color: vec4f,
+    normal: vec3f,
+    
+}
+
+fn unpack_rgba8(x: u32) -> vec4f {
+    return vec4f(
+        f32((x >> 24u) & 255u) / 255.0,
+        f32((x >> 16u) & 255u) / 255.0,
+        f32((x >> 8u)  & 255u) / 255.0,
+        f32((x >> 0u)  & 255u) / 255.0
+    );
+}
+
+struct TriExt {
+    vertices: array<GpuVertexExt, 3>
+}
+
+fn tri_ext_sample(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
+    var res = ExtSample(vec4f(0.0, 0.0, 0.0, 0.0), vec4f(0.0, 0.0, 0.0, 0.0), vec3f(0.0, 0.0, 0.0));
+    res.color += bary.x * unpack_rgba8((*tri).vertices[0].color);
+
+
+    res.color += bary.y * unpack_rgba8((*tri).vertices[1].color);
+
+
+    res.color += bary.z * unpack_rgba8((*tri).vertices[2].color);
+
+    return res;
+}
+
 
 ////////////// aabb //////////////
 struct Aabb {
@@ -550,6 +598,10 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
             //   emissive = rand_color() * 500.0;
             // }
         }
+
+        var ext = tri_exts[hit.idx];
+        let sample = tri_ext_sample(&ext, hit.bary);
+        albedo = sample.color.rgb;
 
         // albedo = vec3f(hit.bary, 0.0);
         // if (distance(length(hit.bary), 0.5) > 0.1) {
