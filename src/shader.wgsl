@@ -13,7 +13,7 @@ const FORWARD = vec3f(1.0, 0.0, 0.0);
 const UP = vec3f(0.0, 0.0, 1.0);
 const RIGHT = vec3f(0.0, -1.0, 0.0);
 
-const SUN_DIR = vec3f(0.0, -0.707106781187, 0.707106781187);
+const SUN_DIR = vec3f(0.707106781187, 0.0 , 0.707106781187);
 const SUN_COL = vec3f(1.0, 0.7995, 0.5992);
 
 struct Camera {
@@ -65,9 +65,10 @@ struct FrameUniforms {
 // }
 
 struct GpuTexcoord {
+    pos: vec2f,
     offset: u32,
     size: u32,
-    pos: vec2f,
+    
 }
 
 struct GpuVertexExt {
@@ -97,16 +98,28 @@ struct TriExt {
     vertices: array<GpuVertexExt, 3>
 }
 
+fn dummy_texture(uv: vec2f) -> vec4f {
+    let checker = f32((u32(uv.x * 32.0) + u32(uv.y * 32.0 + 1.0)) % 2u);
+    let col = mix(vec3f(0.8, 0.3, 0.3), vec3f(0.8, 0.3, 0.3) * 0.5, checker);
+    return vec4f(col.x, col.y, col.z, 1.0);
+    // return vec4f(checker, uv.x, uv.y, 1.0);
+}
+
 fn tri_ext_sample(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     var res = ExtSample(vec4f(0.0, 0.0, 0.0, 0.0), vec4f(0.0, 0.0, 0.0, 0.0), vec3f(0.0, 0.0, 0.0));
-    res.color += bary.x * unpack_rgba8((*tri).vertices[0].color);
 
+    var tc0 = vec2f(0.0, 0.0);
+    res.color += bary.x * unpack_rgba8((*tri).vertices[0].color);
+    tc0 += bary.x * (*tri).vertices[0].tex0.pos;
 
     res.color += bary.y * unpack_rgba8((*tri).vertices[1].color);
-
+    tc0 += bary.y * (*tri).vertices[1].tex0.pos;
 
     res.color += bary.z * unpack_rgba8((*tri).vertices[2].color);
+    tc0 += bary.z * (*tri).vertices[2].tex0.pos;
 
+    res.tex0 = dummy_texture(tc0);
+   //  res.tex0 = vec4f(tc0, 0.0, 1.0);
     return res;
 }
 
@@ -255,7 +268,7 @@ fn intersect_full(ray: Ray, idx: i32) -> Hit {
     hit.normal *= -sign11(dot(hit.normal, ray.dir));
     hit.idx = idx;
     hit.t = t;
-    hit.bary = vec3f(u, v, (1.0 - u) - v);
+    hit.bary = vec3f((1.0 - u) - v, u, v);
     return hit;
 }
 
@@ -591,17 +604,18 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
         //     emissive = to_linear(rand_color()) * 8.0;
         // }
         // albedo = vec3f(0.7);
+        var ext = tri_exts[hit.idx];
+        let sample = tri_ext_sample(&ext, hit.bary);
+        albedo = sample.tex0.rgb;
 
         if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
-            albedo = vec3f(0.4);
+            // albedo = vec3f(0.1);
             // if (hit.idx % 25 == 2) {
             //   emissive = rand_color() * 500.0;
             // }
         }
 
-        var ext = tri_exts[hit.idx];
-        let sample = tri_ext_sample(&ext, hit.bary);
-        albedo = sample.color.rgb;
+
 
         // albedo = vec3f(hit.bary, 0.0);
         // if (distance(length(hit.bary), 0.5) > 0.1) {
@@ -648,7 +662,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
 
     var ray = camera_ray(id.xy);
-    for (var i = 0; i < 3; i++) {
+    for (var i = 0; i < 5; i++) {
         let hit = trace(ray);
         
         shade(hit, ray.dir, &throughput, &lighting);
@@ -657,7 +671,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             break;
         }
 
-        ray.origin += ray.dir * hit.t + hit.normal * 0.00001;
+        ray.origin += ray.dir * hit.t + hit.normal * 0.0001;
         const SHADOW_PROB = 0.5;
         if rand() < SHADOW_PROB {
             throughput /= SHADOW_PROB;
@@ -665,7 +679,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             ray.dir = normalize(SUN_DIR + rand_sphere() * 0.01);
             ray.idir = vec3f(1.0) / ray.dir;
             if !trace_bvh_shadow(ray) {
-                lighting += throughput * SUN_COL * 6.0 * lambert(SUN_DIR, hit.normal);
+                lighting += throughput * SUN_COL * 12.0 * lambert(SUN_DIR, hit.normal);
             }
             break;
         } else {
@@ -709,6 +723,7 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     }
     let scr = screen[id.x + globals.res.x * id.y];
     var col = scr.rgb / scr.a;
-    col = tonemap(col / 5.0);
+    col = tonemap(col / 1.5);
+    // col = dummy_texture(p.xy / vec2f(globals.res)).rgb;
     return vec4f(col, 1.0);
 }

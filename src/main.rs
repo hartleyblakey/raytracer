@@ -1,5 +1,6 @@
 use std::{borrow::Cow, collections::{HashMap, HashSet}, f32::consts::PI, mem::swap, str::FromStr};
 use gltf::Gltf;
+use image::GenericImageView;
 use js_sys::ArrayBuffer;
 use rand::random;
 use wasm_bindgen::JsCast;
@@ -449,9 +450,9 @@ struct GpuSceneUniform {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuTexcoord {
+    pos: Vec2,
     offset: u32,
     size: u32,
-    pos: Vec2,
 }
 
 impl GpuTexcoord {
@@ -505,6 +506,8 @@ struct TriExt {
 struct FlatScene {
     triangles: Vec<Tri>,
     triangles_ext: Vec<TriExt>,
+    texture_data: Vec<u32>,
+    texture_map: HashMap<usize, usize>,
     cameras:   Vec<Camera>,
     point_lights: Vec<PointLight>,
     directional_lights: Vec<DirectionalLight>,
@@ -559,28 +562,66 @@ impl FlatScene {
                     .map( |p| 
                         Self::from_gltf_vec3(ms.top().transform_point3(Vec3::from_slice(&p)))
                     ).collect();
+
+                    let mut base_color_texture_id = 0;
+                    let mut base_color_texture_offset = 0;
+                    let mut base_color_texture_size = uvec2(0, 0);
+                    if let Some(tex) = primitive.material().pbr_metallic_roughness().base_color_texture() {
+                        base_color_texture_id = tex.tex_coord();
+                        if !self.texture_map.contains_key(&tex.texture().index()) {
+                            self.texture_map.insert(tex.texture().index(), base_color_texture_offset);
+                        
+                            if let gltf::image::Source::Uri {uri, .. } = tex.texture().source().source() {
+                                let image = image::ImageReader::open(uri).unwrap().decode().unwrap();
+                                let samples = image.as_rgba8().unwrap();
+                                base_color_texture_offset = self.texture_data.len();
+                                base_color_texture_size = uvec2(image.dimensions().0, image.dimensions().1);
+                                for pixel in samples.pixels() {
+                                    self.texture_data.push(*bytemuck::from_bytes::<u32>(&pixel.0))
+                                }
+                                
+                            }
+                        } else {
+                            base_color_texture_offset = self.texture_map[&tex.texture().index()];
+                        }
                     
+                    }
                     
-                    let mut colors = reader.read_colors(0);
-                    let mut colors = if colors.is_some() {
-                        Some(colors.unwrap().into_rgba_u8().map(|c| *bytemuck::from_bytes::<u32>(&c)))
+
+                    let colors = reader.read_colors(0);
+                    let colors: Vec<u32> = if colors.is_some() {
+                        colors.unwrap().into_rgba_u8().map(|c| *bytemuck::from_bytes::<u32>(&c)).collect()
                     } else {
-                        None
+                        Vec::new()
                     };
+
+                    let texcoords = reader.read_tex_coords(base_color_texture_id);
+                    let texcoords: Vec<Vec2> = if texcoords.is_some() {
+                        texcoords.unwrap().into_f32().map(|uv| Vec2::from_slice(&uv)).collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    
                     
                     if let Some(indices) = reader.read_indices() {
                         // indexed mesh
                         let mut indices = indices.into_u32();
                         while let (Some(a), Some(b), Some(c)) = (indices.next(), indices.next(), indices.next()) {
                             let mut ext = TriExt::default();
-                            ext.vertices[0].color = 0x00A0A0FF;
-                            ext.vertices[1].color = 0xA000A0FF;
-                            ext.vertices[2].color = 0xA0A000FF;
-                            if let Some(ref mut colors) = colors {
-                                ext.vertices[0].color = colors.next().unwrap_or(0);
-                                ext.vertices[1].color = colors.next().unwrap_or(0);
-                                ext.vertices[2].color = colors.next().unwrap_or(0);
+
+                            if !colors.is_empty() {
+                                ext.vertices[0].color = colors[a as usize];
+                                ext.vertices[1].color = colors[b as usize];
+                                ext.vertices[2].color = colors[c as usize];
                             }
+
+                            if !texcoords.is_empty() {
+                                ext.vertices[0].tex0.pos = texcoords[a as usize];
+                                ext.vertices[1].tex0.pos = texcoords[b as usize];
+                                ext.vertices[2].tex0.pos = texcoords[c as usize];
+                            }
+
                             self.triangles.push(Tri::new(positions[a as usize], positions[b as usize], positions[c as usize]));
                             self.triangles_ext.push(ext);
                         }
