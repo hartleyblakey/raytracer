@@ -1,5 +1,5 @@
 # CS 375 Final Project
-![screenshot](/Final-Project/screenshots/decimated_dragon.png?raw=true)
+![screenshot](/Final-Project/screenshots/red_uvs.png?raw=true)
 ## Overview
 
 For this project I will write a simple raytracer that can render a static model from a gltf file. I will make a simple bvh to accelerate ray traversal, and would like to support textures.
