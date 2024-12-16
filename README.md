@@ -18,6 +18,7 @@
 
 - technically can be built for the web
   - hardcoded resolution to 512x512, no extra effort put in beyond getting it to compile
+  - [hosted on blue here (requires webgpu)](https://blue.cs.sonoma.edu/~hblakey/CS-375/Final-Project/generated/index.html)
 
 
 #### Source Files
