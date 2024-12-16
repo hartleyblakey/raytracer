@@ -1,21 +1,19 @@
 @group(0) @binding(0) var<uniform> globals : FrameUniforms;
 
-@group(1) @binding(0) var<storage, read_write> triangles : array<Tri>;
-@group(1) @binding(1) var<storage, read_write> tri_exts : array<TriExt>;
-@group(1) @binding(2) var<storage, read_write> bvh : array<BvhNode>;
-@group(1) @binding(3) var<storage, read_write> screen : array<vec4f>;
-@group(1) @binding(4) var<storage, read_write> texture_data : array<u32>;
+@group(1) @binding(0) var<storage, read_write> triangles :      array<Tri>;
+@group(1) @binding(1) var<storage, read_write> tri_exts :       array<TriExt>;
+@group(1) @binding(2) var<storage, read_write> bvh :            array<BvhNode>;
+@group(1) @binding(3) var<storage, read_write> screen :         array<vec4f>;
+@group(1) @binding(4) var<storage, read_write> texture_data :   array<u32>;
 
 const pi = 3.141592654;
-const hemisphere_area = 2.0 * pi;
-const sphere_area = 4.0 * pi;
 
 const FORWARD = vec3f(1.0, 0.0, 0.0);
 const UP = vec3f(0.0, 0.0, 1.0);
 const RIGHT = vec3f(0.0, -1.0, 0.0);
 
 // const SUN_DIR = vec3f(0.707106781187, 0.0 , 0.707106781187);
-const SUN_DIR = vec3f(0.5, 0.0 , 0.86603);
+const TO_SUN_DIR = vec3f(0.5, 0.0 , 0.86603);
 
 const SUN_COL = vec3f(1.0, 0.7995, 0.5992);
 
@@ -104,10 +102,9 @@ struct GpuVertexExt {
 }
 
 struct ExtSample {
-    tex0: vec4f,
     color: vec4f,
+    uv0: vec2f,
     normal: vec3f,
-    
 }
 
 fn unpack_rgba8(x: u32) -> vec4f {
@@ -123,35 +120,28 @@ struct TriExt {
     vertices: array<GpuVertexExt, 3>
 }
 
+// red checkerboard for missing textures
 fn dummy_texture(uv: vec2f) -> vec4f {
     let checker = f32((u32(uv.x * 32.0) + u32(uv.y * 32.0 + 1.0)) % 2u);
     let col = mix(vec3f(0.8, 0.3, 0.3), vec3f(0.8, 0.3, 0.3) * 0.5, checker);
-    return vec4f(0.5, 0.5, 0.5, 1.0);
-    // return vec4f(col.x, col.y, col.z, 1.0);
+    return vec4f(col.r, col.g, col.b, 1.0);
     // return vec4f(checker, uv.x, uv.y, 1.0);
 }
 
-fn tri_ext_sample(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
-    var res = ExtSample(vec4f(0.0, 0.0, 0.0, 0.0), vec4f(0.0, 0.0, 0.0, 0.0), vec3f(0.0, 0.0, 0.0));
+// barycentric interpolation of vertex attributes
+fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
+    var res = ExtSample(vec4f(0.0, 0.0, 0.0, 0.0), vec2f(0.0, 0.0), vec3f(0.0, 0.0, 0.0));
 
-    var tc0 = vec2f(0.0, 0.0);
     res.color += bary.x * unpack_rgba8((*tri).vertices[0].color);
-    tc0 += bary.x * (*tri).vertices[0].tex0.pos;
+    res.uv0 += bary.x * (*tri).vertices[0].tex0.pos;
 
     res.color += bary.y * unpack_rgba8((*tri).vertices[1].color);
-    tc0 += bary.y * (*tri).vertices[1].tex0.pos;
+     res.uv0 += bary.y * (*tri).vertices[1].tex0.pos;
 
     res.color += bary.z * unpack_rgba8((*tri).vertices[2].color);
-    tc0 += bary.z * (*tri).vertices[2].tex0.pos;
+    res.uv0 += bary.z * (*tri).vertices[2].tex0.pos;
 
-    tc0 = fract(tc0);
-
-    res.tex0 = dummy_texture(tc0);
-
-    var tc = (*tri).vertices[0].tex0;
-    tc.pos = tc0;
-    res.tex0 = sample_texture(tc);
-
+    res.uv0 = fract( res.uv0);
    //  res.tex0 = vec4f(tc0, 0.0, 1.0);
     return res;
 }
@@ -270,6 +260,8 @@ fn sign11(x: f32) -> f32 {
     }
 }
 
+// modified version of intersect() to return more info
+//     from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
 fn intersect_full(ray: Ray, idx: i32) -> Hit {
     let tri = triangles[idx];
     var hit = Hit(0.0, -1, vec3f(0.0, 0.0, 1.0), vec3f(0.333, 0.333, 0.333));
@@ -343,7 +335,6 @@ fn trace_bvh(ray: Ray) -> i32 {
         return best_i;
     }
     debug = 0.0;
-    // var iterations = 0;
     while (true) {
         // debug = max(debug, f32(stack.size + 1u));
         // visualize bvh steps
@@ -351,8 +342,6 @@ fn trace_bvh(ray: Ray) -> i32 {
 
 
         if node.count > 0 {
-            // debug += 1.0;
-            // debug = max(debug, f32(node.count));
             // intersect triangles of node
             for (var i = node.first; i < node.first + node.count; i++) {
                 
@@ -367,9 +356,8 @@ fn trace_bvh(ray: Ray) -> i32 {
             }
             node = bvh[pop(&stack)];
         } else {
-            // // push the nodes children onto the stack
-            // push(&stack, node.first + 0u);
-            // push(&stack, node.first + 1u);
+            // avoid pushing nodes onto the stack where possible
+            // order nodes based on distance
 
             // try ordering the nodes
             let left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
@@ -417,6 +405,9 @@ fn trace_bvh_shadow(ray: Ray) -> bool {
             }
             node = bvh[pop(&stack)];
         } else {
+            // avoid pushing nodes onto the stack where possible
+            // order nodes based on distance
+
             let left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
             let right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
     
@@ -442,60 +433,10 @@ fn trace_bvh_shadow(ray: Ray) -> bool {
     return false;
 }
 
-
+// just traces the one BVH for now
 fn trace(ray: Ray) -> Hit {
-    var closest_idx = -1;
-    var closest_t = 999999999.0;
-
-    closest_idx = trace_bvh(ray);
+    var closest_idx = trace_bvh(ray);
     return intersect_full(ray, closest_idx);
-
-    // // test header
-    // var hit: Hit;
-    // hit.bary = vec3f(0.33);
-    // hit.idx = -1;
-    // hit.normal = vec3f(0.0, 0.0, 1.0);
-    // hit.t = 99999999.0;
-    // debug = 0.0;
-
-    // // test aabb intersection
-    // aabb.data = array<f32, 6>(-1.0, -1.0, -1.0, 0.0, 0.0, 0.0);
-    // if (intersects_aabb(ray, aabb)) {
-    //     hit.t = 1.0;
-    //     hit.idx = 0;
-    //     debug += 1.0;
-    // }
-    // return hit;
-
-    // // visualize leaf nodes
-    // let start = (globals.frame * 1u) % (globals.node_count - 128u);
-    // for (var i = start; i < start + 128u; i++) {
-    //     let node = bvh[i];
-    //     if (node.count != 0) {
-    //         if (intersect_aabb(ray, node.aabb) >= 0.0) {
-    //             debug += 1.0;
-    //             for (var j = node.first; j < node.first + node.count; j++) {
-    //                 let t = intersect(ray, triangles[j]);
-    //                 if (t >= 0.0) {
-    //                     debug += 1.0;
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    // }
-    // return hit;
-
-    // for (var i = 0; i < i32(globals.scene.tri_count); i++) {
-    //     let t = intersect(ray, triangles[i]);
-    //     if (t >= 0.0 && t < hit.t) {
-    //         hit.idx = i;
-    //         hit.t = t;
-    //     }
-    // }
-    // return hit;
-    // return intersect_full(ray, hit.idx);
-    
 }
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
@@ -545,7 +486,7 @@ fn rand_color() -> vec3f {
 
 fn sky(dir: vec3f) -> vec3f {
     let horizon = vec3f(1.0 - SUN_COL);
-    return mix(horizon, SUN_COL,pow(max(dot(dir, SUN_DIR), 0.0), 3.0)) * 1.00;
+    return mix(horizon, SUN_COL,pow(max(dot(dir, TO_SUN_DIR), 0.0), 3.0)) * 1.00;
     // return to_linear(dir * 0.5 + 0.5);
     // return vec3f(1.0);
 }
@@ -607,6 +548,7 @@ fn to_linear(srgb: vec3f) -> vec3f {
     return pow(srgb, vec3f(2.2));
 }
 
+// false color visualizations, x will be clamped from 0..1
 fn ramp(x: f32) -> vec3f {
     if x < 0.0 {
         return vec3f(0.0, 0.0, 1.0);
@@ -619,47 +561,32 @@ fn ramp(x: f32) -> vec3f {
 
 fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
 
+    // stable per-triangle randomness for debugging
     let backup = seed;
     seed = u32(hit.idx * 7);
     rand();
 
     var emissive = vec3f(0);
     var albedo   = vec3f(0.7);
-    var alpha = 1.0;
+
     if (hit.idx == -1) {
         // miss
         emissive = sky(dir);
     } else {
-        if (hit.idx % 135 == 2) {
-            // emissive = rand_color() * 14.0;
-        } else if (hit.idx % 3 == 1) {
-            // albedo = rand_color();
-        }
-        // if hit.normal.z > 0.95 {
-        //     emissive = to_linear(rand_color()) * 8.0;
-        // }
-        // albedo = vec3f(0.7);
+        // sample extra vertex data
         var ext = tri_exts[hit.idx];
-        let sample = tri_ext_sample(&ext, hit.bary);
-        albedo = sample.tex0.rgb;
-        if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
-            // albedo = vec3f(0.1);
-            // if (hit.idx % 25 == 2) {
-            //   emissive = rand_color() * 500.0;
-            // }
-        }
+        let sample = tri_ext_interpolate(&ext, hit.bary);
+        var tc0 = ext.vertices[0].tex0;
+        tc0.pos = sample.uv0;
+        albedo = sample_texture(tc0).rgb;
 
-
-
-        // albedo = vec3f(hit.bary, 0.0);
-        // if (distance(length(hit.bary), 0.5) > 0.1) {
-        //     albedo = rand_color();
-        // } else {
-        //     // emissive = vec3f(1.0);
+        // // show triangle outlines
+        // if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
+        //     albedo = vec3f(0.1);
         // }
     }
 
-    // // visualize bvh
+    // // debug visualization
     // emissive = ramp(debug / 128.0);
 
     // // visualize normals
@@ -674,14 +601,14 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
     seed = backup;
 }
 
-fn scatter(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>) {
+fn sample_lambert(ray: ptr<function, Ray>, hit: Hit) {
     // from raytracing in one weekend
     (*ray).dir = normalize(hit.normal + rand_sphere());
     (*ray).idir = vec3f(1.0) / (*ray).dir;
 }
 
-fn lambert(dir: vec3f, normal:  vec3f) -> f32 {
-    return max(dot(dir, normal), 0.0) / pi;
+fn eval_lambert(to_light: vec3f, normal:  vec3f) -> f32 {
+    return max(dot(to_light, normal), 0.0) / pi;
 }
 
 @compute
@@ -708,17 +635,20 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         ray.origin += ray.dir * hit.t + hit.normal * 0.0001;
         const SHADOW_PROB = 0.5;
         if rand() < SHADOW_PROB {
+            // sun shadow ray
             throughput /= SHADOW_PROB;
-            // shadow raw
-            ray.dir = normalize(SUN_DIR + rand_sphere() * 0.01);
+
+            ray.dir = normalize(TO_SUN_DIR + rand_sphere() * 0.01);
             ray.idir = vec3f(1.0) / ray.dir;
             if !trace_bvh_shadow(ray) {
-                lighting += throughput * SUN_COL * 12.0 * lambert(SUN_DIR, hit.normal);
+                lighting += throughput * SUN_COL * 12.0 * eval_lambert(TO_SUN_DIR, hit.normal);
             }
             break;
         } else {
+            // diffuse ray
             throughput /= (1.0 - SHADOW_PROB);
-            scatter(&ray, hit, &throughput);
+
+            sample_lambert(&ray, hit);
         }
         
     }
@@ -740,6 +670,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
 
 @vertex
 fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    // procedural fullscreen triangle
     let x = f32(i32(i) - 1) * 5.0;
     let y = f32(i32(i & 1u) * 2 - 1) * 5.0;
     return vec4<f32>(x, y, 0.0, 1.0);
@@ -756,8 +687,10 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
         return vec4f(0.5, 0.1, 0.1, 1.0);
     }
     let scr = screen[id.x + globals.res.x * id.y];
+
+    // divide total by number of samples
     var col = scr.rgb / scr.a;
+
     col = tonemap(col / 5.0);
-    // col = dummy_texture(p.xy / vec2f(globals.res)).rgb;
     return vec4f(col, 1.0);
 }
