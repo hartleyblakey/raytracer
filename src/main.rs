@@ -2,6 +2,7 @@ use std::{borrow::Cow, collections::{HashMap, HashSet}, f32::consts::PI, mem::sw
 use gltf::Gltf;
 use image::GenericImageView;
 use js_sys::ArrayBuffer;
+use pollster::FutureExt;
 use rand::random;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -339,25 +340,29 @@ impl<'a> Bvh<'a> {
 }
 
 struct Context {
-    screen_pipeline:        wgpu::RenderPipeline,
-    raytrace_pipeline:      wgpu::ComputePipeline,
+    screen_pipeline:            wgpu::RenderPipeline,
+    screen_pipeline_layout:     wgpu::PipelineLayout,
+    raytrace_pipeline:          wgpu::ComputePipeline,
+    raytrace_pipeline_layout:   wgpu::PipelineLayout,
 
-    shader_module:          wgpu::ShaderModule,
+    shader_compiled_timestamp:  SystemTime, 
 
-    triangles_ssbo:         Buffer,
-    bvh_ssbo:               Buffer,
-    screen_ssbo:            Buffer,
-    triangles_ext_ssbo:     Buffer,
-    texture_data_ssbo:      Buffer,
-    rt_data_binding:        BindGroup,
+    shader_module:              wgpu::ShaderModule,
 
-    frame_uniforms_binding: BindGroup,
-    frame_uniforms_buffer:  Buffer,
-    frame_uniforms:         FrameUniforms,
+    triangles_ssbo:             Buffer,
+    bvh_ssbo:                   Buffer,
+    screen_ssbo:                Buffer,
+    triangles_ext_ssbo:         Buffer,
+    texture_data_ssbo:          Buffer,
+    rt_data_binding:            BindGroup,
 
-    resources:              ResourceManager,
+    frame_uniforms_binding:     BindGroup,
+    frame_uniforms_buffer:      Buffer,
+    frame_uniforms:             FrameUniforms,
 
-    scene:                  FlatScene,
+    resources:                  ResourceManager,
+
+    scene:                      FlatScene,
 }
 
 struct MatrixStack {
@@ -472,15 +477,10 @@ impl FlatScene {
         vec3(v.z, v.x, v.y)
     }
 
-    fn add_gltf(&mut self, path: &str) {
-        let (document, buffers, _) = gltf::import(path).unwrap();
-        let mut ms = MatrixStack::new();
-        for scene in document.scenes(){
-            for node in scene.nodes() {
-                self.add_gltf_node(&buffers, node, &mut ms);
-            }
-        }
+    async fn add_gltf(&mut self, transform: &Mat4, path: &str) {
+        self.add_gltf_bytes(transform, fetch_bytes(path).await.as_slice());
     }   
+
     fn rgba8_to_u32(x: &[u8; 4]) -> u32 {
         let mut r: u32 = 0;
         r |= (x[0] as u32) << 24;
@@ -700,42 +700,96 @@ impl Context {
             .finish(&mut self.resources);
     }
 
-    fn init(gpu: &Gpu) -> Context {
-        let mut scene = FlatScene::default();
-        // scene.add_gltf_bytes(&Mat4::from_rotation_x(-90.0_f32.to_radians()), include_bytes!("../resources/suzanne.glb"));
-        // scene.add_gltf_bytes(&Mat4::from_translation(vec3(0.0, -3.0, 0.0)), include_bytes!("../resources/simple.glb"));
-        let mut ms = MatrixStack::new();
-    
-        println!("building scene");
-        // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/large/DragonAttenuation.glb"));
- 
+    fn create_pipelines(
+        shader_module: &wgpu::ShaderModule,
+        screen_pipeline_layout: &wgpu::PipelineLayout, 
+        raytrace_pipeline_layout: &wgpu::PipelineLayout, 
+        gpu: &Gpu) -> (wgpu::RenderPipeline, wgpu::ComputePipeline) {
 
-        // ms.push();
-        // ms.translate(vec3(0.0, 0.0, 10.0));
-        // ms.rotate_y(180.0f32.to_radians());
-        // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/large/DragonAttenuation.glb"));
-        // ms.pop();
-
-        // ms.push();
-        // ms.translate(vec3(0.0, 0.0, 5.0));
-        // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/suzanne.glb"));
-        // ms.pop();
-
-        // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/turtle.glb"));
-
-        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_textured.glb"));
-        //scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
-
-        // scene.add_gltf("resources/large/Sponza.glb");
         
-        if scene.cameras.is_empty() {
-            println!("No camera in scene, falling back to default");
-            // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
-            scene.cameras.push(Camera::default());
+        let screen_pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&screen_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(gpu.surface_config.format.add_srgb_suffix().into())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let raytrace_pipeline = gpu.device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("raytrace compute pipeline"),
+                module: &shader_module,
+                layout: Some(&raytrace_pipeline_layout),
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            }
+        );
+
+        (screen_pipeline, raytrace_pipeline)
+    }
+
+    fn check_recompile_shader(&mut self, gpu: &Gpu) {
+    #[cfg(not(target_arch = "wasm32"))] 
+    {
+        const SHADER_PATH: &str = "src/shader.wgsl";
+
+        let metadata = std::fs::metadata(SHADER_PATH).unwrap();
+        let last_write_time = metadata.modified().unwrap();
+        
+        if last_write_time <= self.shader_compiled_timestamp {
+            return;
         }
+        self.shader_compiled_timestamp = std::time::SystemTime::now();
+
+        let shader_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(std::fs::read_to_string(SHADER_PATH).unwrap().as_str())),
+        });
+        let compilation_info = shader_module.get_compilation_info().block_on().messages;
+        if !compilation_info.is_empty() {
+            for message in compilation_info {
+                let label = match message.message_type {
+                    wgpu::CompilationMessageType::Error => "Error",
+                    wgpu::CompilationMessageType::Warning => "Warning",
+                    wgpu::CompilationMessageType::Info => continue,
+                };
+                println!("Shader Compilation {} at {:?}: \n{}", label, message.location, message.message);
+            }
+            return;
+        }
+
+        let (screen, rt) = Self::create_pipelines(
+            &shader_module, 
+            &self.screen_pipeline_layout, 
+            &self.raytrace_pipeline_layout, 
+            gpu);
         
-        println!("Tri count: {}", scene.triangles.len());
-        println!("Tri size : {} mb", (scene.triangles.len() * size_of::<Tri>()) / (1000 * 1000));
+        self.screen_pipeline = screen;
+        self.raytrace_pipeline = rt;
+        self.shader_module = shader_module;
+        
+        
+    }
+    
+    }
+
+    fn init(gpu: &Gpu, mut scene: FlatScene) -> Context {
+        
         println!();
         println!("building bvh");
         let mut bvh = Bvh::new(&scene.triangles, &scene.triangles_ext);
@@ -833,13 +887,17 @@ impl Context {
 
         Context {
             screen_pipeline,
+            screen_pipeline_layout,
             shader_module,
+
+            shader_compiled_timestamp: SystemTime::now(),
 
             frame_uniforms: u_frame_0,
             frame_uniforms_buffer: u_frame_buffer,
             frame_uniforms_binding: u_frame,
             
             raytrace_pipeline,
+            raytrace_pipeline_layout,
             screen_ssbo,
             bvh_ssbo,
             triangles_ssbo,
@@ -854,6 +912,9 @@ impl Context {
 }
 
 fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
+
+    ctx.check_recompile_shader(gpu);
+
     let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next swap chain texture");
 
     let mut surface_view_desc = wgpu::TextureViewDescriptor::default();
@@ -938,6 +999,48 @@ async fn fetch_bytes(path: &str) -> Vec<u8> {
     }
 }
 
+
+async fn build_scene() -> FlatScene {
+    println!("building scene");
+    let mut scene = FlatScene::default();
+    let mut ms = MatrixStack::new();
+    // scene.add_gltf_bytes(&Mat4::from_rotation_x(-90.0_f32.to_radians()), include_bytes!("../resources/suzanne.glb"));
+    // scene.add_gltf_bytes(&Mat4::from_translation(vec3(0.0, -3.0, 0.0)), include_bytes!("../resources/simple.glb"));
+
+    
+    // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/large/DragonAttenuation.glb"));
+
+
+    // ms.push();
+    // ms.translate(vec3(0.0, 0.0, 10.0));
+    // ms.rotate_y(180.0f32.to_radians());
+    // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/large/DragonAttenuation.glb"));
+    // ms.pop();
+
+    // ms.push();
+    // ms.translate(vec3(0.0, 0.0, 5.0));
+    // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/suzanne.glb"));
+    // ms.pop();
+
+    // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/turtle.glb"));
+
+    scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
+    //scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
+
+    // scene.add_gltf("resources/large/Sponza.glb");
+    
+    if scene.cameras.is_empty() {
+        println!("No camera in scene, falling back to default");
+        // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
+        scene.cameras.push(Camera::default());
+    }
+    
+    println!("Tri count: {}", scene.triangles.len());
+    println!("Tri size : {} mb", (scene.triangles.len() * size_of::<Tri>()) / (1000 * 1000));
+    scene
+}
+
+
 async fn run() {
     let event_loop = EventLoop::new().unwrap();
 
@@ -945,7 +1048,8 @@ async fn run() {
     let window = new_window(&event_loop, [512, 512]);
 
     let mut gpu = Gpu::new(&window).await;
-    let mut ctx = Context::init(&gpu);
+
+    let mut ctx = Context::init(&gpu, build_scene().await);
 
     let mut input = InputState {
         keys: HashSet::new(),

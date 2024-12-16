@@ -691,6 +691,6 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     // divide total by number of samples
     var col = scr.rgb / scr.a;
 
-    col = tonemap(col / 3.0);
+    col = tonemap(col / 2.0);
     return vec4f(col, 1.0);
 }
