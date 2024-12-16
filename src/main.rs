@@ -760,7 +760,7 @@ impl Context {
             label: None,
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(std::fs::read_to_string(SHADER_PATH).unwrap().as_str())),
         });
-        
+
         let compilation_info = shader_module.get_compilation_info().block_on().messages;
         if !compilation_info.is_empty() {
             return;
@@ -781,7 +781,8 @@ impl Context {
     
     }
 
-    fn init(gpu: &Gpu, mut scene: FlatScene) -> Context {
+    async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
+        let scene = build_scene().await;
         
         println!();
         println!("building bvh");
@@ -823,53 +824,31 @@ impl Context {
             .with_buffer(&texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut resources);
 
-        // Load the shaders from disk
+        // fetch shader
         let shader_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
+            source: wgpu::ShaderSource::Wgsl(
+                Cow::Borrowed(
+                    std::str::from_utf8(
+                        fetch_bytes("src/shader.wgsl").await.as_slice()
+                    ).expect("Shader is not valid UTF-8")
+                )
+            ),
         });
 
         let screen_pipeline_layout = gpu.new_pipeline_layout(
             &resources, &[&u_frame, &rt_data_bg]
         );
 
-        let surface_format = gpu.surface_config.format;
-
-        let screen_pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&screen_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader_module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(surface_format.add_srgb_suffix().into())],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
         let raytrace_pipeline_layout = gpu.new_pipeline_layout(
             &resources, &[&u_frame, &rt_data_bg]
         );
 
-        let raytrace_pipeline = gpu.device.create_compute_pipeline(
-            &wgpu::ComputePipelineDescriptor {
-                label: Some("raytrace compute pipeline"),
-                module: &shader_module,
-                layout: Some(&raytrace_pipeline_layout),
-                entry_point: Some("cs_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            }
+        let (screen_pipeline, raytrace_pipeline) = Self::create_pipelines(
+            &shader_module, 
+            &screen_pipeline_layout, 
+            &raytrace_pipeline_layout, 
+            gpu
         );
 
         let (flat_tris, flat_exts) = bvh.flat_triangles();
@@ -1042,7 +1021,7 @@ async fn run() {
 
     let mut gpu = Gpu::new(&window).await;
 
-    let mut ctx = Context::init(&gpu, build_scene().await);
+    let mut ctx = Context::init(&gpu).await;
 
     let mut input = InputState {
         keys: HashSet::new(),
