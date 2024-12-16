@@ -388,6 +388,7 @@ struct Context {
     bvh_ssbo:               Buffer,
     screen_ssbo:            Buffer,
     triangles_ext_ssbo:     Buffer,
+    texture_data_ssbo:      Buffer,
     rt_data_binding:        BindGroup,
 
     frame_uniforms_binding: BindGroup,
@@ -507,7 +508,7 @@ struct FlatScene {
     triangles: Vec<Tri>,
     triangles_ext: Vec<TriExt>,
     texture_data: Vec<u32>,
-    texture_map: HashMap<usize, usize>,
+    texture_map: HashMap<usize, (usize, UVec2)>,
     cameras:   Vec<Camera>,
     point_lights: Vec<PointLight>,
     directional_lights: Vec<DirectionalLight>,
@@ -544,6 +545,24 @@ impl FlatScene {
         }
     }   
 
+    fn u32_to_rgba8(x: u32) -> Vec4 {
+        return vec4(
+            ((x >> 24) & 255) as f32 / 255.0,
+            ((x >> 16) & 255) as f32 / 255.0,
+            ((x >> 8)  & 255) as f32 / 255.0,
+            ((x >> 0)  & 255) as f32 / 255.0
+        );
+    }
+
+    fn rgba8_to_u32(x: &[u8; 4]) -> u32 {
+        let mut r: u32 = 0;
+        r |= (x[0] as u32) << 24;
+        r |= (x[1] as u32) << 16;
+        r |= (x[2] as u32) << 8 ;
+        r |= (x[3] as u32) << 0 ;
+        r
+    }
+
     fn add_gltf_node(&mut self, buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack) {
         ms.push();
         ms.apply(&Mat4::from_cols_array_2d(&node.transform().matrix()));
@@ -568,21 +587,41 @@ impl FlatScene {
                     let mut base_color_texture_size = uvec2(0, 0);
                     if let Some(tex) = primitive.material().pbr_metallic_roughness().base_color_texture() {
                         base_color_texture_id = tex.tex_coord();
+                        println!("Found base_color_texture");
+                        // if we have not already loaded the image
                         if !self.texture_map.contains_key(&tex.texture().index()) {
-                            self.texture_map.insert(tex.texture().index(), base_color_texture_offset);
-                        
-                            if let gltf::image::Source::Uri {uri, .. } = tex.texture().source().source() {
-                                let image = image::ImageReader::open(uri).unwrap().decode().unwrap();
-                                let samples = image.as_rgba8().unwrap();
-                                base_color_texture_offset = self.texture_data.len();
-                                base_color_texture_size = uvec2(image.dimensions().0, image.dimensions().1);
-                                for pixel in samples.pixels() {
-                                    self.texture_data.push(*bytemuck::from_bytes::<u32>(&pixel.0))
-                                }
-                                
+                            // load the image
+
+                            let image = match tex.texture().source().source() {
+                                gltf::image::Source::View { view, .. } => {
+                                    let start = view.offset();
+                                    let end = start + view.length();
+                                    let image_data = &buffers[view.buffer().index()][start..end];
+                                    match image::load_from_memory(image_data) {
+                                        Ok(image) => image,
+                                        Err(e) => {println!("{e}"); panic!()},
+                                    }
+                                    
+                                },
+                                gltf::image::Source::Uri { uri, .. } => {
+                                    image::ImageReader::open(uri).unwrap().decode().unwrap()
+                                },
+                            };
+                            let samples = image.to_rgba8();
+                            base_color_texture_offset = self.texture_data.len();
+                            base_color_texture_size = uvec2(image.dimensions().0, image.dimensions().1);
+                            for pixel in samples.pixels() {
+                                self.texture_data.push(Self::rgba8_to_u32(&pixel.0))
                             }
+                            println!("Found texture with offset {base_color_texture_offset}, size {} by {}", base_color_texture_size.x, base_color_texture_size.y);
+
+                            // record that we loaded the image
+                            self.texture_map.insert(tex.texture().index(), (base_color_texture_offset, base_color_texture_size));
+                        
+
                         } else {
-                            base_color_texture_offset = self.texture_map[&tex.texture().index()];
+                            // retrieve the image location from the cache
+                            (base_color_texture_offset, base_color_texture_size) = self.texture_map[&tex.texture().index()];
                         }
                     
                     }
@@ -590,7 +629,7 @@ impl FlatScene {
 
                     let colors = reader.read_colors(0);
                     let colors: Vec<u32> = if colors.is_some() {
-                        colors.unwrap().into_rgba_u8().map(|c| *bytemuck::from_bytes::<u32>(&c)).collect()
+                        colors.unwrap().into_rgba_u8().map(|c| Self::rgba8_to_u32(&c)).collect()
                     } else {
                         Vec::new()
                     };
@@ -617,9 +656,9 @@ impl FlatScene {
                             }
 
                             if !texcoords.is_empty() {
-                                ext.vertices[0].tex0.pos = texcoords[a as usize];
-                                ext.vertices[1].tex0.pos = texcoords[b as usize];
-                                ext.vertices[2].tex0.pos = texcoords[c as usize];
+                                ext.vertices[0].tex0 = GpuTexcoord::new(base_color_texture_offset as u32, base_color_texture_size, texcoords[a as usize]);
+                                ext.vertices[1].tex0 = GpuTexcoord::new(base_color_texture_offset as u32, base_color_texture_size, texcoords[b as usize]);
+                                ext.vertices[2].tex0 = GpuTexcoord::new(base_color_texture_offset as u32, base_color_texture_size, texcoords[c as usize]);
                             }
 
                             self.triangles.push(Tri::new(positions[a as usize], positions[b as usize], positions[c as usize]));
@@ -688,6 +727,7 @@ impl Context {
             .with_buffer(&self.triangles_ext_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.screen_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.texture_data_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut self.resources);
     }
 
@@ -712,10 +752,12 @@ impl Context {
         // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/suzanne.glb"));
         // ms.pop();
 
+        // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/turtle.glb"));
 
-        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
+        scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_textured.glb"));
+        //scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
 
-       // scene.add_gltf("resources/large/sponza/Sponza.gltf");
+        // scene.add_gltf("resources/large/Sponza.glb");
         
         if scene.cameras.is_empty() {
             println!("No camera in scene, falling back to default");
@@ -748,11 +790,13 @@ impl Context {
             .with_buffer(&u_frame_buffer.view_all(), wgpu::ShaderStages::all())
             .finish(&mut resources);
 
-        let buffer_size_mb = 128;
+        // just make everything 128mb for simplicity
+        let max_buffer_size_mb = 128;
 
-        let triangles_ssbo =        gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
-        let bvh_ssbo =              gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
-        let triangles_ext_ssbo =    gpu.new_storage_buffer(buffer_size_mb * 1024 * 1024);
+        let triangles_ssbo =        gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
+        let bvh_ssbo =              gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
+        let triangles_ext_ssbo =    gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
+        let texture_data_ssbo =     gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
         let rt_data_bg = gpu.new_bind_group()
@@ -760,6 +804,7 @@ impl Context {
             .with_buffer(&triangles_ext_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&screen_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&texture_data_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut resources);
 
         // Load the shaders from disk
@@ -815,6 +860,7 @@ impl Context {
         gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(flat_tris.as_slice()));
         gpu.queue.write_buffer(&triangles_ext_ssbo.raw, 0, bytemuck::cast_slice(flat_exts.as_slice()));
         gpu.queue.write_buffer(&bvh_ssbo.raw, 0, bytemuck::cast_slice(bvh.nodes.as_slice()));
+        gpu.queue.write_buffer(&texture_data_ssbo.raw, 0, bytemuck::cast_slice(scene.texture_data.as_slice()));
 
         // sanity check for aabb gen
         // let mut last = Aabb::new();
@@ -840,6 +886,7 @@ impl Context {
             bvh_ssbo,
             triangles_ssbo,
             triangles_ext_ssbo,
+            texture_data_ssbo,
             rt_data_binding: rt_data_bg,
 
             resources,

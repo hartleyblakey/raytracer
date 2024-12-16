@@ -4,6 +4,7 @@
 @group(1) @binding(1) var<storage, read_write> tri_exts : array<TriExt>;
 @group(1) @binding(2) var<storage, read_write> bvh : array<BvhNode>;
 @group(1) @binding(3) var<storage, read_write> screen : array<vec4f>;
+@group(1) @binding(4) var<storage, read_write> texture_data : array<u32>;
 
 const pi = 3.141592654;
 const hemisphere_area = 2.0 * pi;
@@ -13,7 +14,9 @@ const FORWARD = vec3f(1.0, 0.0, 0.0);
 const UP = vec3f(0.0, 0.0, 1.0);
 const RIGHT = vec3f(0.0, -1.0, 0.0);
 
-const SUN_DIR = vec3f(0.707106781187, 0.0 , 0.707106781187);
+// const SUN_DIR = vec3f(0.707106781187, 0.0 , 0.707106781187);
+const SUN_DIR = vec3f(0.5, 0.0 , 0.86603);
+
 const SUN_COL = vec3f(1.0, 0.7995, 0.5992);
 
 struct Camera {
@@ -64,11 +67,33 @@ struct FrameUniforms {
 //     directional_lights: array<DirectionalLight, 4>,
 // }
 
+////////////// Texcoord //////////////
 struct GpuTexcoord {
     pos: vec2f,
     offset: u32,
     size: u32,
-    
+}
+
+fn tc_size(tc: GpuTexcoord) -> vec2u {
+    return vec2u(tc.size >> 16u, tc.size & 0xFFFFu);
+}
+
+fn sample_texture(tc: GpuTexcoord) -> vec4f {
+    if tc.size == 0 {
+        return dummy_texture(tc.pos);
+    }
+
+    // // visualize texture IDs
+    // let backup = seed;
+    // seed = tc.size;
+    // let col = rand_color();
+    // seed = backup;
+    // return vec4f(col.r, col.g, col.b, 1.0);
+
+    let size = tc_size(tc);
+    let texel_pos = vec2u(tc.pos * vec2f(size));
+    let texel = texture_data[tc.offset + texel_pos.y * size.x + texel_pos.x];
+    return pow(unpack_rgba8(texel), vec4f(2.2));
 }
 
 struct GpuVertexExt {
@@ -101,7 +126,8 @@ struct TriExt {
 fn dummy_texture(uv: vec2f) -> vec4f {
     let checker = f32((u32(uv.x * 32.0) + u32(uv.y * 32.0 + 1.0)) % 2u);
     let col = mix(vec3f(0.8, 0.3, 0.3), vec3f(0.8, 0.3, 0.3) * 0.5, checker);
-    return vec4f(col.x, col.y, col.z, 1.0);
+    return vec4f(0.5, 0.5, 0.5, 1.0);
+    // return vec4f(col.x, col.y, col.z, 1.0);
     // return vec4f(checker, uv.x, uv.y, 1.0);
 }
 
@@ -118,7 +144,14 @@ fn tri_ext_sample(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     res.color += bary.z * unpack_rgba8((*tri).vertices[2].color);
     tc0 += bary.z * (*tri).vertices[2].tex0.pos;
 
+    tc0 = fract(tc0);
+
     res.tex0 = dummy_texture(tc0);
+
+    var tc = (*tri).vertices[0].tex0;
+    tc.pos = tc0;
+    res.tex0 = sample_texture(tc);
+
    //  res.tex0 = vec4f(tc0, 0.0, 1.0);
     return res;
 }
@@ -529,16 +562,18 @@ fn camera_ray(pixel: vec2u) -> Ray {
     let up    = normalize(cross(right,   forward));
     var pixel_pos = ray.origin + forward;
 
-    let a = rand() * pi * 2.0;
-    let m = rand();
+
     let aa_pixel = vec2f(pixel) + vec2f(rand(), rand());
     let aspect = f32(globals.res.x) / f32(globals.res.y);
 
     pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor * aspect;
     pixel_pos += up    * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
 
-    pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
-    pixel_pos += up             * sin(a) * pow(m, 150.0);
+    // // "bloom"
+    // let a = rand() * pi * 2.0;
+    // let m = rand();
+    // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
+    // pixel_pos += up             * sin(a) * pow(m, 150.0);
 
     ray.dir  = normalize(pixel_pos - ray.origin);
     ray.idir = 1.0 / ray.dir;
@@ -590,7 +625,7 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
 
     var emissive = vec3f(0);
     var albedo   = vec3f(0.7);
-
+    var alpha = 1.0;
     if (hit.idx == -1) {
         // miss
         emissive = sky(dir);
@@ -607,7 +642,6 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
         var ext = tri_exts[hit.idx];
         let sample = tri_ext_sample(&ext, hit.bary);
         albedo = sample.tex0.rgb;
-
         if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
             // albedo = vec3f(0.1);
             // if (hit.idx % 25 == 2) {
@@ -723,7 +757,7 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     }
     let scr = screen[id.x + globals.res.x * id.y];
     var col = scr.rgb / scr.a;
-    col = tonemap(col / 1.5);
+    col = tonemap(col / 5.0);
     // col = dummy_texture(p.xy / vec2f(globals.res)).rgb;
     return vec4f(col, 1.0);
 }
