@@ -285,6 +285,23 @@ impl<'a> Gpu<'a> {
             .await
             .expect("Failed to create device");
 
+
+        device.on_uncaptured_error(Box::new(
+            |error| 
+            {
+                match &error {
+                    wgpu::Error::Validation { source: _, description } => {
+                        if description.contains("Device::create_shader_module") {
+                            return;
+                        }
+                    },
+                    _ => (),
+                }
+                panic!();
+            }
+        
+        ));
+
         let mut surface_config = surface
             .get_default_config(&adapter, size.width, size.height)
             .unwrap();

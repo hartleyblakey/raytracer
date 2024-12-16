@@ -760,16 +760,9 @@ impl Context {
             label: None,
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(std::fs::read_to_string(SHADER_PATH).unwrap().as_str())),
         });
+        
         let compilation_info = shader_module.get_compilation_info().block_on().messages;
         if !compilation_info.is_empty() {
-            for message in compilation_info {
-                let label = match message.message_type {
-                    wgpu::CompilationMessageType::Error => "Error",
-                    wgpu::CompilationMessageType::Warning => "Warning",
-                    wgpu::CompilationMessageType::Info => continue,
-                };
-                println!("Shader Compilation {} at {:?}: \n{}", label, message.location, message.message);
-            }
             return;
         }
 

@@ -686,11 +686,11 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     if (id.x >= globals.res.x || id.y >= globals.res.y) {
         return vec4f(0.5, 0.1, 0.1, 1.0);
     }
+    
     let scr = screen[id.x + globals.res.x * id.y];
 
     // divide total by number of samples
     var col = scr.rgb / scr.a;
-
     col = tonemap(col / 2.0);
     return vec4f(col, 1.0);
 }
