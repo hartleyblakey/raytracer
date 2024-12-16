@@ -280,29 +280,13 @@ impl<'a> Bvh<'a> {
     // algorithm from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
     fn subdivide(&mut self, node_idx: usize) {
         let node = self.nodes[node_idx];
-        // println!("first: {}, count: {}, bounds: {} to {}, {} to {}, {} to {}", node.first, node.count, node.aabb.min().x, node.aabb.max().x, node.aabb.min().y, node.aabb.max().y, node.aabb.min().z, node.aabb.max().z);
+     
         if node.count <= 2 {
             return;
         }
 
-        // let mut best_axis = 0;
-        // let mut best_size = -1.0;
-        // let size = node.aabb.max() - node.aabb.min();
-        // for axis in 0..3 {
-        //     if skip >= 0 && skip as usize == axis {
-        //         continue;
-        //     }
-        //     if size[axis] >= best_size {
-        //         best_axis = axis;
-        //         best_size = size[axis];
-        //     }
-        // }
-        // // best_axis = (self.nodes.len() + 1) % 3;
-        // let split_pos = node.aabb.min()[best_axis] + size[best_axis] * 0.5;
-
         let (axis, split) = self.find_split_approx(&node, 16);
 
-        // println!("split: {split_pos}, axis: {best_axis}");
         let mut i = node.first as usize;
         let mut j = (node.first + node.count - 1) as usize;
         while i <= j {
@@ -324,7 +308,6 @@ impl<'a> Bvh<'a> {
                 
             }
         };
-        // println!("i: {i}, j: {j}");
 
         let mut left = BvhNode::new();
         left.first = node.first;
@@ -333,25 +316,14 @@ impl<'a> Bvh<'a> {
 
         // dont subdivide empty nodes
         if left.count == 0 || left.count == node.count {
-            // if skip < 0  && node.count > 2 {
-            //     self.subdivide(node_idx, best_axis as i32);
-            // }
             return;
         }
-        
 
         let mut right = BvhNode::new();
         right.first = i as u32;
         right.count = node.count - left.count;
         right.update_aabb(&self.indices, &self.tris);
 
-
-        // if left.count < right.count / 8 || left.count > right.count * 8 {
-        //     if skip < 0 {
-        //         self.subdivide(node_idx, best_axis as i32);
-        //     }
-        //     return;
-        // }
 
         // we no longer hold any triangles
         let children_idx = self.nodes.len();
