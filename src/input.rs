@@ -1,6 +1,6 @@
 use std::{collections::HashSet, f32::consts::PI};
 
-use glam::{vec3, vec4, Mat3, Mat4, Vec3, Vec3Swizzles};
+use glam::{vec3, vec4, Mat3, Mat4, Vec3};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 pub const FORWARD: Vec3 = vec3(1.0, 0.0, 0.0);

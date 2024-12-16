@@ -96,12 +96,6 @@ struct Aabb {
 impl Aabb {
     fn new() -> Self {
         Self {
-            data: [0.0; 6]
-        }
-    }
-
-    fn invalid() -> Self {
-        Self {
             data: [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN]
         }
     }
@@ -200,7 +194,7 @@ impl<'a> Bvh<'a> {
 
     fn build(&mut self) {
         self.nodes.push(BvhNode::from_tris(0, self.tris.len() as u32, &self.indices, &self.tris));
-        self.subdivide(self.nodes.len() - 1, -1);
+        self.subdivide(self.nodes.len() - 1);
     }
 
     /// remove the layer of indirection used to build the BVH
@@ -215,8 +209,8 @@ impl<'a> Bvh<'a> {
     }
 
     fn evaluate_split(&self, node: &BvhNode, axis: usize, split: f32) -> f32 {
-        let mut left_aabb = Aabb::invalid();
-        let mut right_aabb = Aabb::invalid();
+        let mut left_aabb = Aabb::new();
+        let mut right_aabb = Aabb::new();
         let mut left_count = 0.0;
         let mut right_count = 0.0;
 
@@ -284,7 +278,7 @@ impl<'a> Bvh<'a> {
 
 
     // algorithm from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
-    fn subdivide(&mut self, node_idx: usize, skip: i32) {
+    fn subdivide(&mut self, node_idx: usize) {
         let node = self.nodes[node_idx];
         // println!("first: {}, count: {}, bounds: {} to {}, {} to {}, {} to {}", node.first, node.count, node.aabb.min().x, node.aabb.max().x, node.aabb.min().y, node.aabb.max().y, node.aabb.min().z, node.aabb.max().z);
         if node.count <= 2 {
@@ -367,15 +361,9 @@ impl<'a> Bvh<'a> {
         self.nodes.push(left);
         self.nodes.push(right);
 
-        self.subdivide(children_idx, -1);
-        self.subdivide(children_idx + 1, -1);
+        self.subdivide(children_idx);
+        self.subdivide(children_idx + 1);
     }
-}
-
-struct Ray {
-    origin: Vec3,
-    direction: Vec3,
-    t: f32,
 }
 
 struct Context {
@@ -465,25 +453,6 @@ impl GpuTexcoord {
             pos
         }
     }
-
-    fn zero() -> Self {
-        Self {
-            offset: 0,
-            size: 0,
-            pos: vec2(0.0, 0.0)
-        }
-    }
-
-
-    fn size(&self) -> UVec2 {
-        uvec2(self.size & 0xFF, self.size >> 16)
-    }
-
-    fn index(&self) -> u32 {
-        let size = self.size();
-        let upos = uvec2((self.pos.x * size.x as f32) as u32, (self.pos.y * size.y as f32) as u32);
-        self.offset + upos.x + upos.y * size.x
-    }
 }
 
 #[repr(C)]
@@ -527,10 +496,6 @@ impl FlatScene {
         }
     }   
 
-    fn from_gltf(mat: &Mat4) -> Mat4 {
-        Mat4::from_euler(glam::EulerRot::XZY, 0.5 * PI, 0.5 * PI, 0.0).mul_mat4(mat)
-    }
-
     fn from_gltf_vec3(v: Vec3) -> Vec3 {
         vec3(v.z, v.x, v.y)
     }
@@ -544,16 +509,6 @@ impl FlatScene {
             }
         }
     }   
-
-    fn u32_to_rgba8(x: u32) -> Vec4 {
-        return vec4(
-            ((x >> 24) & 255) as f32 / 255.0,
-            ((x >> 16) & 255) as f32 / 255.0,
-            ((x >> 8)  & 255) as f32 / 255.0,
-            ((x >> 0)  & 255) as f32 / 255.0
-        );
-    }
-
     fn rgba8_to_u32(x: &[u8; 4]) -> u32 {
         let mut r: u32 = 0;
         r |= (x[0] as u32) << 24;
@@ -566,17 +521,41 @@ impl FlatScene {
     fn add_gltf_node(&mut self, buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack) {
         ms.push();
         ms.apply(&Mat4::from_cols_array_2d(&node.transform().matrix()));
-        
+        let my_top = from_gltf_mat4(ms.top());
         if let Some(camera) = node.camera() {
             self.cameras.push(Camera::from_gltf(camera, ms.top()));
+        }
+
+        if let Some(light) = node.light() {
+            match light.kind() {
+                gltf::khr_lights_punctual::Kind::Directional => {
+                    let dir = my_top.transform_vector3(FORWARD);
+                    let d = DirectionalLight { 
+                        direction: vec4(dir.x, dir.y, dir.z, 0.0), 
+                        intensity: light.intensity() * vec4(light.color()[0], light.color()[1], light.color()[2], 0.0)
+                    };
+                    self.directional_lights.push(d);
+                },
+                gltf::khr_lights_punctual::Kind::Point => {
+                    let pos = my_top.transform_point3(vec3(0.0, 0.0, 0.0));
+                    let p = PointLight {
+                        position: vec4(pos.x, pos.y, pos.z, 0.0),
+                        intensity: light.intensity() * vec4(light.color()[0], light.color()[1], light.color()[2], 0.0)
+                    };
+                    self.point_lights.push(p);
+                },
+                gltf::khr_lights_punctual::Kind::Spot { .. } => (),
+            }
         }
         
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 if primitive.mode() == gltf::mesh::Mode::Triangles {
-                    // TODO: figure out what this lambda that I copied does
+
+                    // tell the reader where to find the buffer data
                     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-    
+                    
+                    // collect transformed vertex positions into a vec of vec3s so we can index them
                     let positions: Vec<Vec3> = reader.read_positions().unwrap()
                     .map( |p| 
                         Self::from_gltf_vec3(ms.top().transform_point3(Vec3::from_slice(&p)))
@@ -585,14 +564,15 @@ impl FlatScene {
                     let mut base_color_texture_id = 0;
                     let mut base_color_texture_offset = 0;
                     let mut base_color_texture_size = uvec2(0, 0);
+
                     if let Some(tex) = primitive.material().pbr_metallic_roughness().base_color_texture() {
                         base_color_texture_id = tex.tex_coord();
                         println!("Found base_color_texture");
                         // if we have not already loaded the image
                         if !self.texture_map.contains_key(&tex.texture().index()) {
                             // load the image
-
                             let image = match tex.texture().source().source() {
+                                // image comes buffer view, load the raw bytes
                                 gltf::image::Source::View { view, .. } => {
                                     let start = view.offset();
                                     let end = start + view.length();
@@ -603,14 +583,17 @@ impl FlatScene {
                                     }
                                     
                                 },
+                                // untested
                                 gltf::image::Source::Uri { uri, .. } => {
                                     image::ImageReader::open(uri).unwrap().decode().unwrap()
                                 },
                             };
-                            let samples = image.to_rgba8();
+
+                            let rgba8_image = image.to_rgba8();
+
                             base_color_texture_offset = self.texture_data.len();
                             base_color_texture_size = uvec2(image.dimensions().0, image.dimensions().1);
-                            for pixel in samples.pixels() {
+                            for pixel in rgba8_image.pixels() {
                                 self.texture_data.push(Self::rgba8_to_u32(&pixel.0))
                             }
                             println!("Found texture with offset {base_color_texture_offset}, size {} by {}", base_color_texture_size.x, base_color_texture_size.y);
@@ -626,14 +609,16 @@ impl FlatScene {
                     
                     }
                     
-
+                    
+                    // collect vertex attributes into vectors so we can index them
+                    //  vertex colors
                     let colors = reader.read_colors(0);
                     let colors: Vec<u32> = if colors.is_some() {
                         colors.unwrap().into_rgba_u8().map(|c| Self::rgba8_to_u32(&c)).collect()
                     } else {
                         Vec::new()
                     };
-
+                    //  base color texcoords
                     let texcoords = reader.read_tex_coords(base_color_texture_id);
                     let texcoords: Vec<Vec2> = if texcoords.is_some() {
                         texcoords.unwrap().into_f32().map(|uv| Vec2::from_slice(&uv)).collect()
@@ -641,8 +626,6 @@ impl FlatScene {
                         Vec::new()
                     };
 
-                    
-                    
                     if let Some(indices) = reader.read_indices() {
                         // indexed mesh
                         let mut indices = indices.into_u32();
@@ -666,19 +649,33 @@ impl FlatScene {
                         }
                     }
                     else {
-                        // non-indexed mesh
+                        // non-indexed mesh (untested)
+                        let mut i = 0;
                         for p in positions.chunks(3) {
-                            let c = [0, 0, 0];
+                        
                             let mut ext = TriExt::default();
-                            ext.vertices[0].color = c[0];
-                            ext.vertices[1].color = c[1];
-                            ext.vertices[2].color = c[2];
+
+                            if !colors.is_empty() {
+                                let c  = &colors[i..(i+3)];
+                                ext.vertices[0].color = c[0];
+                                ext.vertices[1].color = c[1];
+                                ext.vertices[2].color = c[2];
+                            }
+
+                            if !texcoords.is_empty() {
+                                let tc = &texcoords[i..(i+3)];
+                                ext.vertices[0].tex0 = GpuTexcoord::new(base_color_texture_offset as u32, base_color_texture_size, tc[i + 0]);
+                                ext.vertices[1].tex0 = GpuTexcoord::new(base_color_texture_offset as u32, base_color_texture_size, tc[i + 1]);
+                                ext.vertices[2].tex0 = GpuTexcoord::new(base_color_texture_offset as u32, base_color_texture_size, tc[i + 2]);
+                            }
+
                             self.triangles.push(Tri::new(p[0], p[1], p[2]));
                             self.triangles_ext.push(ext);
+                            i += 3;
                         }
                     }
                 } else {
-                    panic!("Non-triangle primitive");
+                    panic!("Non-triangle primitives not supported");
                 }
             }
         }
@@ -800,11 +797,11 @@ impl Context {
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
         let rt_data_bg = gpu.new_bind_group()
-            .with_buffer(&triangles_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&triangles_ext_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&screen_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&texture_data_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&triangles_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&triangles_ext_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&bvh_ssbo.view_all(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut resources);
 
         // Load the shaders from disk
@@ -857,21 +854,10 @@ impl Context {
         );
 
         let (flat_tris, flat_exts) = bvh.flat_triangles();
-        gpu.queue.write_buffer(&triangles_ssbo.raw, 0, bytemuck::cast_slice(flat_tris.as_slice()));
+        gpu.queue.write_buffer(&triangles_ssbo.raw,     0, bytemuck::cast_slice(flat_tris.as_slice()));
         gpu.queue.write_buffer(&triangles_ext_ssbo.raw, 0, bytemuck::cast_slice(flat_exts.as_slice()));
-        gpu.queue.write_buffer(&bvh_ssbo.raw, 0, bytemuck::cast_slice(bvh.nodes.as_slice()));
-        gpu.queue.write_buffer(&texture_data_ssbo.raw, 0, bytemuck::cast_slice(scene.texture_data.as_slice()));
-
-        // sanity check for aabb gen
-        // let mut last = Aabb::new();
-        // for node in &bvh.nodes {
-        //     if node.aabb.min() != last.min() && node.aabb.max() != last.max() {
-        //         last = node.aabb;
-        //         println!("{}, {}, {} to {}, {}, {}", last.data[0], last.data[1], last.data[2], last.data[3], last.data[4], last.data[5]);
-        //     }
-        // }
-
-        
+        gpu.queue.write_buffer(&bvh_ssbo.raw,           0, bytemuck::cast_slice(bvh.nodes.as_slice()));
+        gpu.queue.write_buffer(&texture_data_ssbo.raw,  0, bytemuck::cast_slice(scene.texture_data.as_slice()));
 
         Context {
             screen_pipeline,
@@ -895,7 +881,7 @@ impl Context {
     }
 }
 
-fn frame(gpu: &Gpu, ctx: &mut Context) {
+fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next swap chain texture");
 
     let mut surface_view_desc = wgpu::TextureViewDescriptor::default();
@@ -921,24 +907,24 @@ fn frame(gpu: &Gpu, ctx: &mut Context) {
         occlusion_query_set: None,
     };
 
-    // ctx.camera.rotate(f32::to_radians(0.0), f32::to_radians(5.0));
-
-    // TODO: fix time and camera situation
     ctx.frame_uniforms.frame += 1;
-    ctx.frame_uniforms.time += 1.0 / 60.0; // hack
+    ctx.frame_uniforms.time += dt; // hack
     ctx.frame_uniforms.scene.camera = ctx.scene.cameras[0].to_gpu();
     ctx.frame_uniforms.reject_hist = ctx.scene.cameras[0].check_moved() as u32;
     
-
-
     gpu.queue.write_buffer(&ctx.frame_uniforms_buffer.raw, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
+    let workgroup_size = [8, 8];
     {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&ctx.raytrace_pipeline);
         cpass.set_bind_group(0, &ctx.frame_uniforms_binding.raw, &[]);
         cpass.set_bind_group(1, &ctx.rt_data_binding.raw, &[]);
-        cpass.dispatch_workgroups((ctx.frame_uniforms.res[0] + 7) / 8, (ctx.frame_uniforms.res[1] + 7) / 8, 1);
+        cpass.dispatch_workgroups(
+            (ctx.frame_uniforms.res[0] + workgroup_size[0] - 1) / workgroup_size[0],
+            (ctx.frame_uniforms.res[1] + workgroup_size[1] - 1) / workgroup_size[1], 
+            1
+        );
     }
 
     {
@@ -988,6 +974,7 @@ async fn run() {
 
     let mut gpu = Gpu::new(&window).await;
     let mut ctx = Context::init(&gpu);
+
     let mut input = InputState {
         keys: HashSet::new(),
         mouse_x: 0.0,
@@ -997,11 +984,12 @@ async fn run() {
         rmb: false,
     };
 
-    let mut this_frame = Instant::now();
-    let mut last_frame = Instant::now();
     let mut last_second = Instant::now();
+    let mut last_frame  = Instant::now();
+    let mut this_frame  = Instant::now();
     let mut frames_in_second: u32 = 0;
     let mut last_cursor_pos = PhysicalPosition::new(0.0, 0.0);
+
     event_loop.run(
     move |event, target| {
         match event {
@@ -1016,9 +1004,11 @@ async fn run() {
                 match event {
                     WindowEvent::Resized(new_size) => {
                         // Reconfigure the surface with the new size
-                        gpu.surface_config.width = new_size.width.max(1);
+
+                        // I have no idea why I needed to do this, it was resizing to infinity
+                        gpu.surface_config.width  = new_size.width.max(1);
                         gpu.surface_config.height = new_size.height.max(1);
-                        gpu.surface_config.width = gpu.surface_config.width.min(4096);
+                        gpu.surface_config.width  = gpu.surface_config.width.min(4096);
                         gpu.surface_config.height = gpu.surface_config.height.min(4096);
     
                         gpu.surface.configure(&gpu.device, &gpu.surface_config);
@@ -1040,7 +1030,7 @@ async fn run() {
                             last_second = this_frame;
                         }
                         
-                        frame(&gpu, &mut ctx);
+                        frame(&gpu, &mut ctx, dt);
                         last_frame = this_frame;
                     },
                     WindowEvent::CursorMoved { device_id, position } => if !input.rmb {last_cursor_pos = position},
@@ -1051,6 +1041,8 @@ async fn run() {
                             _ => (),
                         }
 
+                        // hide the curson when moving the camera
+                        // and reset it back when released
                         if input.rmb {
                             gpu.window.set_cursor_visible(false);
                             gpu.window.set_cursor_grab(CursorGrabMode::Confined);
@@ -1061,6 +1053,8 @@ async fn run() {
                         }
                     }
                     WindowEvent::MouseWheel { device_id, delta, phase } => {
+                        // hack: I have no idea how to keep a consistent sensitivity between these
+                        //       two units. This works well enough for the devices I tested it on
                         match delta {
                             winit::event::MouseScrollDelta::LineDelta(_, y) => input.scroll += y as f64 / 2.0,
                             winit::event::MouseScrollDelta::PixelDelta(physical_position) => input.scroll += physical_position.y / 128.0,

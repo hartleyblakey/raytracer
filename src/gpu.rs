@@ -6,6 +6,18 @@ use winit::{
     dpi::{PhysicalSize, Size}, event::{Event, WindowEvent}, event_loop::EventLoop, window::Window
 };
 
+///////////////////////////////////////////////////////////////////////////////
+/*
+This file contians the GPU struct and wrapper structs for some WGPU resources
+(and a handfull of helper functions for windowing)
+
+The wrappers were a dumb idea, I thought I would be using webgpu more for this
+and started trying to make helper structs before actually using it directly
+*/
+///////////////////////////////////////////////////////////////////////////////
+
+
+
 pub fn new_window(event_loop: &EventLoop<()>, res: [u32; 2]) -> winit::window::Window {
     let mut builder = winit::window::WindowBuilder::new()
         .with_inner_size(PhysicalSize::new(res[0], res[1]));
@@ -29,7 +41,7 @@ pub fn new_window(event_loop: &EventLoop<()>, res: [u32; 2]) -> winit::window::W
 
 /// Caches bind group layouts in probably the least efficient way possible
 /// 
-/// Not sure why I made this
+/// Not sure why I made this, thought I would be recreating bind groups a lot more often
 pub struct ResourceManager {
     bind_group_layouts: HashMap<BindGroupLayoutEntries, wgpu::BindGroupLayout>,
 }
@@ -158,6 +170,7 @@ impl<'a> BGBuilder<'a> {
 
     pub fn finish<'b>(&mut self, manager: &'b mut ResourceManager) -> BindGroup {
         if !manager.bind_group_layouts.contains_key(&self.layout_entries) {
+            println!("Created new bind group layout");
             let layout_desc = wgpu::BindGroupLayoutDescriptor {
                 label: None,
                 entries: self.layout_entries.entries.as_slice(),
@@ -246,11 +259,13 @@ impl<'a> Gpu<'a> {
         let instance = wgpu::Instance::default();
 
         let surface = instance.create_surface(window).unwrap();
+
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
+                    // integrated gpu spammed console with DX12 errors, easy fix
+
                 force_fallback_adapter: false,
-                // Request an adapter which can render to our surface
                 compatible_surface: Some(&surface),
             })
             .await
