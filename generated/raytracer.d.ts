@@ -1,5 +1,26 @@
 /* tslint:disable */
 /* eslint-disable */
+/**
+ * Chroma subsampling format
+ */
+export enum ChromaSampling {
+  /**
+   * Both vertically and horizontally subsampled.
+   */
+  Cs420 = 0,
+  /**
+   * Horizontally subsampled.
+   */
+  Cs422 = 1,
+  /**
+   * Not subsampled.
+   */
+  Cs444 = 2,
+  /**
+   * Monochrome.
+   */
+  Cs400 = 3,
+}
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -10,17 +31,17 @@ export interface InitOutput {
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
   readonly __wbindgen_export_2: WebAssembly.Table;
   readonly __wbindgen_export_3: WebAssembly.Table;
-  readonly closure113_externref_shim: (a: number, b: number, c: number, d: number) => void;
-  readonly closure111_externref_shim: (a: number, b: number, c: number) => void;
-  readonly closure109_externref_shim: (a: number, b: number, c: number) => void;
-  readonly closure242_externref_shim: (a: number, b: number, c: number) => void;
-  readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__haf5cead8852d4f96: (a: number, b: number) => void;
-  readonly closure568_externref_shim: (a: number, b: number, c: number) => void;
-  readonly closure574_externref_shim: (a: number, b: number, c: number) => void;
-  readonly closure570_externref_shim: (a: number, b: number, c: number) => void;
-  readonly closure576_externref_shim: (a: number, b: number, c: number) => void;
-  readonly closure572_externref_shim: (a: number, b: number, c: number) => void;
-  readonly closure658_externref_shim: (a: number, b: number, c: number) => void;
+  readonly closure6_externref_shim: (a: number, b: number, c: number) => void;
+  readonly closure4_externref_shim: (a: number, b: number, c: number) => void;
+  readonly closure8_externref_shim: (a: number, b: number, c: number, d: number) => void;
+  readonly closure343_externref_shim: (a: number, b: number, c: number) => void;
+  readonly closure536_externref_shim: (a: number, b: number, c: number) => void;
+  readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__h421ef663c6e78ebd: (a: number, b: number) => void;
+  readonly closure532_externref_shim: (a: number, b: number, c: number) => void;
+  readonly closure534_externref_shim: (a: number, b: number, c: number) => void;
+  readonly closure538_externref_shim: (a: number, b: number, c: number) => void;
+  readonly closure540_externref_shim: (a: number, b: number, c: number) => void;
+  readonly closure663_externref_shim: (a: number, b: number, c: number) => void;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __externref_table_alloc: () => number;
   readonly __wbindgen_exn_store: (a: number) => void;
