@@ -7,17 +7,17 @@
 - Loads simple static GLTF files into vectors of triangle positions, cameras, base color texcoords, and base color images converted to rgba8
   - Not well tested but worked on sponza and the tiny blender exports I tried
 
-  - **The gltf model files (and the shaders) are hardcoded and compiled into the binary**
+  - **The paths to the loaded gltf model files are hardcoded**
 
 - Builds a simple BVH around the triangle positions and extra data, based on the first 2.5 articles of "Build A BVH" by Jacco Bikker
 
-- Raytraces the bvh in a compute shader with simple diffuse lighting and a hardcoded sun light
-  - a small fixed number of directional and point lights are read from the file and passed to the shader but are not used
+- Raytraces the bvh in a compute shader with simple diffuse lighting, and a hardcoded sun light
+  - A small fixed number of directional and point lights are read from the file and passed to the shader but are not used
 
 - Simple flycam with scroll wheel zoom, starts out the same as the first camera in the gltf file
 
-- technically can be built for the web
-  - hardcoded resolution to 512x512, no extra effort put in beyond getting it to compile
+- Technically can be built for the web
+  - Hardcoded resolution to 512x512, no extra effort put in beyond getting it to run
   - [hosted on blue here (requires webgpu)](https://blue.cs.sonoma.edu/~hblakey/CS-375/Final-Project/generated/index.html)
 
 
@@ -26,21 +26,23 @@
 - `shader.wgsl`:
   - Implements the BVH traverasl and raytracing
 
-- `main.rs`:
-  - Handles the main event loop
+- `scene.rs`:
   - Loads the GLTF files
   - Builds the BVH
+
+- `main.rs`:
+  - Handles the main event loop
   - Initializes the raytracer and wgpu resources
 
 - `gpu.rs`:
-  - Helper functions and structs for opening the window and working with wgpu
+  - Contians helper functions and structs for opening the window and working with wgpu
 
 - `input.rs`:
-  - Camera controller
+  - Implements a simple camera controller
 
 
 #### Build Instructions
-requires rust and cargo, [which can be found here](https://www.rust-lang.org/tools/install)
+Requires rust and cargo, [which can be found here](https://www.rust-lang.org/tools/install)
 
 Use cargo to run  the project:
 ```bash
@@ -48,9 +50,9 @@ cd Final-Project
 cargo run
 ```
 
-for the web build:
+For the web build:
 
-requires wasm-bindgen, which can be installed with cargo:
+Requires wasm-bindgen, which can be installed with cargo:
 ```bash
 cargo install wasm-bindgen-cli
 ```
