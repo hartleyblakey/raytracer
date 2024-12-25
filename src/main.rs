@@ -15,6 +15,12 @@ use web_time::{Instant, SystemTime};
 mod input;
 use input::*;
 
+mod gpu;
+use gpu::*;
+
+mod scene;
+use scene::*;
+
 // arbitrary and probably not ideal but im not going to keep thinking about it
 // right handed
 
@@ -30,12 +36,6 @@ struct FrameUniforms {
     _pad: [u32; 2]
 
 }
-
-mod gpu;
-use gpu::*;
-
-mod scene;
-use scene::*;
 
 struct Context {
     screen_pipeline:            wgpu::RenderPipeline,
@@ -61,6 +61,8 @@ struct Context {
     resources:                  ResourceManager,
 
     scene:                      FlatScene,
+
+    bvh:                        Bvh,
 }
 
 impl Context {
@@ -123,7 +125,7 @@ impl Context {
         (screen_pipeline, raytrace_pipeline)
     }
 
-    fn check_recompile_shader(&mut self, gpu: &Gpu) {
+    fn check_recompile_shader(&mut self, gpu: &Gpu) -> bool {
     #[cfg(not(target_arch = "wasm32"))] 
     {
         const SHADER_PATH: &str = "src/shader.wgsl";
@@ -132,7 +134,7 @@ impl Context {
         let last_write_time = metadata.modified().unwrap();
         
         if last_write_time <= self.shader_compiled_timestamp {
-            return;
+            return false;
         }
         self.shader_compiled_timestamp = std::time::SystemTime::now();
 
@@ -143,7 +145,7 @@ impl Context {
 
         let compilation_info = shader_module.get_compilation_info().block_on().messages;
         if !compilation_info.is_empty() {
-            return;
+            return false;
         }
 
         let (screen, rt) = Self::create_pipelines(
@@ -155,10 +157,10 @@ impl Context {
         self.screen_pipeline = screen;
         self.raytrace_pipeline = rt;
         self.shader_module = shader_module;
-        
+        return true;
         
     }
-    
+        false
     }
 
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
@@ -166,8 +168,7 @@ impl Context {
         
         println!();
         println!("building bvh");
-        let mut bvh = Bvh::new(&scene.triangles, &scene.triangles_ext);
-        bvh.build();
+        let bvh = Bvh::new(&scene.triangles);
         println!("Bvh size : {} mb", (bvh.nodes.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
 
@@ -231,7 +232,7 @@ impl Context {
             gpu
         );
 
-        let (flat_tris, flat_exts) = bvh.flat_triangles();
+        let (flat_tris, flat_exts) = bvh.flatten_triangles(&scene.triangles, &scene.triangles_ext);
         gpu.queue.write_buffer(&triangles_ssbo.raw,     0, bytemuck::cast_slice(flat_tris.as_slice()));
         gpu.queue.write_buffer(&triangles_ext_ssbo.raw, 0, bytemuck::cast_slice(flat_exts.as_slice()));
         gpu.queue.write_buffer(&bvh_ssbo.raw,           0, bytemuck::cast_slice(bvh.nodes.as_slice()));
@@ -259,13 +260,14 @@ impl Context {
 
             resources,
             scene,
+            bvh,
         }
     }
 }
 
 fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
 
-    ctx.check_recompile_shader(gpu);
+    let did_recompile = ctx.check_recompile_shader(gpu);
 
     let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next swap chain texture");
 
@@ -296,7 +298,13 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     ctx.frame_uniforms.time += dt; // hack
     ctx.frame_uniforms.scene.camera = ctx.scene.cameras[0].to_gpu();
     ctx.frame_uniforms.reject_hist = ctx.scene.cameras[0].check_moved() as u32;
-    
+
+
+
+    if did_recompile {
+        ctx.frame_uniforms.reject_hist = 1;
+    }
+
     gpu.queue.write_buffer(&ctx.frame_uniforms_buffer.raw, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
     let workgroup_size = [8, 8];
@@ -361,7 +369,7 @@ async fn build_scene() -> FlatScene {
 
     
     // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/large/DragonAttenuation.glb"));
-
+ 
 
     // ms.push();
     // ms.translate(vec3(0.0, 0.0, 10.0));
@@ -376,10 +384,12 @@ async fn build_scene() -> FlatScene {
 
     // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/turtle.glb"));
 
-    scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
+    // scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
+    scene.add_gltf(&Mat4::IDENTITY, "resources/large/ship.glb").await;
+
     //scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
 
-    // scene.add_gltf("resources/large/Sponza.glb");
+    // scene.add_gltf(&Mat4::IDENTITY, "resources/large/Sponza.glb").await;
     
     if scene.cameras.is_empty() {
         println!("No camera in scene, falling back to default");
@@ -464,7 +474,12 @@ async fn run() {
                     WindowEvent::CursorMoved { device_id, position } => if !input.rmb {last_cursor_pos = position},
                     WindowEvent::MouseInput { device_id, state, button } => {
                         match button {
-                            MouseButton::Left =>  input.lmb = state.is_pressed(),
+                            MouseButton::Left =>  {
+                                input.lmb = state.is_pressed();
+                                if let Some(focus) = ctx.bvh.closest_hit(&ctx.scene.triangles, ctx.scene.cameras[0].position(), ctx.scene.cameras[0].forward()) {
+                                    ctx.scene.cameras[0].focus(focus);
+                                };
+                            },
                             MouseButton::Right => input.rmb = state.is_pressed(),
                             _ => (),
                         }
@@ -478,7 +493,9 @@ async fn run() {
                             gpu.window.set_cursor_position(last_cursor_pos);
                             gpu.window.set_cursor_visible(true);
                             gpu.window.set_cursor_grab(CursorGrabMode::None);
+
                         }
+
                     }
                     WindowEvent::MouseWheel { device_id, delta, phase } => {
                         // hack: I have no idea how to keep a consistent sensitivity between these

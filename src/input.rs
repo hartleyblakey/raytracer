@@ -20,10 +20,10 @@ pub struct InputState {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuCamera {
-    dir:    Vec3,
-    fovy:   f32,
-    origin: Vec3,
-    focus:  f32,
+    pub dir:    Vec3,
+    pub fovy:   f32,
+    pub origin: Vec3,
+    pub focus:  f32,
 }
 
 #[derive(Copy, Clone)]
@@ -80,6 +80,10 @@ impl Camera {
         self.rot().mul_vec3(RIGHT)
     }
 
+    pub fn position(&self) -> Vec3 {
+        self.position
+    }
+
     pub fn rot(&self) -> Mat3{
         Mat3::from_euler(YAW_PITCH_ROLL, self.yaw, -self.pitch, self.roll)
     }
@@ -115,6 +119,19 @@ impl Camera {
         self.moved = true;
         self.fovy -= delta;
         self.fovy = self.fovy.clamp(f32::to_radians(1.0), f32::to_radians(179.0));
+    }
+
+    pub fn focus_delta(&mut self, delta: f32) {
+        self.moved = true;
+        self.focus += delta;
+        self.focus = self.focus.max(0.0);
+    }
+
+    pub fn focus(&mut self, focus: f32) {
+        if self.focus != focus {
+            self.moved = true;
+            self.focus = focus.max(0.0);
+        }
     }
 
     pub fn update(&mut self, input: &mut InputState, dt: f32) {
@@ -154,8 +171,15 @@ impl Camera {
         }
 
         if input.scroll != 0.0 {
-            self.zoom((input.scroll * 0.1) as f32);
-            input.scroll = 0.0;
+            if input.keys.contains(&PhysicalKey::Code(ControlLeft)) {
+                self.focus_delta(input.scroll as f32);
+                
+                input.scroll = 0.0;
+            } else {
+                self.zoom((input.scroll * 0.1) as f32);
+                input.scroll = 0.0;
+            }
+
         }
 
         self.rmb_last = input.rmb;
@@ -188,7 +212,7 @@ impl Camera {
 
         // yaw is off for some reason
         let yaw = yaw - PI;
-
+        
         let (fovy, aspect) = match gltf.projection() {
             gltf::camera::Projection::Orthographic(_) => {
                 panic!("Orthographic cameras are not supported");
@@ -199,13 +223,12 @@ impl Camera {
             },
         };
         
-        let focus = 1.0;
         let mut camera = Camera::default();
         camera.position = origin;
         camera.pitch = pitch;
         camera.yaw = yaw;
         camera.roll = roll;
-        camera.focus = focus;
+        camera.focus = 50.0;
         camera.speed = 5.0;
         camera.fovy = fovy;
         camera.aspect = aspect;

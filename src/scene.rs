@@ -8,7 +8,7 @@ use crate::{fetch_bytes, input::*};
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct PointLight {
+pub struct PointLight {
     position: Vec4,
     intensity: Vec4,
 }
@@ -16,7 +16,7 @@ struct PointLight {
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct DirectionalLight {
+pub struct DirectionalLight {
     direction: Vec4,
     intensity: Vec4,
 }
@@ -106,6 +106,27 @@ pub struct TriExt {
 }
 
 
+// pub struct Ray {
+//     origin: Vec3,
+//     dir: Vec3,
+//     idir: Vec3,
+// }
+
+// impl Ray {
+//     fn default() -> Ray {
+//         return Ray {
+//             origin: vec3(0.0, 0.0, 0.0),
+//             dir: vec3(1.0, f32::MIN, f32::MIN),
+//             idir: vec3(1.0, f32::MAX, f32::MAX)
+//         }
+//     }
+
+//     fn point(&mut self, dir: Vec3) {
+//         self.dir = dir;
+//         self.idir = vec3(1.0, 1.0, 1.0) / self.dir;
+//     }
+// }
+
 #[derive(Default)]
 pub struct FlatScene {
     pub triangles: Vec<Tri>,
@@ -189,6 +210,7 @@ impl FlatScene {
                     .map( |p| 
                         Self::from_gltf_vec3(ms.top().transform_point3(Vec3::from_slice(&p)))
                     ).collect();
+                    
 
                     let mut base_color_texture_id = 0;
                     let mut base_color_texture_offset = 0;
@@ -356,15 +378,6 @@ impl Tri {
         }
     }
 
-    pub fn dummy(c: Vec3, size: f32) -> Tri {
-        
-        Tri::new(
-            c + vec3(random(), random(), random()) * size - size * 0.5,
-            c + vec3(random(), random(), random()) * size - size * 0.5,
-            c + vec3(random(), random(), random()) * size - size * 0.5,
-        )
-    }
-
     pub fn aabb(&self) -> Aabb {
         Aabb::point(self.vertices[0].xyz())
             .with(Aabb::point(self.vertices[1].xyz()))
@@ -374,6 +387,33 @@ impl Tri {
     pub fn centroid(&self) -> Vec3 {
         // (self.vertices[0].xyz() + self.vertices[1].xyz() + self.vertices[2].xyz()) / 3.0
         vec3(self.vertices[0][3], self.vertices[1][3], self.vertices[2][3])
+    }
+
+    pub fn closest_hit(&self, ro: Vec3, rd: Vec3) -> Option<f32> {
+        let edge1 = self.vertices[1].xyz() - self.vertices[0].xyz();
+        let edge2 = self.vertices[2].xyz() - self.vertices[0].xyz();
+        let h = Vec3::cross( rd, edge2 );
+        let a = Vec3::dot( edge1, h );
+        if a > -0.000002 && a < 0.000002 {
+            return None;
+        }// ray parallel to triangle
+        let f = 1.0 / a;
+        let s = ro - self.vertices[0].xyz();
+        let u = f * Vec3::dot( s, h );
+        if u < 0.0 || u > 1.0 {
+            return None;
+        }
+        let q = Vec3::cross( s, edge1 );
+        let v = f * Vec3::dot( rd, q );
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        let t = f * Vec3::dot( edge2, q );
+        if t > 0.000002 {
+            return Some(t);
+        } else {
+            return None;
+        }
     }
 }
 
@@ -424,6 +464,30 @@ impl Aabb {
     pub fn max(&self) -> Vec3 {
         vec3(self.data[3], self.data[4], self.data[5])
     }
+
+    pub fn closest_hit(&self, ro: Vec3, rd: Vec3) -> Option<f32> {
+        let bmin = self.min();
+        let bmax = self.max();
+    
+        if (ro.x > bmin.x && ro.y > bmin.y && ro.z > bmin.z) && (ro.x < bmax.x && ro.y < bmax.y && ro.z < bmax.z) {
+            return Some(0.0);
+        }
+    
+        let rmin = (bmin - ro) / rd;
+        let rmax = (bmax - ro) / rd;
+    
+        let tmin = Vec3::min(rmin, rmax);
+        let tmax = Vec3::max(rmin, rmax);
+    
+        let t0 = f32::max(tmin.x, f32::max(tmin.y, tmin.z));
+        let t1 = f32::min(tmax.x, f32::min(tmax.y, tmax.z));
+    
+        if t0 >= t1 || t0 < 0.0 {
+            return None;
+        }
+    
+        Some(t0)
+    }
 }
 
 // structure from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
@@ -466,47 +530,43 @@ impl BvhNode {
         }
     }
 }
-pub struct Bvh<'a> {
+
+pub struct Bvh {
     pub nodes: Vec<BvhNode>,
-    pub tris: &'a Vec<Tri>,
-    pub tri_exts: &'a Vec<TriExt>,
     indices: Vec<u32>,
 }
 
-impl<'a> Bvh<'a> {
-    pub fn new(triangles: &'a Vec<Tri>, exts: &'a Vec<TriExt>) -> Self {
-        Self {
+impl Bvh {
+    pub fn new(tris: &Vec<Tri>) -> Self {
+        let mut res = Self {
             nodes: Vec::new(),
-            tris: triangles,
-            tri_exts: exts,
-            indices: (0..triangles.len() as u32).collect(),
-        }
-    }
+            indices: (0..tris.len() as u32).collect()
+        };
 
-    pub fn build(&mut self) {
-        self.nodes.push(BvhNode::from_tris(0, self.tris.len() as u32, &self.indices, &self.tris));
-        self.subdivide(self.nodes.len() - 1);
+        res.nodes.push(BvhNode::from_tris(0, tris.len() as u32, &res.indices, &tris));
+        res.subdivide(res.nodes.len() - 1, tris);
+        return res;
     }
 
     /// remove the layer of indirection used to build the BVH
-    pub fn flat_triangles(&self) -> (Vec<Tri>, Vec<TriExt>) {
-        let mut tris = self.tris.clone();
-        let mut exts = self.tri_exts.clone();
-        for i in 0..tris.len() {
-            tris[i] = self.tris[self.indices[i] as usize];
-            exts[i] = self.tri_exts[self.indices[i] as usize];
+    pub fn flatten_triangles(&self, tris: &Vec<Tri>, tri_exts: &Vec<TriExt>) -> (Vec<Tri>, Vec<TriExt>) {
+        let mut tris_new = tris.clone();
+        let mut exts_new = tri_exts.clone();
+        for i in 0..tris_new.len() {
+            tris_new[i] = tris[self.indices[i] as usize];
+            exts_new[i] = tri_exts[self.indices[i] as usize];
         }
-        (tris, exts)
+        (tris_new, exts_new)
     }
 
-    fn evaluate_split(&self, node: &BvhNode, axis: usize, split: f32) -> f32 {
+    fn evaluate_split(&self, tris: &Vec<Tri>, node: &BvhNode, axis: usize, split: f32, ) -> f32 {
         let mut left_aabb = Aabb::new();
         let mut right_aabb = Aabb::new();
         let mut left_count = 0.0;
         let mut right_count = 0.0;
 
         for i in (node.first)..(node.first + node.count) {
-            let tri = self.tris[self.indices[i as usize] as usize];
+            let tri = tris[self.indices[i as usize] as usize];
             if tri.centroid()[axis] < split {
                 left_count += 1.0;
                 left_aabb.expand(tri.aabb());
@@ -526,16 +586,16 @@ impl<'a> Bvh<'a> {
         }
     }
 
-    fn find_best_split(&self, node: &BvhNode) -> (usize, f32) {
+    fn find_best_split(&self, tris: &Vec<Tri>, node: &BvhNode) -> (usize, f32) {
         let mut best_axis = 0;
         let mut best_split = 0.0;
         let mut best_cost = f32::MAX;
 
         for axis in 0..3  as usize {
             for idx in (node.first)..(node.first + node.count) {
-                let tri = self.tris[self.indices[idx as usize] as usize];
+                let tri = tris[self.indices[idx as usize] as usize];
                 let split = tri.centroid()[axis as usize];
-                let cost = self.evaluate_split(node, axis, split);
+                let cost = self.evaluate_split(tris, node, axis, split);
                 if cost < best_cost {
                     best_axis = axis;
                     best_cost = cost;
@@ -547,7 +607,7 @@ impl<'a> Bvh<'a> {
         (best_axis, best_split)
     }
 
-    fn find_split_approx(&self, node: &BvhNode, count: usize) -> (usize, f32) {
+    fn find_split_approx(&self, tris: &Vec<Tri>, node: &BvhNode,  count: usize) -> (usize, f32) {
         let mut best_axis = 0;
         let mut best_split = 0.0;
         let mut best_cost = f32::MAX;
@@ -555,7 +615,7 @@ impl<'a> Bvh<'a> {
         for axis in 0..3  as usize {
             for i in 0..count {
                 let split = node.aabb.min()[axis] + ((i as f32 + 0.5) / count as f32) * (node.aabb.max()[axis]-node.aabb.min()[axis]);
-                let cost = self.evaluate_split(node, axis, split);
+                let cost = self.evaluate_split(tris, node, axis, split);
                 if cost < best_cost {
                     best_axis = axis;
                     best_cost = cost;
@@ -569,21 +629,25 @@ impl<'a> Bvh<'a> {
 
 
     // algorithm from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
-    fn subdivide(&mut self, node_idx: usize) {
+    fn subdivide(&mut self, node_idx: usize, tris: &Vec<Tri>) {
         let node = self.nodes[node_idx];
      
         if node.count <= 2 {
             return;
         }
 
-        let (axis, split) = self.find_split_approx(&node, 16);
+        let (axis, split) = if node.count < 20 {
+            self.find_best_split(tris, &node) 
+        } else {
+            self.find_split_approx(tris, &node, 16) 
+        };
 
         let mut i = node.first as usize;
         let mut j = (node.first + node.count - 1) as usize;
         while i <= j {
             let first_idx = self.indices[i] as usize;
             
-            if self.tris[first_idx].centroid()[axis] < split {
+            if tris[first_idx].centroid()[axis] < split {
                 i += 1;
             } else {
                 // swap
@@ -603,7 +667,7 @@ impl<'a> Bvh<'a> {
         let mut left = BvhNode::new();
         left.first = node.first;
         left.count = i  as u32 - node.first;
-        left.update_aabb(&self.indices, &self.tris);
+        left.update_aabb(&self.indices, &tris);
 
         // dont subdivide empty nodes
         if left.count == 0 || left.count == node.count {
@@ -613,7 +677,7 @@ impl<'a> Bvh<'a> {
         let mut right = BvhNode::new();
         right.first = i as u32;
         right.count = node.count - left.count;
-        right.update_aabb(&self.indices, &self.tris);
+        right.update_aabb(&self.indices, &tris);
 
 
         // we no longer hold any triangles
@@ -624,7 +688,50 @@ impl<'a> Bvh<'a> {
         self.nodes.push(left);
         self.nodes.push(right);
 
-        self.subdivide(children_idx);
-        self.subdivide(children_idx + 1);
+        self.subdivide(children_idx, tris);
+        self.subdivide(children_idx + 1, tris);
+    }
+
+    pub fn closest_hit(&self, tris: &Vec<Tri>, ro: Vec3, rd: Vec3) -> Option<f32> {
+        let mut stack: Vec<u32> = Vec::new();
+        stack.push(0);
+        let mut best_t = f32::MAX;
+        let mut best_i = -1;
+        let mut node_count = 0;
+        let mut tri_count = 0;
+        while !stack.is_empty() {
+            node_count += 1;
+            let node = self.nodes[stack.pop().unwrap() as usize];
+
+            let aabb_t = node.aabb.closest_hit(ro, rd);
+            if aabb_t.is_none() {
+                continue;
+            }
+
+
+            if node.count > 0 {
+                // leaf node
+                tri_count += node.count;
+                for i in 0..node.count {
+                    if let Some(t) = tris[self.indices[(node.first + i) as usize] as usize].closest_hit(ro, rd) {
+                        if t < best_t {
+                            best_t = t;
+                            best_i = (node.first + i) as i32;
+                        }
+                    }
+                }
+            } else {
+                // no triangles, internal node - push children onto stack
+                stack.push(node.first + 0);
+                stack.push(node.first + 1);
+            }
+        }
+        
+        if best_i >= 0 {
+            Some(best_t)
+        } else {
+            println!("Ray Miss! Node checks: {node_count}, Tri checks: {tri_count}");
+            None
+        }
     }
 }

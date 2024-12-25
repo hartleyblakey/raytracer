@@ -13,10 +13,12 @@ const UP = vec3f(0.0, 0.0, 1.0);
 const RIGHT = vec3f(0.0, -1.0, 0.0);
 
 // const SUN_DIR = vec3f(0.707106781187, 0.0 , 0.707106781187);
-const TO_SUN_DIR = vec3f(0.5, 0.0 , 0.86603);
+const TO_SUN_VAL = vec3f(0.5, 0.4, 0.29);
 
-const SUN_COL = vec3f(1.0, 0.7995, 0.5992);
+const TO_SUN_DIR = TO_SUN_VAL / sqrt(TO_SUN_VAL.x * TO_SUN_VAL.x + TO_SUN_VAL.y * TO_SUN_VAL.y + TO_SUN_VAL.z * TO_SUN_VAL.z);
 
+const SUN_COL = vec3f(1.0, 0.5, 0.3);
+const EXPOSURE = 1.0 / 1.5;
 struct Camera {
     dir: vec3f,
     fovy: f32,
@@ -122,7 +124,8 @@ struct TriExt {
 
 // red checkerboard for missing textures
 fn dummy_texture(uv: vec2f) -> vec4f {
-    let checker = f32((u32(uv.x * 32.0) + u32(uv.y * 32.0 + 1.0)) % 2u);
+    const scale = 256.0;
+    let checker = f32((u32(uv.x * scale) + u32(uv.y * scale + 1.0)) % 2u);
     let col = mix(vec3f(0.8, 0.3, 0.3), vec3f(0.8, 0.3, 0.3) * 0.5, checker);
     return vec4f(col.r, col.g, col.b, 1.0);
     // return vec4f(checker, uv.x, uv.y, 1.0);
@@ -468,6 +471,12 @@ fn rand_sphere() -> vec3f {
     return (vec3f(radius * cos(theta), radius * sin(theta), z));
 }
 
+fn rand_disk() -> vec2f {
+    let theta = rand() * 2.0 * pi;
+    let radius = sqrt(rand());
+    return radius * vec2f(cos(theta), sin(theta));
+}
+
 fn rand_hemisphere(normal: vec3f) -> vec3f {
     var sphere = rand_sphere();
     if (dot(sphere, normal) < 0.0) {
@@ -509,14 +518,23 @@ fn camera_ray(pixel: vec2u) -> Ray {
 
     pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor * aspect;
     pixel_pos += up    * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
-
+    
     // // "bloom"
     // let a = rand() * pi * 2.0;
     // let m = rand();
     // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
     // pixel_pos += up             * sin(a) * pow(m, 150.0);
-
+    let aperture_radius = 0.25;
     ray.dir  = normalize(pixel_pos - ray.origin);
+
+    let aperture = aperture_radius * rand_disk();
+
+    ray.origin += right * aperture.x;
+    ray.origin += up * aperture.y;
+
+    pixel_pos +=  ray.dir * (globals.scene.camera.focus - 1.0);
+    ray.dir  = normalize(pixel_pos - ray.origin);
+    
     ray.idir = 1.0 / ray.dir;
 
     return ray;
@@ -559,7 +577,7 @@ fn ramp(x: f32) -> vec3f {
     return to_linear(clamp(magma_quintic(x), vec3f(0.0), vec3f(1.0)));
 }
 
-fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
+fn shade(hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
 
     // stable per-triangle randomness for debugging
     let backup = seed;
@@ -585,6 +603,10 @@ fn shade (hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<
         //     albedo = vec3f(0.1);
         // }
     }
+
+    // if abs(globals.scene.camera.focus - hit.t) < 0.1 {
+    //     emissive = vec3f(0.01, 0.0, 0.0);
+    // }
 
     // // debug visualization
     // emissive = ramp(debug / 128.0);
@@ -691,6 +713,6 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
 
     // divide total by number of samples
     var col = scr.rgb / scr.a;
-    col = tonemap(col / 3.0);
+    col = tonemap(col * EXPOSURE);
     return vec4f(col, 1.0);
 }
