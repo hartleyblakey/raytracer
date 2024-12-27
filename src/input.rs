@@ -20,25 +20,34 @@ pub struct InputState {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuCamera {
-    pub dir:    Vec3,
-    pub fovy:   f32,
-    pub origin: Vec3,
-    pub focus:  f32,
+    pub dir:        Vec3,
+    pub fovy:       f32,
+    pub origin:     Vec3,
+    pub focus:      f32,
+    pub aperture:   f32,
+    pub exposure:   f32,
+    pub bloom:      f32,
+    pub dispersion: f32,
+
 }
 
 #[derive(Copy, Clone)]
 pub struct Camera {
-    pitch: f32,
-    yaw: f32,
-    roll: f32,
-    position: Vec3,
-    focus: f32,
-    speed: f32,
-    fovy: f32,
-    aspect: Option<f32>,
-    moved: bool,
-    lmb_last: bool,
-    rmb_last: bool,
+    pitch:      f32,
+    yaw:        f32,
+    roll:       f32,
+    position:   Vec3,
+    focus:      f32,
+    aperture:   f32,
+    exposure:   f32,
+    bloom:      f32,
+    dispersion: f32,
+    speed:      f32,
+    fovy:       f32,
+    aspect:     Option<f32>,
+    moved:      bool,
+    lmb_last:   bool,
+    rmb_last:   bool,
 }
 
 /*
@@ -93,7 +102,11 @@ impl Camera {
             dir: self.forward(),
             fovy: self.fovy,
             origin: self.position,
-            focus: self.focus
+            focus: self.focus,
+            aperture: self.aperture,
+            exposure: self.exposure,
+            bloom: self.bloom,
+            dispersion: self.dispersion,
         }
     }
     
@@ -199,9 +212,12 @@ impl Camera {
             moved: false,
             lmb_last: true,
             rmb_last: true,
+            aperture: 1.0,
+            exposure: 1.0,
+            bloom: 1.0,
+            dispersion: 1.0,
         }
     }
-
 
     pub fn from_gltf(gltf: gltf::Camera, gltf_transform: &Mat4) -> Camera {
 

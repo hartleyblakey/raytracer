@@ -136,6 +136,7 @@ pub struct FlatScene {
     pub cameras:   Vec<Camera>,
     pub point_lights: Vec<PointLight>,
     pub directional_lights: Vec<DirectionalLight>,
+    pub env_map_data: Vec<[f32; 4]>,
 }
 
 impl FlatScene {
@@ -157,7 +158,18 @@ impl FlatScene {
 
     pub async fn add_gltf(&mut self, transform: &Mat4, path: &str) {
         self.add_gltf_bytes(transform, fetch_bytes(path).await.as_slice());
-    }   
+    }
+
+    pub async fn set_equirectangular_env_map(&mut self, path: &str) {
+        let buffer = fetch_bytes(path).await;
+        let image = image::load_from_memory(buffer.as_slice()).expect(format!("Expected file at path {path}").as_str());
+        let image = image.into_rgba32f();
+        self.env_map_data.clear();
+        for pixel in image.pixels() {
+            self.env_map_data.push(pixel.0);
+        }
+    }
+
 
     fn rgba8_to_u32(x: &[u8; 4]) -> u32 {
         let mut r: u32 = 0;
@@ -167,6 +179,8 @@ impl FlatScene {
         r |= (x[3] as u32) << 0 ;
         r
     }
+
+    
 
     fn add_gltf_node(&mut self, buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack) {
         ms.push();
@@ -636,7 +650,7 @@ impl Bvh {
             return;
         }
 
-        let (axis, split) = if node.count < 20 {
+        let (axis, split) = if node.count < 64 {
             self.find_best_split(tris, &node) 
         } else {
             self.find_split_approx(tris, &node, 16) 

@@ -5,6 +5,7 @@
 @group(1) @binding(2) var<storage, read_write> bvh :            array<BvhNode>;
 @group(1) @binding(3) var<storage, read_write> screen :         array<vec4f>;
 @group(1) @binding(4) var<storage, read_write> texture_data :   array<u32>;
+@group(1) @binding(5) var                      env_map:         texture_2d<f32>;
 
 const pi = 3.141592654;
 
@@ -17,41 +18,45 @@ const TO_SUN_VAL = vec3f(0.5, 0.4, 0.29);
 
 const TO_SUN_DIR = TO_SUN_VAL / sqrt(TO_SUN_VAL.x * TO_SUN_VAL.x + TO_SUN_VAL.y * TO_SUN_VAL.y + TO_SUN_VAL.z * TO_SUN_VAL.z);
 
-const SUN_COL = vec3f(1.0, 0.5, 0.3);
-const EXPOSURE = 1.0 / 1.5;
+const SUN_COL = vec3f(1.0, 0.5, 0.3) * 2.0;
+const EXPOSURE = 1.0 / 4.25;
 struct Camera {
-    dir: vec3f,
-    fovy: f32,
-    origin: vec3f,
-    focus: f32,
+    dir:        vec3f,
+    fovy:       f32,
+    origin:     vec3f,
+    focus:      f32,
+    aperture:   f32,
+    exposure:   f32,
+    bloom:      f32,
+    dispersion: f32,
 }
 
 struct PointLight {
-    position: vec4f,
-    intensity: vec4f,
+    position:   vec4f,
+    intensity:  vec4f,
 }
 
 struct DirectionalLight {
-    direction: vec4f,
-    intensity: vec4f,
+    direction:  vec4f,
+    intensity:  vec4f,
 }
 
 struct Scene {
-    point_lights: array<PointLight, 12>,
-    directional_lights: array<DirectionalLight, 4>,
-    camera:   Camera,
-    tri_count: u32,
-    num_point_lights: u32,
+    point_lights:           array<PointLight, 12>,
+    directional_lights:     array<DirectionalLight, 4>,
+    camera:                 Camera,
+    tri_count:              u32,
+    num_point_lights:       u32,
     num_directional_lights: u32,
 }
 
 struct FrameUniforms {
-    scene: Scene,
-    res:    vec2u,
-    frame:  u32,
-    time:   f32,
-    reject_hist: u32,
-    node_count: u32,
+    scene:          Scene,
+    res:            vec2u,
+    frame:          u32,
+    time:           f32,
+    reject_hist:    u32,
+    node_count:     u32,
 }
 
 // struct FrameUniforms {
@@ -124,9 +129,14 @@ struct TriExt {
 
 // red checkerboard for missing textures
 fn dummy_texture(uv: vec2f) -> vec4f {
+
+
+
     const scale = 256.0;
     let checker = f32((u32(uv.x * scale) + u32(uv.y * scale + 1.0)) % 2u);
-    let col = mix(vec3f(0.8, 0.3, 0.3), vec3f(0.8, 0.3, 0.3) * 0.5, checker);
+    var col = mix(vec3f(0.8, 0.3, 0.3), vec3f(0.8, 0.3, 0.3) * 0.5, checker);
+    // col = vec3f(uv.x, uv.y, 0.0);
+    // col = vec3f(checker) * 0.15 + 0.2;
     return vec4f(col.r, col.g, col.b, 1.0);
     // return vec4f(checker, uv.x, uv.y, 1.0);
 }
@@ -493,9 +503,15 @@ fn rand_color() -> vec3f {
     // return 1.0 - pow(vec3f(0.25), normalize(vec3f(rand(), rand(), rand())) + 0.1);
 }
 
+fn sample_env_map(dir: vec3f) -> vec4f {
+    let uv = vec2f(atan2(dir.y, dir.x) / (pi * 2.0), asin(-dir.z) / pi) + 0.5;
+    return textureLoad(env_map, vec2u(uv * vec2f(textureDimensions(env_map))), 0); 
+}
+
 fn sky(dir: vec3f) -> vec3f {
     let horizon = vec3f(1.0 - SUN_COL);
-    return mix(horizon, SUN_COL,pow(max(dot(dir, TO_SUN_DIR), 0.0), 3.0)) * 1.00;
+    return sample_env_map(dir).rgb;
+    // return mix(horizon, SUN_COL,pow(max(dot(dir, TO_SUN_DIR), 0.0), 3.0)) * 1.00;
     // return to_linear(dir * 0.5 + 0.5);
     // return vec3f(1.0);
 }
@@ -645,7 +661,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
 
     var ray = camera_ray(id.xy);
-    for (var i = 0; i < 5; i++) {
+    for (var i = 0; i < 8; i++) {
         let hit = trace(ray);
         
         shade(hit, ray.dir, &throughput, &lighting);

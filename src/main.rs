@@ -52,6 +52,9 @@ struct Context {
     screen_ssbo:                Buffer,
     triangles_ext_ssbo:         Buffer,
     texture_data_ssbo:          Buffer,
+
+    env_map_texture:            Texture,
+
     rt_data_binding:            BindGroup,
 
     frame_uniforms_binding:     BindGroup,
@@ -74,11 +77,12 @@ impl Context {
         self.screen_ssbo = gpu.new_storage_buffer(res[0] as u64 * res[1]  as u64 * 4 * 4);
 
         self.rt_data_binding = gpu.new_bind_group()
-            .with_buffer(&self.triangles_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.triangles_ext_ssbo.view_all(), wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.bvh_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.screen_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.triangles_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.triangles_ext_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.bvh_ssbo.view_all(),             wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.screen_ssbo.view_all(),          wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.texture_data_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&self.env_map_texture,                wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut self.resources);
     }
 
@@ -197,12 +201,16 @@ impl Context {
         let texture_data_ssbo =     gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
+        let hdri_height = f32::sqrt(scene.env_map_data.len() as f32 / 2.0) as u32; // 4 channels
+        let env_map_texture = gpu.new_texture(uvec2(2 * hdri_height, hdri_height), wgpu::TextureFormat::Rgba32Float, false);
+
         let rt_data_bg = gpu.new_bind_group()
             .with_buffer(&triangles_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&triangles_ext_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&bvh_ssbo.view_all(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut resources);
 
         // fetch shader
@@ -238,6 +246,21 @@ impl Context {
         gpu.queue.write_buffer(&bvh_ssbo.raw,           0, bytemuck::cast_slice(bvh.nodes.as_slice()));
         gpu.queue.write_buffer(&texture_data_ssbo.raw,  0, bytemuck::cast_slice(scene.texture_data.as_slice()));
 
+        gpu.queue.write_texture(
+            env_map_texture.raw.as_image_copy(), 
+            bytemuck::cast_slice(scene.env_map_data.as_slice()), 
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(hdri_height * 2 * 4 * 4),
+                rows_per_image: None,
+            }, 
+            wgpu::Extent3d{
+                width: hdri_height * 2,
+                height: hdri_height,
+                depth_or_array_layers: 1,
+            },
+        );
+
         Context {
             screen_pipeline,
             screen_pipeline_layout,
@@ -256,6 +279,9 @@ impl Context {
             triangles_ssbo,
             triangles_ext_ssbo,
             texture_data_ssbo,
+
+            env_map_texture,
+
             rt_data_binding: rt_data_bg,
 
             resources,
@@ -269,26 +295,16 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
 
     let did_recompile = ctx.check_recompile_shader(gpu);
 
-    let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next swap chain texture");
-
-    let mut surface_view_desc = wgpu::TextureViewDescriptor::default();
-    surface_view_desc.format =  Some(gpu.surface_config.view_formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(gpu.surface_config.format));
-    let view = surface_texture.texture.create_view(&surface_view_desc);
+    let surface_texture = gpu.surface.get_current_texture().expect("Failed to aquire next surface texture");
+    let surface_view = gpu.get_surface_view(&surface_texture);
 
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: None,
-        });
-
+        label: None,
+    });
+    
     let rpass_desc = wgpu::RenderPassDescriptor {
         label: None,
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &view,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
-                store: wgpu::StoreOp::Store,
-            },
-        })],
+        color_attachments: &[Some(surface_view.attachment())],
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
@@ -298,8 +314,6 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     ctx.frame_uniforms.time += dt; // hack
     ctx.frame_uniforms.scene.camera = ctx.scene.cameras[0].to_gpu();
     ctx.frame_uniforms.reject_hist = ctx.scene.cameras[0].check_moved() as u32;
-
-
 
     if did_recompile {
         ctx.frame_uniforms.reject_hist = 1;
@@ -384,13 +398,16 @@ async fn build_scene() -> FlatScene {
 
     // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/turtle.glb"));
 
-    // scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
-    scene.add_gltf(&Mat4::IDENTITY, "resources/large/ship.glb").await;
+    scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
+    // scene.add_gltf(&Mat4::IDENTITY, "resources/large/ship.glb").await;
 
     //scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
 
     // scene.add_gltf(&Mat4::IDENTITY, "resources/large/Sponza.glb").await;
+    // scene.add_gltf(&Mat4::IDENTITY, "resources/large/DragonAttenuation.glb").await;
     
+    scene.set_equirectangular_env_map("resources/trail.hdr").await;
+
     if scene.cameras.is_empty() {
         println!("No camera in scene, falling back to default");
         // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
