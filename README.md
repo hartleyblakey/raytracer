@@ -2,14 +2,14 @@
 
 
 ## Continued Work
-![screenshot](/Final-Project/screenshots/sponza_dof_hdri.png?raw=true)
+![screenshot](/screenshots/sponza_dof_hdri.png?raw=true)
 Added depth of field, and CPU raycasting to find focal distance. 
 
 Added support for an equirectangular environment map
  - No importance sampling yet
 
 ## Final State
-![screenshot](/Final-Project/screenshots/sponza.png?raw=true)
+![screenshot](/screenshots/sponza.png?raw=true)
 - Loads simple static GLTF files into vectors of triangle positions, cameras, base color texcoords, and base color images converted to rgba8
   - Not well tested but worked on sponza and the tiny blender exports I tried
 
