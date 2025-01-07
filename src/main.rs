@@ -33,7 +33,8 @@ struct FrameUniforms {
     time:   f32,
     reject_hist: u32,
     node_count: u32,
-    _pad: [u32; 2]
+    prim_count: u32,
+    _pad: u32,
 
 }
 
@@ -52,6 +53,7 @@ struct Context {
     screen_ssbo:                Buffer,
     triangles_ext_ssbo:         Buffer,
     texture_data_ssbo:          Buffer,
+    primitive_data_ssbo:        Buffer,
 
     env_map_texture:            Texture,
 
@@ -63,9 +65,7 @@ struct Context {
 
     resources:                  ResourceManager,
 
-    scene:                      FlatScene,
-
-    bvh:                        Bvh,
+    scene:                      Scene,
 }
 
 impl Context {
@@ -82,6 +82,7 @@ impl Context {
             .with_buffer(&self.bvh_ssbo.view_all(),             wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.screen_ssbo.view_all(),          wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.texture_data_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.primitive_data_ssbo.view_all(),  wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&self.env_map_texture,                wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut self.resources);
     }
@@ -169,11 +170,8 @@ impl Context {
 
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
         let scene = build_scene().await;
-        
-        println!();
-        println!("building bvh");
-        let bvh = Bvh::new(&scene.triangles);
-        println!("Bvh size : {} mb", (bvh.nodes.len() * size_of::<BvhNode>()) / (1000 * 1000));
+
+        println!("Bvh size : {} mb", (scene.bvh_node_data.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
 
         let u_frame_0 = FrameUniforms {
@@ -182,8 +180,9 @@ impl Context {
             res: [gpu.surface_config.width, gpu.surface_config.height],
             time: 0.0,
             reject_hist: 1,
-            node_count: bvh.nodes.len() as u32,
-            _pad: [0; 2],
+            node_count: scene.bvh_node_data.len() as u32,
+            prim_count: scene.primitives.len() as u32,
+            _pad: 0,
         };
 
         let u_frame_buffer = gpu.new_uniform_buffer(&u_frame_0);
@@ -199,6 +198,7 @@ impl Context {
         let bvh_ssbo =              gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
         let triangles_ext_ssbo =    gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
         let texture_data_ssbo =     gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
+        let primitive_data_ssbo =   gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
         let hdri_height = f32::sqrt(scene.env_map_data.len() as f32 / 2.0) as u32; // 4 channels
@@ -210,6 +210,7 @@ impl Context {
             .with_buffer(&bvh_ssbo.view_all(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&primitive_data_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut resources);
 
@@ -240,11 +241,11 @@ impl Context {
             gpu
         );
 
-        let (flat_tris, flat_exts) = bvh.flatten_triangles(&scene.triangles, &scene.triangles_ext);
-        gpu.queue.write_buffer(&triangles_ssbo.raw,     0, bytemuck::cast_slice(flat_tris.as_slice()));
-        gpu.queue.write_buffer(&triangles_ext_ssbo.raw, 0, bytemuck::cast_slice(flat_exts.as_slice()));
-        gpu.queue.write_buffer(&bvh_ssbo.raw,           0, bytemuck::cast_slice(bvh.nodes.as_slice()));
-        gpu.queue.write_buffer(&texture_data_ssbo.raw,  0, bytemuck::cast_slice(scene.texture_data.as_slice()));
+        gpu.queue.write_buffer(&triangles_ssbo.raw,         0, bytemuck::cast_slice(scene.tris.as_slice()));
+        gpu.queue.write_buffer(&triangles_ext_ssbo.raw,     0, bytemuck::cast_slice(scene.tri_exts.as_slice()));
+        gpu.queue.write_buffer(&bvh_ssbo.raw,               0, bytemuck::cast_slice(scene.bvh_node_data.as_slice()));
+        gpu.queue.write_buffer(&texture_data_ssbo.raw,      0, bytemuck::cast_slice(scene.texture_data.as_slice()));
+        gpu.queue.write_buffer(&primitive_data_ssbo.raw,    0, bytemuck::cast_slice(scene.primitives.as_slice()));
 
         gpu.queue.write_texture(
             env_map_texture.raw.as_image_copy(), 
@@ -279,6 +280,7 @@ impl Context {
             triangles_ssbo,
             triangles_ext_ssbo,
             texture_data_ssbo,
+            primitive_data_ssbo,
 
             env_map_texture,
 
@@ -286,7 +288,6 @@ impl Context {
 
             resources,
             scene,
-            bvh,
         }
     }
 }
@@ -374,9 +375,9 @@ async fn fetch_bytes(path: &str) -> Vec<u8> {
 }
 
 
-async fn build_scene() -> FlatScene {
+async fn build_scene() -> Scene {
     println!("building scene");
-    let mut scene = FlatScene::default();
+    let mut scene = Scene::default();
     let mut ms = MatrixStack::new();
     // scene.add_gltf_bytes(&Mat4::from_rotation_x(-90.0_f32.to_radians()), include_bytes!("../resources/suzanne.glb"));
     // scene.add_gltf_bytes(&Mat4::from_translation(vec3(0.0, -3.0, 0.0)), include_bytes!("../resources/simple.glb"));
@@ -398,10 +399,10 @@ async fn build_scene() -> FlatScene {
 
     // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/turtle.glb"));
 
-    scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
-    // scene.add_gltf(&Mat4::IDENTITY, "resources/large/ship.glb").await;
+     scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
+     // scene.add_gltf(&Mat4::IDENTITY, "resources/large/ship.glb").await;
 
-    //scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
+     // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
 
     // scene.add_gltf(&Mat4::IDENTITY, "resources/large/Sponza.glb").await;
     // scene.add_gltf(&Mat4::IDENTITY, "resources/large/DragonAttenuation.glb").await;
@@ -414,8 +415,8 @@ async fn build_scene() -> FlatScene {
         scene.cameras.push(Camera::default());
     }
     
-    println!("Tri count: {}", scene.triangles.len());
-    println!("Tri size : {} mb", (scene.triangles.len() * size_of::<Tri>()) / (1000 * 1000));
+    println!("Tri count: {}", scene.tris.len());
+    println!("Tri size : {} mb", (scene.tris.len() * size_of::<Tri>()) / (1000 * 1000));
     scene
 }
 
@@ -459,12 +460,8 @@ async fn run() {
                 match event {
                     WindowEvent::Resized(new_size) => {
                         // Reconfigure the surface with the new size
-
-                        // I have no idea why I needed to do this, it was resizing to infinity
-                        gpu.surface_config.width  = new_size.width.max(1);
-                        gpu.surface_config.height = new_size.height.max(1);
-                        gpu.surface_config.width  = gpu.surface_config.width.min(4096);
-                        gpu.surface_config.height = gpu.surface_config.height.min(4096);
+                        gpu.surface_config.width  = new_size.width.clamp(1, 4096);
+                        gpu.surface_config.height = new_size.height.clamp(1, 4096);
     
                         gpu.surface.configure(&gpu.device, &gpu.surface_config);
                         ctx.update_resolution(&gpu);
@@ -493,7 +490,7 @@ async fn run() {
                         match button {
                             MouseButton::Left =>  {
                                 input.lmb = state.is_pressed();
-                                if let Some(focus) = ctx.bvh.closest_hit(&ctx.scene.triangles, ctx.scene.cameras[0].position(), ctx.scene.cameras[0].forward()) {
+                                if let Some(focus) = ctx.scene.closest_hit(ctx.scene.cameras[0].position(), ctx.scene.cameras[0].forward()) {
                                     ctx.scene.cameras[0].focus(focus);
                                 };
                             },

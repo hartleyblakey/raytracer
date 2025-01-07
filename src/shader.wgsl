@@ -5,7 +5,8 @@
 @group(1) @binding(2) var<storage, read_write> bvh :            array<BvhNode>;
 @group(1) @binding(3) var<storage, read_write> screen :         array<vec4f>;
 @group(1) @binding(4) var<storage, read_write> texture_data :   array<u32>;
-@group(1) @binding(5) var                      env_map:         texture_2d<f32>;
+@group(1) @binding(5) var<storage, read_write> primitives :     array<Primitive>;
+@group(1) @binding(6) var                      env_map:         texture_2d<f32>;
 
 const pi = 3.141592654;
 
@@ -14,12 +15,12 @@ const UP = vec3f(0.0, 0.0, 1.0);
 const RIGHT = vec3f(0.0, -1.0, 0.0);
 
 // const SUN_DIR = vec3f(0.707106781187, 0.0 , 0.707106781187);
-const TO_SUN_VAL = vec3f(0.5, 0.4, 0.29);
+const TO_SUN_VAL = vec3f(0.5, 0.4, 1.49);
 
 const TO_SUN_DIR = TO_SUN_VAL / sqrt(TO_SUN_VAL.x * TO_SUN_VAL.x + TO_SUN_VAL.y * TO_SUN_VAL.y + TO_SUN_VAL.z * TO_SUN_VAL.z);
 
 const SUN_COL = vec3f(1.0, 0.5, 0.3) * 2.0;
-const EXPOSURE = 1.0 / 4.25;
+const EXPOSURE = 1.0 / 2.15;
 struct Camera {
     dir:        vec3f,
     fovy:       f32,
@@ -41,6 +42,27 @@ struct DirectionalLight {
     intensity:  vec4f,
 }
 
+struct GpuTextureRef {
+    offset: u32,
+    size: u32,
+}
+
+struct Material {
+    albedo: GpuTextureRef,
+}
+
+const DEFAULT_MATERIAL = Material (
+    GpuTextureRef (0, 0), // albedo
+);
+
+struct Primitive {
+    transform:      mat4x4f,
+    inv_transform:  mat4x4f,
+    material:       Material,
+    bvh_idx:        u32,
+    _pad:           u32,
+}
+
 struct Scene {
     point_lights:           array<PointLight, 12>,
     directional_lights:     array<DirectionalLight, 4>,
@@ -57,6 +79,7 @@ struct FrameUniforms {
     time:           f32,
     reject_hist:    u32,
     node_count:     u32,
+    prim_count:     u32,
 }
 
 // struct FrameUniforms {
@@ -72,20 +95,13 @@ struct FrameUniforms {
 //     directional_lights: array<DirectionalLight, 4>,
 // }
 
-////////////// Texcoord //////////////
-struct GpuTexcoord {
-    pos: vec2f,
-    offset: u32,
-    size: u32,
-}
-
-fn tc_size(tc: GpuTexcoord) -> vec2u {
+fn tc_size(tc: GpuTextureRef) -> vec2u {
     return vec2u(tc.size >> 16u, tc.size & 0xFFFFu);
 }
-
-fn sample_texture(tc: GpuTexcoord) -> vec4f {
-    if tc.size == 0 {
-        return dummy_texture(tc.pos);
+  
+fn sample_texture(tex: GpuTextureRef, tc: vec2f) -> vec4f {
+    if tex.size == 0 {
+        return dummy_texture(tc);
     }
 
     // // visualize texture IDs
@@ -95,14 +111,14 @@ fn sample_texture(tc: GpuTexcoord) -> vec4f {
     // seed = backup;
     // return vec4f(col.r, col.g, col.b, 1.0);
 
-    let size = tc_size(tc);
-    let texel_pos = vec2u(tc.pos * vec2f(size));
-    let texel = texture_data[tc.offset + texel_pos.y * size.x + texel_pos.x];
+    let size = tc_size(tex);
+    let texel_pos = vec2u(tc * vec2f(size));
+    let texel = texture_data[tex.offset + texel_pos.y * size.x + texel_pos.x];
     return pow(unpack_rgba8(texel), vec4f(2.2));
 }
 
 struct GpuVertexExt {
-    tex0: GpuTexcoord,
+    tex0: vec2f,
     normal: vec2f,
     color: u32,
     _pad: f32
@@ -146,13 +162,13 @@ fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     var res = ExtSample(vec4f(0.0, 0.0, 0.0, 0.0), vec2f(0.0, 0.0), vec3f(0.0, 0.0, 0.0));
 
     res.color += bary.x * unpack_rgba8((*tri).vertices[0].color);
-    res.uv0 += bary.x * (*tri).vertices[0].tex0.pos;
+    res.uv0 += bary.x * (*tri).vertices[0].tex0;
 
     res.color += bary.y * unpack_rgba8((*tri).vertices[1].color);
-     res.uv0 += bary.y * (*tri).vertices[1].tex0.pos;
+     res.uv0 += bary.y * (*tri).vertices[1].tex0;
 
     res.color += bary.z * unpack_rgba8((*tri).vertices[2].color);
-    res.uv0 += bary.z * (*tri).vertices[2].tex0.pos;
+    res.uv0 += bary.z * (*tri).vertices[2].tex0;
 
     res.uv0 = fract( res.uv0);
    //  res.tex0 = vec4f(tc0, 0.0, 1.0);
@@ -232,6 +248,7 @@ struct Ray {
 struct Hit {
     t: f32,
     idx: i32,
+    material: Material,
     normal: vec3f,
     bary: vec3f,
 }
@@ -277,10 +294,14 @@ fn sign11(x: f32) -> f32 {
 //     from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
 fn intersect_full(ray: Ray, idx: i32) -> Hit {
     let tri = triangles[idx];
-    var hit = Hit(0.0, -1, vec3f(0.0, 0.0, 1.0), vec3f(0.333, 0.333, 0.333));
+    var hit = Hit(0.0, -1, DEFAULT_MATERIAL, vec3f(0.0, 0.0, 1.0), vec3f(0.333, 0.333, 0.333));
 
     let edge1 = tri.d1.xyz - tri.d0.xyz;
     let edge2 = tri.d2.xyz - tri.d0.xyz;
+
+    hit.normal = normalize(cross(edge1, edge2));
+    hit.normal *= -sign11(dot(hit.normal, ray.dir));
+
     let h = cross( ray.dir, edge2 );
     let a = dot( edge1, h );
     if (a > -0.000002 && a < 0.000002) {
@@ -302,8 +323,7 @@ fn intersect_full(ray: Ray, idx: i32) -> Hit {
         return hit;
     }   // miss?
 
-    hit.normal = normalize(cross(edge1, edge2));
-    hit.normal *= -sign11(dot(hit.normal, ray.dir));
+
     hit.idx = idx;
     hit.t = t;
     hit.bary = vec3f((1.0 - u) - v, u, v);
@@ -316,7 +336,7 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
     let bmin = aabb_min(aabb);
     let bmax = aabb_max(aabb);
 
-    if all(ray.origin > bmin) && all(ray.origin < bmax) {
+    if all(ray.origin >= bmin) && all(ray.origin < bmax) {
         return 0.0;
     }
 
@@ -329,7 +349,7 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
     let t0 = max(tmin.x, max(tmin.y, tmin.z));
     let t1 = min(tmax.x, min(tmax.y, tmax.z));
 
-    if (t0 >= t1 || t0 < 0.0) {
+    if (t0 > t1 || t0 < 0.0) {
         return -1.0;
     }
 
@@ -338,16 +358,16 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
 
 var<private> debug: f32;
 
-fn trace_bvh(ray: Ray) -> i32 {
+fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>) -> i32 {
     var stack: Stack;
     stack.size = 0u;
-    var node = bvh[0];
-    var best_t = 999999999.0;
+    var node = bvh[root];
+    var best_t = *t_max;
     var best_i: i32 = -1;
     if intersect_aabb(ray, node.aabb) < -0.5 {
         return best_i;
     }
-    debug = 0.0;
+    
     while (true) {
         // debug = max(debug, f32(stack.size + 1u));
         // visualize bvh steps
@@ -395,12 +415,15 @@ fn trace_bvh(ray: Ray) -> i32 {
 
         }
     }
+    *t_max = best_t;
     return i32(best_i);
 }
-fn trace_bvh_shadow(ray: Ray) -> bool {
+
+// true if hit, false otherwise
+fn trace_bvh_shadow(ray: Ray, root: u32) -> bool {
     var stack: Stack;
     stack.size = 0u;
-    var node = bvh[0];
+    var node = bvh[root];
     if intersect_aabb(ray, node.aabb) < -0.5 {
         return false;
     }
@@ -446,10 +469,63 @@ fn trace_bvh_shadow(ray: Ray) -> bool {
     return false;
 }
 
-// just traces the one BVH for now
+
+fn transform_dir(x: vec3f, t: mat4x4f) -> vec3f {
+    return (t * vec4f(x.x, x.y, x.z, 0.0)).xyz;
+}
+
+fn transform_pos(x: vec3f, t: mat4x4f) -> vec3f {
+    return (t * vec4f(x.x, x.y, x.z, 1.0)).xyz;
+}
+
+fn transform_ray(x: Ray, it: mat4x4f) -> Ray {
+    var r = x;
+    r.dir = normalize(transform_dir(r.dir, it));
+    r.origin = transform_pos(r.origin, it);
+    r.idir = 1.0 / r.dir;
+    return r;
+}
+
+// just loops over all primitives for now
 fn trace(ray: Ray) -> Hit {
-    var closest_idx = trace_bvh(ray);
-    return intersect_full(ray, closest_idx);
+    var closest_idx = -1;
+    var closest_t   = 99999999.0;
+    var closest_primitive = 0u;
+    debug = 0.0;
+    for (var i = 0u; i < globals.prim_count; i++) {
+        let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
+        let t_ray = transform_ray(ray, primitives[i].inv_transform);
+
+        var new_t = closest_t * scale_factor;
+        let new_idx = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t);
+
+        if new_idx >= 0 {
+            closest_t = new_t / scale_factor;
+            closest_idx = new_idx;
+            closest_primitive = i;
+        }
+    }
+
+    let t_ray_final = transform_ray(ray, primitives[closest_primitive].inv_transform);
+    var hit = intersect_full(t_ray_final, closest_idx);
+
+    // transform the hit back to world space
+    hit.t = closest_t;
+    hit.normal = normalize(transform_dir(hit.normal, transpose(primitives[closest_primitive].inv_transform)));
+    hit.material = primitives[closest_primitive].material;
+    return hit;
+
+}
+
+// true if hit, false otherwise
+fn trace_shadow(ray: Ray) -> bool {
+    for (var i = 0u; i < globals.prim_count; i++) {
+        let t_ray = transform_ray(ray, primitives[i].inv_transform);
+        if trace_bvh_shadow(t_ray, primitives[i].bvh_idx) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
@@ -611,8 +687,8 @@ fn shade(hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<f
         var ext = tri_exts[hit.idx];
         let sample = tri_ext_interpolate(&ext, hit.bary);
         var tc0 = ext.vertices[0].tex0;
-        tc0.pos = sample.uv0;
-        albedo = sample_texture(tc0).rgb;
+        tc0 = sample.uv0;
+        albedo = sample_texture(hit.material.albedo, tc0).rgb;
 
         // // show triangle outlines
         // if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
@@ -625,14 +701,17 @@ fn shade(hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<f
     // }
 
     // // debug visualization
-    // emissive = ramp(debug / 128.0);
+    // emissive = ramp(debug / 256.0);
 
     // // visualize normals
     // emissive = to_linear(hit.normal * 0.5 + 0.5);
 
+    // // visualize triangle IDs
+    // emissive = rand_color();
+
     // // visualize albedo
     // emissive = albedo * (dot(hit.normal, vec3f(0.0, 0.0, 1.0)) * 0.4 + 0.6);
-    
+
     *lighting += *throughput * emissive;
     *throughput *= albedo;
 
@@ -673,13 +752,15 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         ray.origin += ray.dir * hit.t + hit.normal * 0.0001;
         const SHADOW_PROB = 0.5;
         if rand() < SHADOW_PROB {
+            
             // sun shadow ray
             throughput /= SHADOW_PROB;
 
             ray.dir = normalize(TO_SUN_DIR + rand_sphere() * 0.01);
             ray.idir = vec3f(1.0) / ray.dir;
-            if !trace_bvh_shadow(ray) {
-                lighting += throughput * SUN_COL * 12.0 * eval_lambert(TO_SUN_DIR, hit.normal);
+            let lambert = eval_lambert(TO_SUN_DIR, hit.normal);
+            if lambert > 0.0 && !trace_shadow(ray) {
+                lighting += throughput * SUN_COL * 12.0 * lambert;
             }
             break;
         } else {
