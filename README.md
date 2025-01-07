@@ -50,7 +50,7 @@ Requires rust and cargo, [which can be found here](https://www.rust-lang.org/too
 
 Use cargo to run  the project:
 ```bash
-cd Final-Project
+cd raytracer
 cargo run
 ```
 
@@ -62,7 +62,7 @@ cargo install wasm-bindgen-cli
 ```
 Once cargo is installed:
 ```bash
-cd Final-Project
+cd raytracer
 
 cargo build --target wasm32-unknown-unknown 
 
