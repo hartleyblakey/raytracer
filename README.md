@@ -22,7 +22,7 @@
 
 - Technically can be built for the web
   - Hardcoded resolution to 512x512, no extra effort put in beyond getting it to run
-  - [hosted on blue here (requires webgpu)](https://blue.cs.sonoma.edu/~hblakey/CS-375/Final-Project/generated/index.html)
+  - [hosted here (requires webgpu)](https://blue.cs.sonoma.edu/~hblakey/CS-375/Final-Project/generated/index.html)
 
 
 #### Source Files
@@ -71,5 +71,5 @@ cargo build --target wasm32-unknown-unknown
 
 wasm-bindgen --out-dir generated --web target/wasm32-unknown-unknown/debug/raytracer.wasm
 ```
-index.html looks for the generated files in `raytracer/generated` by default
+`index.html` looks for the generated files in `raytracer/generated` by default
 
