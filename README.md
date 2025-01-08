@@ -44,6 +44,9 @@
 - `input.rs`:
   - Implements a simple camera controller
 
+- `index.html`:
+  - Runs the compiled wasm app through a wasm-bindgen generated js interface
+
 
 #### Build Instructions
 Requires rust and cargo, [which can be found here](https://www.rust-lang.org/tools/install)
@@ -68,3 +71,5 @@ cargo build --target wasm32-unknown-unknown
 
 wasm-bindgen --out-dir generated --web target/wasm32-unknown-unknown/debug/raytracer.wasm
 ```
+index.html looks for the generated files in `raytracer/generated` by default
+
