@@ -1,20 +1,20 @@
 # WebGPU GLTF Raytracer
 
-![screenshot](/screenshots/sponza_dof_hdri.png?raw=true)
+![screenshot](/screenshots/helmet.png?raw=true)
 
 ### Features
 
-- Loads simple static GLTF files into vectors of triangle positions, cameras, base color texcoords, and base color images converted to rgba8
+- Loads simple static GLTF files into vectors of triangle positions, cameras, texcoords, and textures converted to rgba8
+
   - Not well tested but worked on sponza and the tiny blender exports I tried
 
   - **The paths to the loaded gltf model files are hardcoded**
 
 - Builds a simple BVH around the triangle positions and extra data, based on the first 2.5 articles of "Build A BVH" by Jacco Bikker
 
-- Raytraces the bvh in a compute shader with simple diffuse lighting, and a hardcoded sun light
+- Raytraces the bvh in a compute shader with basic shading, and a hardcoded sun light + HDRI environment
   - A small fixed number of directional and point lights are read from the file and passed to the shader but are not used
   - Depth of field with hardcoded aperture size
-  - Loads a single HDR equirectangular environment map from a hardcoded path
 
 - Simple flycam
   - WASD movement, scroll wheel zoom, LMB focus

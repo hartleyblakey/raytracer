@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use glam::{uvec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::GenericImageView;
 use rand::random;
 
@@ -186,6 +186,57 @@ impl Primitive {
     }
 }
 
+// https://gamedev.stackexchange.com/questions/169508/octahedral-impostors-octahedral-mapping
+fn unpack_vec3_octrahedral(uv: Vec2) -> Vec3 {
+    let mut position = vec3(2.0 * (uv.x - 0.5), 2.0 * (uv.y - 0.5), 0.0);
+    let absolute = position.xy().abs();
+    position.z = 1.0 - absolute.x - absolute.y;
+
+    if position.z < 0.0 {
+        position.x = position.x.signum() * (1.0 - absolute.y);
+        position.y = position.y.signum() * (1.0 - absolute.x);
+    }
+
+    position.normalize()
+}
+
+// https://gamedev.stackexchange.com/questions/169508/octahedral-impostors-octahedral-mapping
+// fn pack_vec3_octrahedral(dir: Vec3) -> Vec2 {
+//     let octant = dir.signum();
+//     let sum = dir.dot(octant);
+
+//     let mut octrahedron = dir / sum;
+
+//     if octrahedron.z < 0.0 {
+//         let absolute = octrahedron.abs();
+//         octrahedron.x *= octant.x + (1.0 - absolute.y);
+//         octrahedron.y *= octant.y + (1.0 - absolute.x);
+//     }
+
+//     return octrahedron.xy() * 0.5 + 0.5;
+// }
+
+
+fn oct_wrap(v: Vec2) -> Vec2 {
+    let scale = v.signum();
+    vec2 (
+        1.0 - v.y.abs(),
+        1.0 - v.x.abs()
+    ) * scale
+    
+}
+
+// https://knarkowicz.wordpress.com/2014/04/16/octahedron-normal-vector-encoding/
+fn pack_vec3_octrahedral(mut n: Vec3) -> Vec2 {
+    n /= n.x.abs() + n.y.abs() + n.z.abs();
+    if n.z < 0.0 {
+        let wrap = oct_wrap(n.xy());
+        n.x = wrap.x;
+        n.y = wrap.y;
+    }
+    return n.xy() * 0.5 + 0.5
+}
+
 #[derive(Default)]
 pub struct Scene {
 
@@ -216,6 +267,9 @@ pub struct Scene {
     /// rgba32f equirectangular environment map pixel data
     pub env_map_data:       Vec<[f32; 4]>,
 }
+
+
+
 
 impl Scene {
     pub async fn add_gltf(&mut self, transform: &Mat4, path: &str) {
@@ -451,6 +505,16 @@ impl Scene {
                             Vec::new()
                         };
 
+                        let normals = reader.read_normals();
+                        let normals: Vec<Vec2> = if normals.is_some() {
+                            normals.unwrap().map(
+                                |c| 
+                                pack_vec3_octrahedral(Self::from_gltf_vec3(vec3(c[0], c[1], c[2]).normalize()))
+                            ).collect()
+                        } else {
+                            Vec::new()
+                        };
+
                         let first_new_tri = self.tris.len();
                         if let Some(indices) = reader.read_indices() {
                             // indexed mesh
@@ -462,6 +526,14 @@ impl Scene {
                                     ext.vertices[0].color = colors[idx_0 as usize];
                                     ext.vertices[1].color = colors[idx_1 as usize];
                                     ext.vertices[2].color = colors[idx_2 as usize];
+                                }
+                                ext.vertices[0].normal = vec2(0.0, 1.0);
+                                ext.vertices[1].normal = vec2(0.0, 1.0);
+                                ext.vertices[2].normal = vec2(0.0, 1.0);
+                                if !normals.is_empty() {
+                                    ext.vertices[0].normal = normals[idx_0 as usize];
+                                    ext.vertices[1].normal = normals[idx_1 as usize];
+                                    ext.vertices[2].normal = normals[idx_2 as usize];
                                 }
 
                                 for i in 0..GPU_TEXCOORD_COUNT {

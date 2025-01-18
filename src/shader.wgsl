@@ -22,7 +22,7 @@ const TO_SUN_VAL = vec3f(0.5, 0.4, 1.49);
 const TO_SUN_DIR = TO_SUN_VAL / sqrt(TO_SUN_VAL.x * TO_SUN_VAL.x + TO_SUN_VAL.y * TO_SUN_VAL.y + TO_SUN_VAL.z * TO_SUN_VAL.z);
 
 const SUN_COL = vec3f(1.0, 0.5, 0.3) * 0.0;
-const EXPOSURE = 1.0 / 2.15;
+const EXPOSURE = 1.0 / 1.0;
 
 
 struct Camera {
@@ -181,9 +181,21 @@ fn unpack_rgba8(x: u32) -> vec4f {
     );
 }
 
-fn reconstruct_unit_vector(x: vec2f) -> vec3f {
-    return vec3f(x.x, x.y, sqrt(1.0 - (x.x * x.x + x.y * x.y)));
+// https://gamedev.stackexchange.com/questions/169508/octahedral-impostors-octahedral-mapping
+fn unpack_vec3_octrahedral(f_in: vec2f) -> vec3f {
+    var f = f_in;
+    f = f * 2.0 - 1.0;
+ 
+    // https://twitter.com/Stubbesaurus/status/937994790553227264
+    var n = vec3f(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    let t = saturate(-n.z);
+
+    n.x -= t * sign11(n.x);
+    n.y -= t * sign11(n.y);
+    // n.xy += n.xy >= 0.0 ? -t : t;
+    return normalize(n);
 }
+
 
 struct TriExt {
     vertices: array<GpuVertexExt, 3>
@@ -222,21 +234,26 @@ fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     res.color += bary.x * unpack_rgba8((*tri).vertices[0].color);
     res.texcoords[0] += bary.x * (*tri).vertices[0].texcoords[0];
     res.texcoords[1] += bary.x * (*tri).vertices[0].texcoords[1];
-    res.normal += bary.x * reconstruct_unit_vector((*tri).vertices[0].normal);
+    res.normal += bary.x * unpack_vec3_octrahedral((*tri).vertices[0].normal);
 
     res.color += bary.y * unpack_rgba8((*tri).vertices[1].color);
     res.texcoords[0] += bary.y * (*tri).vertices[1].texcoords[0];
     res.texcoords[1] += bary.y * (*tri).vertices[1].texcoords[1];
-    res.normal += bary.y * reconstruct_unit_vector((*tri).vertices[1].normal);
+    res.normal += bary.y * unpack_vec3_octrahedral((*tri).vertices[1].normal);
 
     res.color += bary.z * unpack_rgba8((*tri).vertices[2].color);
     res.texcoords[0] += bary.z * (*tri).vertices[2].texcoords[0];
     res.texcoords[1] += bary.z * (*tri).vertices[2].texcoords[1];
-    res.normal += bary.z * reconstruct_unit_vector((*tri).vertices[2].normal);
+    res.normal += bary.z * unpack_vec3_octrahedral((*tri).vertices[2].normal);
 
+    res.normal = normalize(res.normal);
+   
    //  res.tex0 = vec4f(tc0, 0.0, 1.0);
     return res;
 }
+
+
+
 
 
 ////////////// aabb //////////////
@@ -311,6 +328,7 @@ struct Ray {
 struct Hit {
     t: f32,
     idx: i32,
+    prim_idx: i32,
     material: Material,
     normal: vec3f,
     bary: vec3f,
@@ -357,7 +375,7 @@ fn sign11(x: f32) -> f32 {
 //     from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
 fn intersect_full(ray: Ray, idx: i32) -> Hit {
     let tri = triangles[idx];
-    var hit = Hit(0.0, -1, DEFAULT_MATERIAL, vec3f(0.0, 0.0, 1.0), vec3f(0.333, 0.333, 0.333));
+    var hit = Hit(0.0, -1, -1, DEFAULT_MATERIAL, vec3f(0.0, 0.0, 1.0), vec3f(0.333, 0.333, 0.333));
 
     let edge1 = tri.d1.xyz - tri.d0.xyz;
     let edge2 = tri.d2.xyz - tri.d0.xyz;
@@ -541,6 +559,11 @@ fn transform_pos(x: vec3f, t: mat4x4f) -> vec3f {
     return (t * vec4f(x.x, x.y, x.z, 1.0)).xyz;
 }
 
+
+fn transform_normal(x: vec3f, t_inv: mat4x4f) -> vec3f {
+    return normalize(transform_dir(x, transpose(t_inv)));
+}
+
 fn transform_ray(x: Ray, it: mat4x4f) -> Ray {
     var r = x;
     r.dir = normalize(transform_dir(r.dir, it));
@@ -574,7 +597,8 @@ fn trace(ray: Ray) -> Hit {
 
     // transform the hit back to world space
     hit.t = closest_t;
-    hit.normal = normalize(transform_dir(hit.normal, transpose(primitives[closest_primitive].inv_transform)));
+    hit.normal = transform_normal(hit.normal, primitives[closest_primitive].inv_transform);
+    hit.prim_idx = i32(closest_primitive);
     hit.material = primitives[closest_primitive].material;
     return hit;
 
@@ -649,7 +673,7 @@ fn sample_env_map(dir: vec3f) -> vec4f {
 
 fn sky(dir: vec3f) -> vec3f {
     let horizon = vec3f(1.0 - SUN_COL);
-    return sample_env_map(dir).rgb * 0.2;
+    return sample_env_map(dir).rgb * 1.0;
     // return mix(horizon, SUN_COL,pow(max(dot(dir, TO_SUN_DIR), 0.0), 3.0)) * 1.00;
     // return to_linear(dir * 0.5 + 0.5);
     // return vec3f(1.0);
@@ -693,60 +717,6 @@ fn ramp(x: f32) -> vec3f {
     return to_linear(clamp(magma_quintic(x), vec3f(0.0), vec3f(1.0)));
 }
 
-fn shade(hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
-
-    // stable per-triangle randomness for debugging
-    let backup = seed;
-    seed = u32(hit.idx * 7);
-    rand();
-    var emissive = vec3f(0);
-    var albedo   = vec3f(0.7);
-
-    if (hit.idx == -1) {
-        // miss
-        emissive = sky(dir);
-    } else {
-        // sample extra vertex data
-        var ext = tri_exts[hit.idx];
-        let sample = tri_ext_interpolate(&ext, hit.bary);
-
-        albedo = hit.material.albedo_factor.rgb;
-        if hit.material.albedo.size != 0 {
-            albedo *= to_linear(sample_texture(hit.material.albedo, sample.texcoords[hit.material.albedo_texcoord]).rgb);
-        }
-
-        emissive = hit.material.emissive_factor;
-        if hit.material.emissive.size != 0 {
-            emissive *= to_linear(sample_texture(hit.material.emissive, sample.texcoords[hit.material.emissive_texcoord]).rgb);
-        }
-        
-        // // show triangle outlines
-        // if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
-        //     albedo = vec3f(0.1);
-        // }
-    }
-
-    // if abs(globals.scene.camera.focus - hit.t) < 0.1 {
-    //     emissive = vec3f(0.01, 0.0, 0.0);
-    // }
-
-    // // debug visualization
-    // emissive = ramp(debug / 256.0);
-
-    // // visualize normals
-    // emissive = to_linear(hit.normal * 0.5 + 0.5);
-
-    // // visualize triangle IDs
-    // emissive = rand_color();
-
-    // // visualize albedo
-    // emissive = albedo * (dot(hit.normal, vec3f(0.0, 0.0, 1.0)) * 0.4 + 0.6);
-
-    *lighting += *throughput * emissive;
-    *throughput *= albedo;
-
-    seed = backup;
-}
 fn camera_ray(pixel: vec2u) -> Ray {
     var ray: Ray;
 
@@ -771,7 +741,7 @@ fn camera_ray(pixel: vec2u) -> Ray {
     // let m = rand();
     // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
     // pixel_pos += up             * sin(a) * pow(m, 150.0);
-    let aperture_radius = 0.25;
+    let aperture_radius = 0.15;
     ray.dir  = normalize(pixel_pos - ray.origin);
 
     let aperture = aperture_radius * rand_disk();
@@ -797,7 +767,81 @@ fn eval_lambert(to_light: vec3f, normal:  vec3f) -> f32 {
     return max(dot(to_light, normal), 0.0) / pi;
 }
 
+fn fresnel_schlick(normal: vec3f, view: vec3f, f0: vec3f) -> vec3f {
+    return f0 + (1.0 - f0) * pow(1.0 - dot(normal, view), 5.0);
+}
 
+fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
+    rand();
+
+    (*ray).origin += (*ray).dir * hit.t;
+    (*ray).origin += hit.normal * 0.001;
+
+    var emissive = vec3f(0);
+    var albedo   = vec3f(0);
+
+    // sample extra vertex data
+    var ext = tri_exts[hit.idx];
+    var sample = tri_ext_interpolate(&ext, hit.bary);
+
+    if length(sample.normal)  > 0.001 {
+        // sample.normal = normalize(sample.normal);
+        sample.normal = transform_normal(normalize(sample.normal), primitives[hit.prim_idx].inv_transform);
+    } else {
+        sample.normal = hit.normal;
+    }
+
+    
+    albedo = hit.material.albedo_factor.rgb;
+    if hit.material.albedo.size != 0 {
+        albedo *= to_linear(sample_texture(hit.material.albedo, sample.texcoords[hit.material.albedo_texcoord]).rgb);
+    }
+
+    emissive = hit.material.emissive_factor;
+    if hit.material.emissive.size != 0 {
+        emissive *= to_linear(sample_texture(hit.material.emissive, sample.texcoords[hit.material.emissive_texcoord]).rgb);
+    }
+
+
+    
+
+    var metallic_chance = hit.material.metallic_factor;
+    var roughness = hit.material.roughness_factor;
+    if hit.material.metallic_roughness.size != 0 {
+        let metallic_roughness = sample_texture(hit.material.metallic_roughness, sample.texcoords[hit.material.metal_r_texcoord]).gb;
+        metallic_chance = metallic_roughness.y;
+        roughness *= metallic_roughness.x;
+    }
+
+    let metal = rand() < metallic_chance;
+    var f0 = vec3f(0.04);
+    if metal {
+        f0 = albedo;
+    }
+
+    let fresnel = fresnel_schlick(hit.normal, -(*ray).dir, f0);
+    
+    var specular = rand() < fresnel.x;
+
+    *lighting += emissive * *throughput;
+    if !specular || metal {
+        *throughput *= albedo;
+    }
+
+    if specular || metal {
+        (*ray).dir = reflect((*ray).dir, sample.normal);
+        (*ray).dir = mix((*ray).dir, rand_hemisphere(sample.normal), roughness * roughness);
+        (*ray).idir = 1.0 / (*ray).dir;
+    } else {
+        sample_lambert(ray, hit);
+    }
+    
+
+}
+
+fn handle_miss(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
+    *lighting += *throughput * sky((*ray).dir);
+}
 @compute
 @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
@@ -808,37 +852,46 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
 
     // let samples = u32(screen[id.x + globals.res.x * id.y].a);
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
-
+    const SHADOW_PROB = 0.0;
     var ray = camera_ray(id.xy);
     for (var i = 0; i < 8; i++) {
         let hit = trace(ray);
         
-        shade(hit, ray.dir, &throughput, &lighting);
+        // shade(hit, ray.dir, &throughput, &lighting);
 
         if (hit.idx == -1) {
-            break;
-        }
-
-        ray.origin += ray.dir * hit.t + hit.normal * 0.0001;
-        const SHADOW_PROB = 0.5;
-        if rand() < SHADOW_PROB {
-            
-            // sun shadow ray
-            throughput /= SHADOW_PROB;
-
-            ray.dir = normalize(TO_SUN_DIR + rand_sphere() * 0.01);
-            ray.idir = vec3f(1.0) / ray.dir;
-            let lambert = eval_lambert(TO_SUN_DIR, hit.normal);
-            if lambert > 0.0 && !trace_shadow(ray) {
-                lighting += throughput * SUN_COL * 12.0 * lambert;
-            }
+            handle_miss(&ray, hit, &throughput, &lighting);
             break;
         } else {
-            // diffuse ray
-            throughput /= (1.0 - SHADOW_PROB);
-
-            sample_lambert(&ray, hit);
+            if rand() < SHADOW_PROB {
+                break;
+            } else {
+                handle_surface_hit_brdf(&ray, hit, &throughput, &lighting); 
+            }
         }
+
+        // ray.origin += ray.dir * hit.t + hit.normal * 0.0001;
+        // 
+        // if rand() < SHADOW_PROB {
+            
+        //     // sun shadow ray
+        //     throughput /= SHADOW_PROB;
+
+        //     ray.dir = normalize(TO_SUN_DIR + rand_sphere() * 0.01);
+        //     ray.idir = vec3f(1.0) / ray.dir;
+        //     let lambert = eval_lambert(TO_SUN_DIR, hit.normal);
+        //     if lambert > 0.0 && !trace_shadow(ray) {
+        //         lighting += throughput * SUN_COL * 12.0 * lambert;
+        //     }
+        //     break;
+        // } else {
+        //     // diffuse ray
+        //     throughput /= (1.0 - SHADOW_PROB);
+            
+
+
+        //     sample_lambert(&ray, hit);
+        // }
         
     }
 
