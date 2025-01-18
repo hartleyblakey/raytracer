@@ -501,13 +501,19 @@ impl<'a> Gpu<'a> {
             })
             .await
             .expect("Failed to find an appropriate adapter");
+        
+        let mut limits = wgpu::Limits::default();
+        limits = limits.using_resolution(adapter.limits());
+        
+        // request 1024 mb buffers
+        limits.max_buffer_size = 1024 * 1024 * 1024;
+        limits.max_storage_buffer_binding_size = 1024 * 1024 * 1024;
 
         let device_desc = wgpu::DeviceDescriptor {
             label: None,
             required_features: wgpu::Features::empty(),
             // Make sure we use the texture resolution limits from the adapter, so we can support images the size of the swapchain.
-            required_limits: wgpu::Limits::default()
-                .using_resolution(adapter.limits()),
+            required_limits: limits,
             memory_hints: wgpu::MemoryHints::MemoryUsage,
         };
 

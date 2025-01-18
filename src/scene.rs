@@ -98,13 +98,15 @@ impl GpuTextureRef {
     }
 }
 
+const GPU_TEXCOORD_COUNT: usize = 2;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuVertexExt {
-    tex0: Vec2,
-    normal: Vec2,
-    color: u32,
-    _pad: f32
+    texcoords:   [Vec2; GPU_TEXCOORD_COUNT],
+    normal: Vec2, // XY components of normalized vector
+    color:  u32,
+    _pad:   f32
 }
 
 
@@ -138,8 +140,28 @@ pub struct TriExt {
 
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]pub struct Material {
-    albedo: GpuTextureRef,
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Material {
+    albedo:             GpuTextureRef,
+    emissive:           GpuTextureRef,
+    normal:             GpuTextureRef,
+    metallic_roughness: GpuTextureRef,
+
+    albedo_factor:      Vec4,
+
+    emissive_factor:    Vec3,
+
+    normal_scale:       f32,
+
+    albedo_texcoord:    u32,
+    emissive_texcoord:  u32,
+    normal_texcoord:    u32,
+    metal_r_texcoord:   u32,
+
+    metallic_factor:    f32,
+    roughness_factor:   f32,
+    id:                 u32,
+    _pad:               u32,
 }
 
 #[repr(C)]
@@ -149,7 +171,7 @@ pub struct Primitive {
     inv_transform:  Mat4,
     material:       Material,
     bvh_idx:        u32,
-    _pad:           u32,
+    _pad:           [u32; 3],
 }
 
 impl Primitive {
@@ -159,7 +181,7 @@ impl Primitive {
             inv_transform: transform.as_dmat4().inverse().as_mat4(),
             material,
             bvh_idx,
-            _pad: 0,
+            _pad: [0; 3],
         }
     }
 }
@@ -227,12 +249,12 @@ impl Scene {
         r
     }
 
-    fn add_gltf_texture(&mut self, tex: &gltf::texture::Info, buffers: &Vec<gltf::buffer::Data>) -> GpuTextureRef {
-        println!("Found base_color_texture");
+    fn add_gltf_texture(&mut self, tex: &gltf::texture::Texture, buffers: &Vec<gltf::buffer::Data>) -> GpuTextureRef {
+        
         // if we have not already loaded the image
-        if !self.texture_map.contains_key(&tex.texture().index()) {
+        if !self.texture_map.contains_key(&tex.index()) {
             // load the image
-            let image = match tex.texture().source().source() {
+            let image = match tex.source().source() {
                 // image comes buffer view, load the raw bytes
                 gltf::image::Source::View { view, .. } => {
                     let start = view.offset();
@@ -263,11 +285,11 @@ impl Scene {
             println!("Found texture with offset {}, size {} by {}", tex_ref.offset, tex_ref.size().x, tex_ref.size().y);
 
             // record that we loaded the image
-            self.texture_map.insert(tex.texture().index(), tex_ref);
+            self.texture_map.insert(tex.index(), tex_ref);
             tex_ref
 
         } else {
-            *self.texture_map.get(&tex.texture().index()).unwrap()
+            *self.texture_map.get(&tex.index()).unwrap()
         }
     }
     
@@ -340,31 +362,85 @@ impl Scene {
                             .unwrap()
                             .map( |p| Self::from_gltf_vec3(Vec3::from_slice(&p)))
                             .collect();
+                        
 
-                        let mut try_load_texture = |opt_tex| {
-                            let mut tex_ref = GpuTextureRef::default();
-                            let mut texcoord_id = u32::MAX;
-                            if let Some(tex) = opt_tex {
-                                tex_ref = self.add_gltf_texture(&tex, buffers);
-                                texcoord_id = tex.tex_coord();
+                        let mut found_texcoords: HashMap<u32, Vec<Vec2>> = HashMap::new();
+
+                        let mut try_load_texcoords = |id| {
+                            if found_texcoords.contains_key(id) {
+                                return;
                             }
-                            
-                            //  base color texcoords
-                            let texcoords = reader.read_tex_coords(texcoord_id);
+
+                            let texcoords = reader.read_tex_coords(id.clone());
                             let texcoords: Vec<Vec2> = if texcoords.is_some() {
                                 texcoords.unwrap().into_f32().map(|uv| Vec2::from_slice(&uv)).collect()
                             } else {
                                 Vec::new()
                             };
-
-                            (tex_ref, texcoords)
+                            found_texcoords.insert(id.clone(), texcoords);
                         };
 
-                        let (albedo, albedo_tc) = try_load_texture(primitive.material().pbr_metallic_roughness().base_color_texture());
+                        // let mut try_load_texture = |opt_tex : Option<(gltf::texture::Texture, u32)>| {
+                        //     let mut tex_ref = GpuTextureRef::default();
+                        //     let mut texcoord_id = 0;
+                        //     if let Some(tex) = opt_tex {
+                        //         tex_ref = self.add_gltf_texture(&tex.0, buffers);
+                        //         texcoord_id = tex.1;
+                        //     }
+                            
+                        //     //  base color texcoords
+                        //     let texcoords = reader.read_tex_coords(texcoord_id);
+                        //     let texcoords: Vec<Vec2> = if texcoords.is_some() {
+                        //         texcoords.unwrap().into_f32().map(|uv| Vec2::from_slice(&uv)).collect()
+                        //     } else {
+                        //         Vec::new()
+                        //     };
 
-                        let material = Material {
-                            albedo
-                        };
+                        //     (tex_ref, texcoords, texcoord_id)
+                        // };
+
+                        
+
+                        let mut material = Material::default();
+
+                        material.albedo_factor = primitive.material().pbr_metallic_roughness().base_color_factor().into();
+                        if let Some(albedo_tex) = primitive.material().pbr_metallic_roughness().base_color_texture() {
+                            println!("Found base_color_texture");
+                            material.albedo = self.add_gltf_texture(&albedo_tex.texture(), buffers);
+                            material.albedo_texcoord = albedo_tex.tex_coord();
+
+                            try_load_texcoords(&material.albedo_texcoord);
+                        }
+                        
+                        material.metallic_factor = primitive.material().pbr_metallic_roughness().metallic_factor();
+                        material.roughness_factor = primitive.material().pbr_metallic_roughness().roughness_factor();
+                        if let Some(metal_r_tex) = primitive.material().pbr_metallic_roughness().metallic_roughness_texture() {
+                            println!("Found metallic_roughness_texture");
+                            material.metallic_roughness = self.add_gltf_texture(&metal_r_tex.texture(), buffers);
+                            material.metal_r_texcoord = metal_r_tex.tex_coord();
+
+                            try_load_texcoords(&material.metal_r_texcoord);
+                        }
+
+                        // combine factor and strength into one float, which is how its used anyway
+                        material.emissive_factor = primitive.material().emissive_factor().into();
+                        material.emissive_factor *= primitive.material().emissive_strength().unwrap_or(1.0);
+                        if let Some(emissive_tex) = primitive.material().emissive_texture() {
+                            println!("Found emissive_texture with factor {}, {}, {}", material.emissive_factor.x, material.emissive_factor.y, material.emissive_factor.z);
+                            material.emissive = self.add_gltf_texture(&emissive_tex.texture(), buffers);
+                            material.emissive_texcoord = emissive_tex.tex_coord();
+                            
+                            try_load_texcoords(&material.emissive_texcoord);
+                        }
+                        
+                        material.normal_scale = primitive.material().normal_texture().map(|t| t.scale()).unwrap_or(1.0);
+                        if let Some(normal_tex) = primitive.material().normal_texture() {
+                            println!("Found normal_texture");
+                            material.normal = self.add_gltf_texture(&normal_tex.texture(), buffers);
+                            material.normal_texcoord = normal_tex.tex_coord();
+
+                            try_load_texcoords(&material.normal_texcoord);
+                        }
 
                         // collect vertex attributes into vectors so we can index them
                         //  vertex colors
@@ -379,22 +455,24 @@ impl Scene {
                         if let Some(indices) = reader.read_indices() {
                             // indexed mesh
                             let mut indices = indices.into_u32();
-                            while let (Some(a), Some(b), Some(c)) = (indices.next(), indices.next(), indices.next()) {
+                            while let (Some(idx_0), Some(idx_1), Some(idx_2)) = (indices.next(), indices.next(), indices.next()) {
                                 let mut ext = TriExt::default();
 
                                 if !colors.is_empty() {
-                                    ext.vertices[0].color = colors[a as usize];
-                                    ext.vertices[1].color = colors[b as usize];
-                                    ext.vertices[2].color = colors[c as usize];
+                                    ext.vertices[0].color = colors[idx_0 as usize];
+                                    ext.vertices[1].color = colors[idx_1 as usize];
+                                    ext.vertices[2].color = colors[idx_2 as usize];
                                 }
 
-                                if !albedo_tc.is_empty() {
-                                    ext.vertices[0].tex0 = albedo_tc[a as usize];
-                                    ext.vertices[1].tex0 = albedo_tc[b as usize];
-                                    ext.vertices[2].tex0 = albedo_tc[c as usize];
+                                for i in 0..GPU_TEXCOORD_COUNT {
+                                    if let Some(tc) = found_texcoords.get(&(i as u32)) {
+                                        ext.vertices[0].texcoords[i] = tc[idx_0 as usize];
+                                        ext.vertices[1].texcoords[i] = tc[idx_1 as usize];
+                                        ext.vertices[2].texcoords[i] = tc[idx_2 as usize];
+                                    }
                                 }
 
-                                self.tris.push(Tri::new(positions[a as usize], positions[b as usize], positions[c as usize]));
+                                self.tris.push(Tri::new(positions[idx_0 as usize], positions[idx_1 as usize], positions[idx_2 as usize]));
                                 self.tri_exts.push(ext);
                             }
                         }

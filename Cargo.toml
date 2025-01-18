@@ -11,7 +11,7 @@ env_logger = "0.11"
 bytemuck = {version = "1.19.0", features = [ "derive" ] }
 glam = {version = "0.29.2", features = [ "bytemuck" ] } # cg math
 rand = "0.8.5" 
-gltf = {version = "1.4.1", features = ["KHR_lights_punctual"]}
+gltf = {version = "1.4.1", features = ["KHR_lights_punctual", "KHR_materials_emissive_strength"]}
 image = "0.25.5"
 
 # web

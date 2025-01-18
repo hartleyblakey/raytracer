@@ -197,7 +197,7 @@ impl Context {
         let triangles_ssbo =        gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
         let bvh_ssbo =              gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
         let triangles_ext_ssbo =    gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
-        let texture_data_ssbo =     gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
+        let texture_data_ssbo =     gpu.new_storage_buffer(1024 * 1024 * 1024);
         let primitive_data_ssbo =   gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
@@ -399,9 +399,9 @@ async fn build_scene() -> Scene {
 
     // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/turtle.glb"));
 
-     scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
+     // scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
      // scene.add_gltf(&Mat4::IDENTITY, "resources/large/ship.glb").await;
-
+    scene.add_gltf(&Mat4::IDENTITY, "resources/simple.glb").await;
      // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
 
     // scene.add_gltf(&Mat4::IDENTITY, "resources/large/Sponza.glb").await;
@@ -417,6 +417,7 @@ async fn build_scene() -> Scene {
     
     println!("Tri count: {}", scene.tris.len());
     println!("Tri size : {} mb", (scene.tris.len() * size_of::<Tri>()) / (1000 * 1000));
+    println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
     scene
 }
 

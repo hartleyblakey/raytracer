@@ -14,13 +14,17 @@ const FORWARD = vec3f(1.0, 0.0, 0.0);
 const UP = vec3f(0.0, 0.0, 1.0);
 const RIGHT = vec3f(0.0, -1.0, 0.0);
 
+const NUM_TEXCOORDS = 2;
+
 // const SUN_DIR = vec3f(0.707106781187, 0.0 , 0.707106781187);
 const TO_SUN_VAL = vec3f(0.5, 0.4, 1.49);
 
 const TO_SUN_DIR = TO_SUN_VAL / sqrt(TO_SUN_VAL.x * TO_SUN_VAL.x + TO_SUN_VAL.y * TO_SUN_VAL.y + TO_SUN_VAL.z * TO_SUN_VAL.z);
 
-const SUN_COL = vec3f(1.0, 0.5, 0.3) * 2.0;
+const SUN_COL = vec3f(1.0, 0.5, 0.3) * 0.0;
 const EXPOSURE = 1.0 / 2.15;
+
+
 struct Camera {
     dir:        vec3f,
     fovy:       f32,
@@ -48,11 +52,49 @@ struct GpuTextureRef {
 }
 
 struct Material {
-    albedo: GpuTextureRef,
+    albedo:             GpuTextureRef,
+    emissive:           GpuTextureRef,
+    normal:             GpuTextureRef,
+    metallic_roughness: GpuTextureRef,
+
+    albedo_factor:      vec4f,
+
+    emissive_factor:    vec3f,
+
+    normal_scale:       f32,
+
+    albedo_texcoord:    u32,
+    emissive_texcoord:  u32,
+    normal_texcoord:    u32,
+    metal_r_texcoord:   u32,
+
+    metallic_factor:    f32,
+    roughness_factor:   f32,
+    id:                 u32,
+    _pad:               u32,
 }
 
 const DEFAULT_MATERIAL = Material (
     GpuTextureRef (0, 0), // albedo
+    GpuTextureRef (0, 0), // emissive
+    GpuTextureRef (0, 0), // normal
+    GpuTextureRef (0, 0), // metallic_roughness
+
+    vec4f(1.0, 1.0, 1.0, 1.0), // albedo factor
+
+    vec3f(0.0, 0.0, 0.0),   // emissive factor
+
+    1.0,    // normal_scale
+
+    0, // albedo_texcoord
+    0, // emissive_texcoord
+    0, // normal_texcoord
+    0, // metal_r_texcoord
+
+    0.0, // metallic_factor
+    0.0, // roughness_factor
+    0, // id
+    0, // padding
 );
 
 struct Primitive {
@@ -112,13 +154,13 @@ fn sample_texture(tex: GpuTextureRef, tc: vec2f) -> vec4f {
     // return vec4f(col.r, col.g, col.b, 1.0);
 
     let size = tc_size(tex);
-    let texel_pos = vec2u(tc * vec2f(size));
+    let texel_pos = vec2u(fract(tc) * vec2f(size));
     let texel = texture_data[tex.offset + texel_pos.y * size.x + texel_pos.x];
-    return pow(unpack_rgba8(texel), vec4f(2.2));
+    return unpack_rgba8(texel);
 }
 
 struct GpuVertexExt {
-    tex0: vec2f,
+    texcoords: array<vec2f, NUM_TEXCOORDS>,
     normal: vec2f,
     color: u32,
     _pad: f32
@@ -126,7 +168,7 @@ struct GpuVertexExt {
 
 struct ExtSample {
     color: vec4f,
-    uv0: vec2f,
+    texcoords: array<vec2f, NUM_TEXCOORDS>,
     normal: vec3f,
 }
 
@@ -139,8 +181,22 @@ fn unpack_rgba8(x: u32) -> vec4f {
     );
 }
 
+fn reconstruct_unit_vector(x: vec2f) -> vec3f {
+    return vec3f(x.x, x.y, sqrt(1.0 - (x.x * x.x + x.y * x.y)));
+}
+
 struct TriExt {
     vertices: array<GpuVertexExt, 3>
+}
+
+fn zeroed_ext_sample() -> ExtSample {
+    var s: ExtSample;
+    s.color = vec4f(0.0, 0.0, 0.0, 0.0);
+    s.normal = vec3f(0.0, 0.0, 0.0);
+    for (var i = 0; i < NUM_TEXCOORDS; i++) {
+        s.texcoords[i] = vec2f(0.0, 0.0);
+    }
+    return s;
 }
 
 // red checkerboard for missing textures
@@ -159,18 +215,25 @@ fn dummy_texture(uv: vec2f) -> vec4f {
 
 // barycentric interpolation of vertex attributes
 fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
-    var res = ExtSample(vec4f(0.0, 0.0, 0.0, 0.0), vec2f(0.0, 0.0), vec3f(0.0, 0.0, 0.0));
+    var res = zeroed_ext_sample();
+
+    // cant loop: cannot index into value of type `vec3<f32>`
 
     res.color += bary.x * unpack_rgba8((*tri).vertices[0].color);
-    res.uv0 += bary.x * (*tri).vertices[0].tex0;
+    res.texcoords[0] += bary.x * (*tri).vertices[0].texcoords[0];
+    res.texcoords[1] += bary.x * (*tri).vertices[0].texcoords[1];
+    res.normal += bary.x * reconstruct_unit_vector((*tri).vertices[0].normal);
 
     res.color += bary.y * unpack_rgba8((*tri).vertices[1].color);
-     res.uv0 += bary.y * (*tri).vertices[1].tex0;
+    res.texcoords[0] += bary.y * (*tri).vertices[1].texcoords[0];
+    res.texcoords[1] += bary.y * (*tri).vertices[1].texcoords[1];
+    res.normal += bary.y * reconstruct_unit_vector((*tri).vertices[1].normal);
 
     res.color += bary.z * unpack_rgba8((*tri).vertices[2].color);
-    res.uv0 += bary.z * (*tri).vertices[2].tex0;
+    res.texcoords[0] += bary.z * (*tri).vertices[2].texcoords[0];
+    res.texcoords[1] += bary.z * (*tri).vertices[2].texcoords[1];
+    res.normal += bary.z * reconstruct_unit_vector((*tri).vertices[2].normal);
 
-    res.uv0 = fract( res.uv0);
    //  res.tex0 = vec4f(tc0, 0.0, 1.0);
     return res;
 }
@@ -586,51 +649,12 @@ fn sample_env_map(dir: vec3f) -> vec4f {
 
 fn sky(dir: vec3f) -> vec3f {
     let horizon = vec3f(1.0 - SUN_COL);
-    return sample_env_map(dir).rgb;
+    return sample_env_map(dir).rgb * 0.2;
     // return mix(horizon, SUN_COL,pow(max(dot(dir, TO_SUN_DIR), 0.0), 3.0)) * 1.00;
     // return to_linear(dir * 0.5 + 0.5);
     // return vec3f(1.0);
 }
 
-fn camera_ray(pixel: vec2u) -> Ray {
-    var ray: Ray;
-
-    ray.origin  = globals.scene.camera.origin;
-    let forward = globals.scene.camera.dir;
-    let fov_factor = (sin(globals.scene.camera.fovy / 2.0) / cos(globals.scene.camera.fovy / 2.0)) * 2.0;
-
-    let unreachable = vec3(0.0, 0.0, 1.0);
-    let right = normalize(cross(forward, unreachable));
-    let up    = normalize(cross(right,   forward));
-    var pixel_pos = ray.origin + forward;
-
-
-    let aa_pixel = vec2f(pixel) + vec2f(rand(), rand());
-    let aspect = f32(globals.res.x) / f32(globals.res.y);
-
-    pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor * aspect;
-    pixel_pos += up    * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
-    
-    // // "bloom"
-    // let a = rand() * pi * 2.0;
-    // let m = rand();
-    // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
-    // pixel_pos += up             * sin(a) * pow(m, 150.0);
-    let aperture_radius = 0.25;
-    ray.dir  = normalize(pixel_pos - ray.origin);
-
-    let aperture = aperture_radius * rand_disk();
-
-    ray.origin += right * aperture.x;
-    ray.origin += up * aperture.y;
-
-    pixel_pos +=  ray.dir * (globals.scene.camera.focus - 1.0);
-    ray.dir  = normalize(pixel_pos - ray.origin);
-    
-    ray.idir = 1.0 / ray.dir;
-
-    return ray;
-}
 
 // from https://www.shadertoy.com/view/XtGGzG
 fn plasma_quintic( _x: f32 ) -> vec3f {
@@ -675,7 +699,6 @@ fn shade(hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<f
     let backup = seed;
     seed = u32(hit.idx * 7);
     rand();
-
     var emissive = vec3f(0);
     var albedo   = vec3f(0.7);
 
@@ -686,10 +709,17 @@ fn shade(hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<f
         // sample extra vertex data
         var ext = tri_exts[hit.idx];
         let sample = tri_ext_interpolate(&ext, hit.bary);
-        var tc0 = ext.vertices[0].tex0;
-        tc0 = sample.uv0;
-        albedo = sample_texture(hit.material.albedo, tc0).rgb;
 
+        albedo = hit.material.albedo_factor.rgb;
+        if hit.material.albedo.size != 0 {
+            albedo *= to_linear(sample_texture(hit.material.albedo, sample.texcoords[hit.material.albedo_texcoord]).rgb);
+        }
+
+        emissive = hit.material.emissive_factor;
+        if hit.material.emissive.size != 0 {
+            emissive *= to_linear(sample_texture(hit.material.emissive, sample.texcoords[hit.material.emissive_texcoord]).rgb);
+        }
+        
         // // show triangle outlines
         // if (min(hit.bary.x, min(hit.bary.y, hit.bary.z)) < 0.02) {
         //     albedo = vec3f(0.1);
@@ -717,6 +747,45 @@ fn shade(hit: Hit, dir: vec3f, throughput: ptr<function, vec3f>, lighting: ptr<f
 
     seed = backup;
 }
+fn camera_ray(pixel: vec2u) -> Ray {
+    var ray: Ray;
+
+    ray.origin  = globals.scene.camera.origin;
+    let forward = globals.scene.camera.dir;
+    let fov_factor = (sin(globals.scene.camera.fovy / 2.0) / cos(globals.scene.camera.fovy / 2.0)) * 2.0;
+
+    let unreachable = vec3(0.0, 0.0, 1.0);
+    let right = normalize(cross(forward, unreachable));
+    let up    = normalize(cross(right,   forward));
+    var pixel_pos = ray.origin + forward;
+
+
+    let aa_pixel = vec2f(pixel) + vec2f(rand(), rand());
+    let aspect = f32(globals.res.x) / f32(globals.res.y);
+
+    pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor * aspect;
+    pixel_pos += up    * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
+    
+    // // "bloom"
+    // let a = rand() * pi * 2.0;
+    // let m = rand();
+    // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
+    // pixel_pos += up             * sin(a) * pow(m, 150.0);
+    let aperture_radius = 0.25;
+    ray.dir  = normalize(pixel_pos - ray.origin);
+
+    let aperture = aperture_radius * rand_disk();
+
+    ray.origin += right * aperture.x;
+    ray.origin += up * aperture.y;
+
+    pixel_pos +=  ray.dir * (globals.scene.camera.focus - 1.0);
+    ray.dir  = normalize(pixel_pos - ray.origin);
+    
+    ray.idir = 1.0 / ray.dir;
+
+    return ray;
+}
 
 fn sample_lambert(ray: ptr<function, Ray>, hit: Hit) {
     // from raytracing in one weekend
@@ -727,6 +796,7 @@ fn sample_lambert(ray: ptr<function, Ray>, hit: Hit) {
 fn eval_lambert(to_light: vec3f, normal:  vec3f) -> f32 {
     return max(dot(to_light, normal), 0.0) / pi;
 }
+
 
 @compute
 @workgroup_size(8, 8)
@@ -796,7 +866,33 @@ fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 }
 
 fn tonemap(in: vec3f) -> vec3f {
+    // return in;
     return vec3f(pow(1.0 - pow(vec3f(0.25), in), vec3f(1.1)));
+}
+
+fn tonemap_pbr_neutral(color_in: vec3f) -> vec3f {
+    var color = color_in;
+    let startCompression = 0.8 - 0.04;
+    let desaturation = 0.15;
+
+    let x = min(color.r, min(color.g, color.b));
+    var offset = 0.04;
+    if x < 0.08 {
+        offset = x - 6.25 * x * x;
+    }
+    color -= offset;
+
+    let peak = max(color.r, max(color.g, color.b));
+    if peak < startCompression {
+        return color;
+    }
+
+    let d = 1. - startCompression;
+    let newPeak = 1. - d * d / (peak + d - startCompression);
+    color *= newPeak / peak;
+
+    let g = 1. - 1. / (desaturation * (peak - newPeak) + 1.);
+    return mix(color, newPeak * vec3f(1, 1, 1), g);
 }
 
 @fragment
@@ -808,8 +904,13 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     
     let scr = screen[id.x + globals.res.x * id.y];
 
+    let uv = p.xy / vec2f(f32(globals.res.x), f32(globals.res.y));
+
     // divide total by number of samples
     var col = scr.rgb / scr.a;
-    col = tonemap(col * EXPOSURE);
+    col = tonemap_pbr_neutral(col * EXPOSURE);
+    
+    // col = to_linear(sample_texture(primitives[1].material.albedo, uv).rgb);
+    // col = pow(col, vec3f(1.0 / 2.2));
     return vec4f(col, 1.0);
 }
