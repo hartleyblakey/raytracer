@@ -4,7 +4,9 @@
 
 ### Features
 
-- Loads simple static GLTF files into vectors of triangle positions, cameras, texcoords, and textures converted to rgba8
+- Uses the gltf crate to load simple static GLTF files into vectors of triangle positions, cameras, texcoords, and textures converted to rgba8
+
+  - Only supports indexed triangles
 
   - Not well tested but worked on sponza and the tiny blender exports I tried
 
@@ -12,9 +14,13 @@
 
 - Builds a simple BVH around the triangle positions and extra data, based on the first 2.5 articles of "Build A BVH" by Jacco Bikker
 
-- Raytraces the bvh in a compute shader with basic shading, and a hardcoded sun light + HDRI environment
+- Raytraces the bvh in a compute shader
+  - Basic pathtracing, and a hardcoded sun light + HDRI environment
+  - Khronos PBR Neutral Tone Mapper
   - A small fixed number of directional and point lights are read from the file and passed to the shader but are not used
   - Depth of field with hardcoded aperture size
+  - No texture samplers, all textures are nearest filtered
+  - Two UV sets supported per GLTF primitive
 
 - Simple flycam
   - WASD movement, scroll wheel zoom, LMB focus

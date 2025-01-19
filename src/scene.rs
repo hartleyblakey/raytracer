@@ -453,8 +453,6 @@ impl Scene {
                         //     (tex_ref, texcoords, texcoord_id)
                         // };
 
-                        
-
                         let mut material = Material::default();
 
                         material.albedo_factor = primitive.material().pbr_metallic_roughness().base_color_factor().into();

@@ -401,7 +401,9 @@ async fn build_scene() -> Scene {
 
      // scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
       // scene.add_gltf(&Mat4::IDENTITY, "resources/large/ship.glb").await;
-    scene.add_gltf(&Mat4::IDENTITY, "resources/DamagedHelmet.glb").await;
+
+      scene.add_gltf(&Mat4::IDENTITY, "resources/simple.glb").await;
+    // scene.add_gltf(&Mat4::IDENTITY, "resources/DamagedHelmet.glb").await;
     
      // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
 

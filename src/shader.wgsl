@@ -741,7 +741,7 @@ fn camera_ray(pixel: vec2u) -> Ray {
     // let m = rand();
     // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
     // pixel_pos += up             * sin(a) * pow(m, 150.0);
-    let aperture_radius = 0.15;
+    let aperture_radius = 0.25;
     ray.dir  = normalize(pixel_pos - ray.origin);
 
     let aperture = aperture_radius * rand_disk();
@@ -757,9 +757,9 @@ fn camera_ray(pixel: vec2u) -> Ray {
     return ray;
 }
 
-fn sample_lambert(ray: ptr<function, Ray>, hit: Hit) {
+fn sample_lambert(ray: ptr<function, Ray>, normal: vec3f) {
     // from raytracing in one weekend
-    (*ray).dir = normalize(hit.normal + rand_sphere());
+    (*ray).dir = normalize(normal + rand_sphere());
     (*ray).idir = vec3f(1.0) / (*ray).dir;
 }
 
@@ -819,7 +819,7 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
         f0 = albedo;
     }
 
-    let fresnel = fresnel_schlick(hit.normal, -(*ray).dir, f0);
+    let fresnel = fresnel_schlick(sample.normal, -(*ray).dir, f0);
     
     var specular = rand() < fresnel.x;
 
@@ -833,7 +833,7 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
         (*ray).dir = mix((*ray).dir, rand_hemisphere(sample.normal), roughness * roughness);
         (*ray).idir = 1.0 / (*ray).dir;
     } else {
-        sample_lambert(ray, hit);
+        sample_lambert(ray, sample.normal);
     }
     
 
