@@ -656,257 +656,58 @@ impl Scene {
         }
         closest_t
     }
+
+    /// Raycast the scene from the camera's center to update its focal length
+    /// 
+    /// # Examples
+    /// ```
+    /// if scene.focus_camera(0) {
+    ///     // raycast hit - focal length updated
+    /// } else {
+    ///     // raycast missed - focal length unchanged
+    /// }
+    /// ```
+    pub fn focus_camera(&mut self, camera_id: usize) -> bool {
+        if let Some(focus) = self.closest_hit(self.cameras[camera_id].position(), self.cameras[camera_id].forward()) {
+            self.cameras[camera_id].focus(focus);
+            true
+        } else {
+            false
+        }
+    }
+
+
+    pub async fn from_path(mesh_path: &str, env_map_path: &str) -> Option<Scene> {
+        if let Some(mesh_bytes) = fetch_bytes(mesh_path).await {
+            Self::from_bytes(&mesh_bytes, env_map_path).await
+        } else {
+            None
+        }
+        
+    }
+    
+    pub async fn from_bytes(mesh_bytes: &[u8], env_map_path: &str) -> Option<Scene> {
+        println!("building scene");
+        let mut scene = Scene::default();
+        let mut ms = MatrixStack::new();
+    
+        scene.add_gltf_bytes(&Mat4::IDENTITY, mesh_bytes);
+    
+        scene.set_equirectangular_env_map(env_map_path).await;
+    
+        if scene.cameras.is_empty() {
+            println!("No camera in scene, falling back to default");
+            // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
+            scene.cameras.push(Camera::default());
+        }
+        
+        println!("Tri count: {}", scene.tris.len());
+        println!("Tri size : {} mb", (scene.tris.len() * size_of::<Tri>()) / (1000 * 1000));
+        println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
+        Some(scene)
+    }
     
 }
-
-// #[derive(Default)]
-// pub struct FlatScene {
-//     pub triangles: Vec<Tri>,
-//     pub triangles_ext: Vec<TriExt>,
-//     pub texture_data: Vec<u32>,
-//     pub texture_map: HashMap<usize, (usize, UVec2)>,
-//     pub cameras:   Vec<Camera>,
-//     pub point_lights: Vec<PointLight>,
-//     pub directional_lights: Vec<DirectionalLight>,
-//     pub env_map_data: Vec<[f32; 4]>,
-// }
-
-// impl FlatScene {
-//     pub fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) {
-//         let (document, buffers, _) = gltf::import_slice(bytes).unwrap();
-//         let mut ms = MatrixStack::new();
-//         ms.push();
-//         ms.apply(&transform);
-//         for scene in document.scenes(){
-//             for node in scene.nodes() {
-//                 self.add_gltf_node(&buffers, node, &mut ms);
-//             }
-//         }
-//     }   
-
-//     pub fn from_gltf_vec3(v: Vec3) -> Vec3 {
-//         vec3(v.z, v.x, v.y)
-//     }
-
-//     pub async fn add_gltf(&mut self, transform: &Mat4, path: &str) {
-//         self.add_gltf_bytes(transform, fetch_bytes(path).await.as_slice());
-//     }
-
-//     pub async fn set_equirectangular_env_map(&mut self, path: &str) {
-//         let buffer = fetch_bytes(path).await;
-//         let image = image::load_from_memory(buffer.as_slice()).expect(format!("Expected file at path {path}").as_str());
-//         let image = image.into_rgba32f();
-//         self.env_map_data.clear();
-//         for pixel in image.pixels() {
-//             self.env_map_data.push(pixel.0);
-//         }
-//     }
-
-
-//     fn rgba8_to_u32(x: &[u8; 4]) -> u32 {
-//         let mut r: u32 = 0;
-//         r |= (x[0] as u32) << 24;
-//         r |= (x[1] as u32) << 16;
-//         r |= (x[2] as u32) << 8 ;
-//         r |= (x[3] as u32) << 0 ;
-//         r
-//     }
-
-    
-
-//     fn add_gltf_node(&mut self, buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack) {
-//         ms.push();
-//         ms.apply(&Mat4::from_cols_array_2d(&node.transform().matrix()));
-//         let my_top = from_gltf_mat4(ms.top());
-//         if let Some(camera) = node.camera() {
-//             self.cameras.push(Camera::from_gltf(camera, ms.top()));
-//         }
-
-//         if let Some(light) = node.light() {
-//             match light.kind() {
-//                 gltf::khr_lights_punctual::Kind::Directional => {
-//                     let dir = my_top.transform_vector3(FORWARD);
-//                     let d = DirectionalLight { 
-//                         direction: vec4(dir.x, dir.y, dir.z, 0.0), 
-//                         intensity: light.intensity() * vec4(light.color()[0], light.color()[1], light.color()[2], 0.0)
-//                     };
-//                     self.directional_lights.push(d);
-//                 },
-//                 gltf::khr_lights_punctual::Kind::Point => {
-//                     let pos = my_top.transform_point3(vec3(0.0, 0.0, 0.0));
-//                     let p = PointLight {
-//                         position: vec4(pos.x, pos.y, pos.z, 0.0),
-//                         intensity: light.intensity() * vec4(light.color()[0], light.color()[1], light.color()[2], 0.0)
-//                     };
-//                     self.point_lights.push(p);
-//                 },
-//                 gltf::khr_lights_punctual::Kind::Spot { .. } => (),
-//             }
-//         }
-        
-//         if let Some(mesh) = node.mesh() {
-//             for primitive in mesh.primitives() {
-//                 if primitive.mode() == gltf::mesh::Mode::Triangles {
-
-//                     // tell the reader where to find the buffer data
-//                     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-                    
-//                     // collect transformed vertex positions into a vec of vec3s so we can index them
-//                     let positions: Vec<Vec3> = reader.read_positions().unwrap()
-//                     .map( |p| 
-//                         Self::from_gltf_vec3(ms.top().transform_point3(Vec3::from_slice(&p)))
-//                     ).collect();
-
-//                     let mut base_color_texture_id = 0;
-//                     let mut base_color_texture_offset = 0;
-//                     let mut base_color_texture_size = uvec2(0, 0);
-
-//                     if let Some(tex) = primitive.material().pbr_metallic_roughness().base_color_texture() {
-//                         base_color_texture_id = tex.tex_coord();
-//                         println!("Found base_color_texture");
-//                         // if we have not already loaded the image
-//                         if !self.texture_map.contains_key(&tex.texture().index()) {
-//                             // load the image
-//                             let image = match tex.texture().source().source() {
-//                                 // image comes buffer view, load the raw bytes
-//                                 gltf::image::Source::View { view, .. } => {
-//                                     let start = view.offset();
-//                                     let end = start + view.length();
-//                                     let image_data = &buffers[view.buffer().index()][start..end];
-//                                     match image::load_from_memory(image_data) {
-//                                         Ok(image) => image,
-//                                         Err(e) => {println!("{e}"); panic!()},
-//                                     }
-                                    
-//                                 },
-//                                 // untested
-//                                 gltf::image::Source::Uri { uri, .. } => {
-//                                     image::ImageReader::open(uri).unwrap().decode().unwrap()
-//                                 },
-//                             };
-
-//                             let rgba8_image = image.to_rgba8();
-
-//                             base_color_texture_offset = self.texture_data.len();
-//                             base_color_texture_size = uvec2(image.dimensions().0, image.dimensions().1);
-//                             for pixel in rgba8_image.pixels() {
-//                                 self.texture_data.push(Self::rgba8_to_u32(&pixel.0))
-//                             }
-//                             println!("Found texture with offset {base_color_texture_offset}, size {} by {}", base_color_texture_size.x, base_color_texture_size.y);
-
-//                             // record that we loaded the image
-//                             self.texture_map.insert(tex.texture().index(), (base_color_texture_offset, base_color_texture_size));
-                        
-
-//                         } else {
-//                             // retrieve the image location from the cache
-//                             (base_color_texture_offset, base_color_texture_size) = self.texture_map[&tex.texture().index()];
-//                         }
-                    
-//                     }
-                    
-                    
-//                     // collect vertex attributes into vectors so we can index them
-//                     //  vertex colors
-//                     let colors = reader.read_colors(0);
-//                     let colors: Vec<u32> = if colors.is_some() {
-//                         colors.unwrap().into_rgba_u8().map(|c| Self::rgba8_to_u32(&c)).collect()
-//                     } else {
-//                         Vec::new()
-//                     };
-//                     //  base color texcoords
-//                     let texcoords = reader.read_tex_coords(base_color_texture_id);
-//                     let texcoords: Vec<Vec2> = if texcoords.is_some() {
-//                         texcoords.unwrap().into_f32().map(|uv| Vec2::from_slice(&uv)).collect()
-//                     } else {
-//                         Vec::new()
-//                     };
-
-//                     if let Some(indices) = reader.read_indices() {
-//                         // indexed mesh
-//                         let mut indices = indices.into_u32();
-//                         while let (Some(a), Some(b), Some(c)) = (indices.next(), indices.next(), indices.next()) {
-//                             let mut ext = TriExt::default();
-
-//                             if !colors.is_empty() {
-//                                 ext.vertices[0].color = colors[a as usize];
-//                                 ext.vertices[1].color = colors[b as usize];
-//                                 ext.vertices[2].color = colors[c as usize];
-//                             }
-
-//                             if !texcoords.is_empty() {
-//                                 ext.vertices[0].tex0 = GpuTextureRef::new(base_color_texture_offset as u32, base_color_texture_size, texcoords[a as usize]);
-//                                 ext.vertices[1].tex0 = GpuTextureRef::new(base_color_texture_offset as u32, base_color_texture_size, texcoords[b as usize]);
-//                                 ext.vertices[2].tex0 = GpuTextureRef::new(base_color_texture_offset as u32, base_color_texture_size, texcoords[c as usize]);
-//                             }
-
-//                             self.triangles.push(Tri::new(positions[a as usize], positions[b as usize], positions[c as usize]));
-//                             self.triangles_ext.push(ext);
-//                         }
-//                     }
-//                     else {
-//                         // non-indexed mesh (untested)
-//                         let mut i = 0;
-//                         for p in positions.chunks(3) {
-                        
-//                             let mut ext = TriExt::default();
-
-//                             if !colors.is_empty() {
-//                                 let c  = &colors[i..(i+3)];
-//                                 ext.vertices[0].color = c[0];
-//                                 ext.vertices[1].color = c[1];
-//                                 ext.vertices[2].color = c[2];
-//                             }
-
-//                             if !texcoords.is_empty() {
-//                                 let tc = &texcoords[i..(i+3)];
-//                                 ext.vertices[0].tex0 = GpuTextureRef::new(base_color_texture_offset as u32, base_color_texture_size, tc[i + 0]);
-//                                 ext.vertices[1].tex0 = GpuTextureRef::new(base_color_texture_offset as u32, base_color_texture_size, tc[i + 1]);
-//                                 ext.vertices[2].tex0 = GpuTextureRef::new(base_color_texture_offset as u32, base_color_texture_size, tc[i + 2]);
-//                             }
-
-//                             self.triangles.push(Tri::new(p[0], p[1], p[2]));
-//                             self.triangles_ext.push(ext);
-//                             i += 3;
-//                         }
-//                     }
-//                 } else {
-//                     panic!("Non-triangle primitives not supported");
-//                 }
-//             }
-//         }
-
-//         for child in node.children() {
-//             self.add_gltf_node(buffers, child, ms);
-//         }
-
-//         ms.pop();
-//     }
-
-//     pub fn to_gpu(&self) -> GpuSceneUniform {
-//         let mut point_lights = [PointLight::default(); 12];
-//         let mut directional_lights = [DirectionalLight::default(); 4];
-
-//         for i in 0..self.point_lights.len().min(point_lights.len()) {
-//             point_lights[i] = self.point_lights[i];
-//         }
-
-//         for i in 0..self.directional_lights.len().min(directional_lights.len()) {
-//             directional_lights[i] = self.directional_lights[i];
-//         }
-
-//         GpuSceneUniform {
-//             _pad: 0,
-//             camera: self.cameras[0].to_gpu(),
-//             point_lights,
-//             directional_lights,
-//             num_directional_lights: self.directional_lights.len() as u32,
-//             num_point_lights: self.point_lights.len() as u32,
-//             tri_count: self.triangles.len() as u32,
-//         }
-//     }
-// }
-
 
 
 #[repr(C)]

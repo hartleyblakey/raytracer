@@ -175,7 +175,7 @@ impl Context {
     }
 
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
-        let scene = build_scene("resources/simple.glb", "resources/trail.hdr").await.unwrap();
+        let scene = Scene::from_path("resources/simple.glb", "resources/trail.hdr").await.unwrap();
 
         println!("Bvh size : {} mb", (scene.bvh_node_data.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
@@ -302,36 +302,21 @@ impl Context {
     }
 
     async fn try_change_scene(&mut self, mesh_path: &str, env_map_path: &str) {
-        println!("Attempting to change scene to {mesh_path}");
-        if let Some(scene) = build_scene(mesh_path, env_map_path).await {
-            self.scene = scene;
-            self.frame_uniforms.scene = self.scene.to_gpu();
-            self.frame_uniforms.reject_hist = 1;
-            self.frame_uniforms.node_count = self.scene.bvh_node_data.len() as u32;
-            self.frame_uniforms.prim_count = self.scene.primitives.len() as u32;
-
-            if let Some(focus) = self.scene.closest_hit(self.scene.cameras[0].position(), self.scene.cameras[0].forward()) {
-                self.scene.cameras[0].focus(focus);
-            };
-
-            self.should_reupload = true;
-        } else {
-            println!("Scene change failed!");
+        if let Some(mesh_bytes) = fetch_bytes(mesh_path).await {
+            self.try_change_scene_bytes(&mesh_bytes, env_map_path).await
         }
     }
 
     async fn try_change_scene_bytes(&mut self, mesh_bytes: &[u8], env_map_path: &str) {
         println!("Attempting to change scene");
-        if let Some(scene) = build_scene_bytes(mesh_bytes, env_map_path).await {
+        if let Some(scene) = Scene::from_bytes(mesh_bytes, env_map_path).await {
             self.scene = scene;
             self.frame_uniforms.scene = self.scene.to_gpu();
             self.frame_uniforms.reject_hist = 1;
             self.frame_uniforms.node_count = self.scene.bvh_node_data.len() as u32;
             self.frame_uniforms.prim_count = self.scene.primitives.len() as u32;
 
-            if let Some(focus) = self.scene.closest_hit(self.scene.cameras[0].position(), self.scene.cameras[0].forward()) {
-                self.scene.cameras[0].focus(focus);
-            };
+            self.scene.focus_camera(0);
 
             self.should_reupload = true;
         } else {
@@ -421,6 +406,10 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     surface_texture.present();
 }
 
+/// Fetch the bytes of a file
+/// 
+/// # Panics
+/// when targetting WASM, panics if the file path is not found
 async fn fetch_bytes(path: &str) -> Option<Vec<u8>> {
     #[cfg(not(target_arch = "wasm32"))] 
     {
@@ -450,49 +439,6 @@ async fn fetch_bytes(path: &str) -> Option<Vec<u8>> {
         // web_sys::console::log(&js_sys::Array::from(&typed_arr));
         Some(typed_arr.to_vec())
     }
-}
-
-
-async fn build_scene(mesh_path: &str, env_map_path: &str) -> Option<Scene> {
-    println!("building scene");
-    let mut scene = Scene::default();
-    let mut ms = MatrixStack::new();
-
-    scene.add_gltf(&Mat4::IDENTITY, mesh_path).await;
-
-    scene.set_equirectangular_env_map(env_map_path).await;
-
-    if scene.cameras.is_empty() {
-        println!("No camera in scene, falling back to default");
-        // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
-        scene.cameras.push(Camera::default());
-    }
-    
-    println!("Tri count: {}", scene.tris.len());
-    println!("Tri size : {} mb", (scene.tris.len() * size_of::<Tri>()) / (1000 * 1000));
-    println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
-    Some(scene)
-}
-
-async fn build_scene_bytes(mesh_bytes: &[u8], env_map_path: &str) -> Option<Scene> {
-    println!("building scene");
-    let mut scene = Scene::default();
-    let mut ms = MatrixStack::new();
-
-    scene.add_gltf_bytes(&Mat4::IDENTITY, mesh_bytes);
-
-    scene.set_equirectangular_env_map(env_map_path).await;
-
-    if scene.cameras.is_empty() {
-        println!("No camera in scene, falling back to default");
-        // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
-        scene.cameras.push(Camera::default());
-    }
-    
-    println!("Tri count: {}", scene.tris.len());
-    println!("Tri size : {} mb", (scene.tris.len() * size_of::<Tri>()) / (1000 * 1000));
-    println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
-    Some(scene)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -597,9 +543,7 @@ async fn run() {
                             MouseButton::Left =>  {
                                 if let Ok(mut ctx_guard) = ctx.try_lock(){
                                     input.lmb = state.is_pressed();
-                                    if let Some(focus) = ctx_guard.scene.closest_hit(ctx_guard.scene.cameras[0].position(), ctx_guard.scene.cameras[0].forward()) {
-                                        ctx_guard.scene.cameras[0].focus(focus);
-                                    };
+                                    ctx_guard.scene.focus_camera(0);
                                 }
 
                             },
