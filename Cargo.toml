@@ -24,4 +24,5 @@ wasm-bindgen-futures = "0.4.45"
 wasm-bindgen-test = "0.3"
 web-sys = {version = "0.3.72", features = ['Headers', 'Request', 'RequestInit', 'RequestMode', 'Response', 'Window']}
 web-time = "1.1.0"
+rfd = "0.15.2"
 

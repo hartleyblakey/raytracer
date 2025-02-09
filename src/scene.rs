@@ -161,8 +161,22 @@ pub struct Material {
     metallic_factor:    f32,
     roughness_factor:   f32,
     id:                 u32,
-    _pad:               u32,
+    alpha_settings:     u32,
 }
+
+
+impl Material {
+    
+    fn pack_alpha_settings(alpha_mode: gltf::material::AlphaMode, cutoff: f32) -> u32 {
+        let mode = match alpha_mode {
+            gltf::material::AlphaMode::Opaque => 0,
+            gltf::material::AlphaMode::Mask => 1,
+            gltf::material::AlphaMode::Blend => 2,
+        };
+        mode | (((cutoff.clamp(0.0, 1.0) * u16::MAX as f32) as u32) << 16)
+    }
+}
+
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -185,37 +199,6 @@ impl Primitive {
         }
     }
 }
-
-// https://gamedev.stackexchange.com/questions/169508/octahedral-impostors-octahedral-mapping
-fn unpack_vec3_octrahedral(uv: Vec2) -> Vec3 {
-    let mut position = vec3(2.0 * (uv.x - 0.5), 2.0 * (uv.y - 0.5), 0.0);
-    let absolute = position.xy().abs();
-    position.z = 1.0 - absolute.x - absolute.y;
-
-    if position.z < 0.0 {
-        position.x = position.x.signum() * (1.0 - absolute.y);
-        position.y = position.y.signum() * (1.0 - absolute.x);
-    }
-
-    position.normalize()
-}
-
-// https://gamedev.stackexchange.com/questions/169508/octahedral-impostors-octahedral-mapping
-// fn pack_vec3_octrahedral(dir: Vec3) -> Vec2 {
-//     let octant = dir.signum();
-//     let sum = dir.dot(octant);
-
-//     let mut octrahedron = dir / sum;
-
-//     if octrahedron.z < 0.0 {
-//         let absolute = octrahedron.abs();
-//         octrahedron.x *= octant.x + (1.0 - absolute.y);
-//         octrahedron.y *= octant.y + (1.0 - absolute.x);
-//     }
-
-//     return octrahedron.xy() * 0.5 + 0.5;
-// }
-
 
 fn oct_wrap(v: Vec2) -> Vec2 {
     let scale = v.signum();
@@ -272,14 +255,23 @@ pub struct Scene {
 
 
 impl Scene {
-    pub async fn add_gltf(&mut self, transform: &Mat4, path: &str) {
-
-        self.add_gltf_bytes(transform, fetch_bytes(path).await.as_slice());
+    pub async fn add_gltf(&mut self, transform: &Mat4, path: &str) -> bool {
+        if let Some(bytes) = fetch_bytes(path).await {
+            self.add_gltf_bytes(transform, bytes.as_slice());
+            true
+        } else {
+            false
+        }
+        
     }
 
-    pub fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) {
+    pub fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) -> bool {
         self.loaded_meshes.clear();
-        let (document, buffers, _) = gltf::import_slice(bytes).unwrap();
+        let (document, buffers, _) = match gltf::import_slice(bytes) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+
         let mut ms = MatrixStack::new();
         ms.push();
         ms.apply(&transform);
@@ -288,6 +280,7 @@ impl Scene {
                 self.add_gltf_node(&buffers, node, &mut ms);
             }
         }
+        true
     }   
 
     pub fn from_gltf_vec3(v: Vec3) -> Vec3 {
@@ -420,6 +413,8 @@ impl Scene {
 
                         let mut found_texcoords: HashMap<u32, Vec<Vec2>> = HashMap::new();
 
+                        // if the primitive has a texcoord attribute with this id, load it into a vec
+                        // if we already loaded the texcoords of that ID, we dont need to do anything 
                         let mut try_load_texcoords = |id| {
                             if found_texcoords.contains_key(id) {
                                 return;
@@ -454,6 +449,11 @@ impl Scene {
                         // };
 
                         let mut material = Material::default();
+
+                        material.alpha_settings = Material::pack_alpha_settings(
+                            primitive.material().alpha_mode(), 
+                            primitive.material().alpha_cutoff().unwrap_or(0.5)
+                        );
 
                         material.albedo_factor = primitive.material().pbr_metallic_roughness().base_color_factor().into();
                         if let Some(albedo_tex) = primitive.material().pbr_metallic_roughness().base_color_texture() {
@@ -525,9 +525,7 @@ impl Scene {
                                     ext.vertices[1].color = colors[idx_1 as usize];
                                     ext.vertices[2].color = colors[idx_2 as usize];
                                 }
-                                ext.vertices[0].normal = vec2(0.0, 1.0);
-                                ext.vertices[1].normal = vec2(0.0, 1.0);
-                                ext.vertices[2].normal = vec2(0.0, 1.0);
+
                                 if !normals.is_empty() {
                                     ext.vertices[0].normal = normals[idx_0 as usize];
                                     ext.vertices[1].normal = normals[idx_1 as usize];
@@ -598,15 +596,22 @@ impl Scene {
         ms.pop();
     }
 
-
-    pub async fn set_equirectangular_env_map(&mut self, path: &str) {
-        let buffer = fetch_bytes(path).await;
-        let image = image::load_from_memory(buffer.as_slice()).expect(format!("Expected file at path {path}").as_str());
+    /// loads the pixel data from a given equirectangular environment map into the scene
+    /// returns true if the file was found, false otherise
+    /// 
+    /// panics if the file path is valid but not an image
+    pub async fn set_equirectangular_env_map(&mut self, path: &str) -> bool {
+        let buffer = match fetch_bytes(path).await {
+            Some(buffer) => buffer,
+            None => return false,
+        };
+        let image = image::load_from_memory(buffer.as_slice()).expect(format!("Expected valid image at path {path}").as_str());
         let image = image.into_rgba32f();
         self.env_map_data.clear();
         for pixel in image.pixels() {
             self.env_map_data.push(pixel.0);
-        }
+        };
+        true
     }
 
     pub fn to_gpu(&self) -> GpuSceneUniform {

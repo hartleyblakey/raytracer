@@ -125,6 +125,29 @@ impl Texture {
     
 }
 
+impl std::ops::Deref for Texture {
+    type Target = wgpu::Texture;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+impl std::ops::Deref for TextureView {
+    type Target = wgpu::TextureView;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+impl std::ops::Deref for Buffer {
+    type Target = wgpu::Buffer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
 
 pub struct TextureView {
     pub raw: wgpu::TextureView,

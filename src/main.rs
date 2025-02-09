@@ -1,15 +1,19 @@
-use std::{borrow::Cow, collections::{HashMap, HashSet}, f32::consts::PI, mem::swap, str::FromStr};
-use js_sys::ArrayBuffer;
+use std::{borrow::Cow, collections::HashSet, f32::consts::PI, mem::swap, str::FromStr, sync::{Arc, Mutex}};
+
 use pollster::FutureExt;
+
+use js_sys::ArrayBuffer;
 use rand::random;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::Response;
+
+
 use winit::{
     dpi::PhysicalPosition, event::{DeviceEvent, ElementState, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode
 };
 
-use glam::{uvec2, vec2, vec3, vec4, FloatExt, Mat3, Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{uvec2, Mat4};
 use web_time::{Instant, SystemTime};
 
 mod input;
@@ -169,7 +173,7 @@ impl Context {
     }
 
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
-        let scene = build_scene().await;
+        let scene = build_scene("resources/simple.glb", "resources/trail.hdr").await.unwrap();
 
         println!("Bvh size : {} mb", (scene.bvh_node_data.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
@@ -220,7 +224,7 @@ impl Context {
             source: wgpu::ShaderSource::Wgsl(
                 Cow::Borrowed(
                     std::str::from_utf8(
-                        fetch_bytes("src/shader.wgsl").await.as_slice()
+                        fetch_bytes("src/shader.wgsl").await.unwrap().as_slice()
                     ).expect("Shader is not valid UTF-8")
                 )
             ),
@@ -290,12 +294,61 @@ impl Context {
             scene,
         }
     }
+
+    async fn try_change_scene(&mut self, mesh_path: &str, env_map_path: &str) {
+        if let Some(scene) = build_scene(mesh_path, env_map_path).await {
+            self.scene = scene;
+            self.frame_uniforms.scene = self.scene.to_gpu();
+            self.frame_uniforms.reject_hist = 1;
+            self.frame_uniforms.node_count = self.scene.bvh_node_data.len() as u32;
+            self.frame_uniforms.prim_count = self.scene.primitives.len() as u32;
+
+            if let Some(focus) = self.scene.closest_hit(self.scene.cameras[0].position(), self.scene.cameras[0].forward()) {
+                self.scene.cameras[0].focus(focus);
+            };
+        }
+    }
+
+    async fn try_change_scene_bytes(&mut self, mesh_bytes: &[u8], env_map_path: &str) {
+        if let Some(scene) = build_scene_bytes(mesh_bytes, env_map_path).await {
+            self.scene = scene;
+            self.frame_uniforms.scene = self.scene.to_gpu();
+            self.frame_uniforms.reject_hist = 1;
+            self.frame_uniforms.node_count = self.scene.bvh_node_data.len() as u32;
+            self.frame_uniforms.prim_count = self.scene.primitives.len() as u32;
+
+            if let Some(focus) = self.scene.closest_hit(self.scene.cameras[0].position(), self.scene.cameras[0].forward()) {
+                self.scene.cameras[0].focus(focus);
+            };
+        }
+    }
+
+    fn upload_scene(&self, gpu: &Gpu) {
+        gpu.queue.write_buffer(&self.triangles_ssbo,         0, bytemuck::cast_slice(self.scene.tris.as_slice()));
+        gpu.queue.write_buffer(&self.triangles_ext_ssbo,     0, bytemuck::cast_slice(self.scene.tri_exts.as_slice()));
+        gpu.queue.write_buffer(&self.bvh_ssbo,               0, bytemuck::cast_slice(self.scene.bvh_node_data.as_slice()));
+        gpu.queue.write_buffer(&self.texture_data_ssbo,      0, bytemuck::cast_slice(self.scene.texture_data.as_slice()));
+        gpu.queue.write_buffer(&self.primitive_data_ssbo,    0, bytemuck::cast_slice(self.scene.primitives.as_slice()));
+
+        gpu.queue.write_texture(
+            self.env_map_texture.as_image_copy(), 
+            bytemuck::cast_slice(self.scene.env_map_data.as_slice()), 
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(self.env_map_texture.height() * 2 * 4 * 4),
+                rows_per_image: None,
+            }, 
+            wgpu::Extent3d{
+                width: self.env_map_texture.width(),
+                height: self.env_map_texture.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+
+    }
 }
 
 fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
-
-    let did_recompile = ctx.check_recompile_shader(gpu);
-
     let surface_texture = gpu.surface.get_current_texture().expect("Failed to aquire next surface texture");
     let surface_view = gpu.get_surface_view(&surface_texture);
 
@@ -314,13 +367,12 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     ctx.frame_uniforms.frame += 1;
     ctx.frame_uniforms.time += dt; // hack
     ctx.frame_uniforms.scene.camera = ctx.scene.cameras[0].to_gpu();
-    ctx.frame_uniforms.reject_hist = ctx.scene.cameras[0].check_moved() as u32;
 
-    if did_recompile {
+    if ctx.check_recompile_shader(gpu) || ctx.scene.cameras[0].check_moved() {
         ctx.frame_uniforms.reject_hist = 1;
     }
-
-    gpu.queue.write_buffer(&ctx.frame_uniforms_buffer.raw, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
+    
+    gpu.queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
     let workgroup_size = [8, 8];
     {
@@ -343,15 +395,21 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
         rpass.draw(0..3, 0..1);
     }
 
+    ctx.frame_uniforms.reject_hist = 0;
+
     gpu.queue.submit(Some(encoder.finish()));
     surface_texture.present();
 }
 
-async fn fetch_bytes(path: &str) -> Vec<u8> {
+async fn fetch_bytes(path: &str) -> Option<Vec<u8>> {
     #[cfg(not(target_arch = "wasm32"))] 
     {
-        
-        std::fs::read(path).unwrap()
+        if let Ok(bytes) = std::fs::read(path) {
+            Some(bytes)
+        } else {
+            None
+        }
+
     }
 
     
@@ -370,47 +428,19 @@ async fn fetch_bytes(path: &str) -> Vec<u8> {
         let typed_arr = js_sys::Uint8Array::new(&array_buf);
         // web_sys::console::log_1(&response);
         // web_sys::console::log(&js_sys::Array::from(&typed_arr));
-        typed_arr.to_vec()
+        Some(typed_arr.to_vec())
     }
 }
 
 
-async fn build_scene() -> Scene {
+async fn build_scene(mesh_path: &str, env_map_path: &str) -> Option<Scene> {
     println!("building scene");
     let mut scene = Scene::default();
     let mut ms = MatrixStack::new();
-    // scene.add_gltf_bytes(&Mat4::from_rotation_x(-90.0_f32.to_radians()), include_bytes!("../resources/suzanne.glb"));
-    // scene.add_gltf_bytes(&Mat4::from_translation(vec3(0.0, -3.0, 0.0)), include_bytes!("../resources/simple.glb"));
 
-    
-    // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/large/DragonAttenuation.glb"));
- 
+    scene.add_gltf(&Mat4::IDENTITY, mesh_path).await;
 
-    // ms.push();
-    // ms.translate(vec3(0.0, 0.0, 10.0));
-    // ms.rotate_y(180.0f32.to_radians());
-    // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/large/DragonAttenuation.glb"));
-    // ms.pop();
-
-    // ms.push();
-    // ms.translate(vec3(0.0, 0.0, 5.0));
-    // scene.add_gltf_bytes(ms.top(), include_bytes!("../resources/suzanne.glb"));
-    // ms.pop();
-
-    // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/large/turtle.glb"));
-
-     // scene.add_gltf(&Mat4::IDENTITY, "resources/simple_textured.glb").await;
-      // scene.add_gltf(&Mat4::IDENTITY, "resources/large/ship.glb").await;
-
-      scene.add_gltf(&Mat4::IDENTITY, "resources/simple.glb").await;
-    // scene.add_gltf(&Mat4::IDENTITY, "resources/DamagedHelmet.glb").await;
-    
-     // scene.add_gltf_bytes(&Mat4::IDENTITY, include_bytes!("../resources/simple_terrain.glb"));
-
-    // scene.add_gltf(&Mat4::IDENTITY, "resources/large/Sponza.glb").await;
-    // scene.add_gltf(&Mat4::IDENTITY, "resources/large/DragonAttenuation.glb").await;
-    
-    scene.set_equirectangular_env_map("resources/trail.hdr").await;
+    scene.set_equirectangular_env_map(env_map_path).await;
 
     if scene.cameras.is_empty() {
         println!("No camera in scene, falling back to default");
@@ -421,9 +451,45 @@ async fn build_scene() -> Scene {
     println!("Tri count: {}", scene.tris.len());
     println!("Tri size : {} mb", (scene.tris.len() * size_of::<Tri>()) / (1000 * 1000));
     println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
-    scene
+    Some(scene)
 }
 
+async fn build_scene_bytes(mesh_bytes: &[u8], env_map_path: &str) -> Option<Scene> {
+    println!("building scene");
+    let mut scene = Scene::default();
+    let mut ms = MatrixStack::new();
+
+    scene.add_gltf_bytes(&Mat4::IDENTITY, mesh_bytes);
+
+    scene.set_equirectangular_env_map(env_map_path).await;
+
+    if scene.cameras.is_empty() {
+        println!("No camera in scene, falling back to default");
+        // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
+        scene.cameras.push(Camera::default());
+    }
+    
+    println!("Tri count: {}", scene.tris.len());
+    println!("Tri size : {} mb", (scene.tris.len() * size_of::<Tri>()) / (1000 * 1000));
+    println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
+    Some(scene)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn async_spawn<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    spawn_local(fut);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn async_spawn<F>(fut: F)
+where
+    F: std::future::Future<Output = ()>  + 'static,
+{
+    pollster::block_on(fut);
+}
 
 async fn run() {
     let event_loop = EventLoop::new().unwrap();
@@ -433,7 +499,7 @@ async fn run() {
 
     let mut gpu = Gpu::new(&window).await;
 
-    let mut ctx = Context::init(&gpu).await;
+    let mut ctx = Arc::new(Mutex::new(Context::init(&gpu).await));
 
     let mut input = InputState {
         keys: HashSet::new(),
@@ -466,9 +532,13 @@ async fn run() {
                         // Reconfigure the surface with the new size
                         gpu.surface_config.width  = new_size.width.clamp(1, 4096);
                         gpu.surface_config.height = new_size.height.clamp(1, 4096);
-    
+                        
                         gpu.surface.configure(&gpu.device, &gpu.surface_config);
-                        ctx.update_resolution(&gpu);
+
+                        if let Ok(mut ctx_guard) = ctx.try_lock(){
+                            ctx_guard.update_resolution(&gpu);
+                        }
+                        
                         // On macos the window needs to be redrawn manually after resizing
                         gpu.window.request_redraw();
                     }
@@ -478,7 +548,15 @@ async fn run() {
                         frames_in_second += 1;
                         gpu.window.request_redraw();
                         let dt = (this_frame - last_frame).as_secs_f32();
-                        ctx.scene.cameras[0].update(&mut input, dt);
+
+                        
+
+                        if let Ok(mut ctx_guard) = ctx.try_lock(){
+                            ctx_guard.scene.cameras[0].update(&mut input, dt);
+                            frame(&gpu, &mut ctx_guard, dt);
+                        } else {
+                            println!("Context is in use!");
+                        }
 
                         if this_frame.duration_since(last_second).as_secs_f32() >= 1.0 {
                             println!("fps: {}", frames_in_second);
@@ -486,17 +564,20 @@ async fn run() {
                             last_second = this_frame;
                         }
                         
-                        frame(&gpu, &mut ctx, dt);
+                        
                         last_frame = this_frame;
                     },
                     WindowEvent::CursorMoved { device_id, position } => if !input.rmb {last_cursor_pos = position},
                     WindowEvent::MouseInput { device_id, state, button } => {
                         match button {
                             MouseButton::Left =>  {
-                                input.lmb = state.is_pressed();
-                                if let Some(focus) = ctx.scene.closest_hit(ctx.scene.cameras[0].position(), ctx.scene.cameras[0].forward()) {
-                                    ctx.scene.cameras[0].focus(focus);
-                                };
+                                if let Ok(mut ctx_guard) = ctx.try_lock(){
+                                    input.lmb = state.is_pressed();
+                                    if let Some(focus) = ctx_guard.scene.closest_hit(ctx_guard.scene.cameras[0].position(), ctx_guard.scene.cameras[0].forward()) {
+                                        ctx_guard.scene.cameras[0].focus(focus);
+                                    };
+                                }
+
                             },
                             MouseButton::Right => input.rmb = state.is_pressed(),
                             _ => (),
@@ -522,14 +603,48 @@ async fn run() {
                             winit::event::MouseScrollDelta::LineDelta(_, y) => input.scroll += y as f64 / 2.0,
                             winit::event::MouseScrollDelta::PixelDelta(physical_position) => input.scroll += physical_position.y / 128.0,
                         }
-                    }
+                    },
+                    WindowEvent::DroppedFile(path) => {
+                        if let Some(path_string) = path.to_str() {
+                            let path_string = path_string.to_string();
+                            let ctx_clone = Arc::clone(&ctx);
+                            async_spawn(async move {
+                                if let Ok(mut ctx_guard) = ctx_clone.lock() {
+                                    ctx_guard.try_change_scene(path_string.as_str(), "resources/trail.hdr").await
+                                }
+                            });
+                            if let Ok(ctx_guard) = ctx.lock() {
+                                println!("aquired lock to upload scene");
+                                ctx_guard.upload_scene(&gpu);
+                                println!("uploaded scene");
+                            }
+
+                            // Im not sure why, but the window sometimes needs to be manually redrawn here
+                            gpu.window.request_redraw();
+                        }
+                        
+                    },
                     WindowEvent::CloseRequested => target.exit(),
                     WindowEvent::KeyboardInput { device_id, event, is_synthetic } => {
-                        
                         match event.physical_key {
                             PhysicalKey::Code(code) => {
                                 if event.state.is_pressed() {
                                     input.keys.insert(PhysicalKey::Code(code));
+                                    if code == KeyCode::KeyO {
+                                        let ctx_clone = Arc::clone(&ctx);
+                                        async_spawn(async move {
+                                            if let Ok(mut ctx_guard) = ctx_clone.lock() {
+                                                let file = rfd::AsyncFileDialog::new().set_title("Pick a gltf (or glb) file to render").pick_file().await.unwrap();
+                                                ctx_guard.try_change_scene_bytes(&file.read().await, "resources/trail.hdr").await
+                                            }
+                                        });
+                                        if let Ok(ctx_guard) = ctx.lock() {
+                                            println!("aquired lock to upload scene");
+                                            ctx_guard.upload_scene(&gpu);
+                                            println!("uploaded scene");
+                                        }
+                                            
+                                    };
                                 } else {
                                     input.keys.remove(&PhysicalKey::Code(code));
                                 }

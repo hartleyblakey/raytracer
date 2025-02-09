@@ -21,7 +21,7 @@ const TO_SUN_VAL = vec3f(0.5, 0.4, 1.49);
 
 const TO_SUN_DIR = TO_SUN_VAL / sqrt(TO_SUN_VAL.x * TO_SUN_VAL.x + TO_SUN_VAL.y * TO_SUN_VAL.y + TO_SUN_VAL.z * TO_SUN_VAL.z);
 
-const SUN_COL = vec3f(1.0, 0.5, 0.3) * 0.0;
+const SUN_COL = vec3f(1.0, 0.5, 0.3) * 5.0;
 const EXPOSURE = 1.0 / 1.0;
 
 
@@ -71,7 +71,7 @@ struct Material {
     metallic_factor:    f32,
     roughness_factor:   f32,
     id:                 u32,
-    _pad:               u32,
+    alpha_settings:     u32,
 }
 
 const DEFAULT_MATERIAL = Material (
@@ -94,7 +94,7 @@ const DEFAULT_MATERIAL = Material (
     0.0, // metallic_factor
     0.0, // roughness_factor
     0, // id
-    0, // padding
+    0, // alpha cutoff << 16 | blend mode
 );
 
 struct Primitive {
@@ -439,7 +439,7 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
 
 var<private> debug: f32;
 
-fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>) -> i32 {
+fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) -> i32 {
     var stack: Stack;
     stack.size = 0u;
     var node = bvh[root];
@@ -461,6 +461,30 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>) -> i32 {
                 
                 let t = intersect(ray, triangles[i]);
                 if t >= 0.0 && t < best_t {
+                    if (prim.material.alpha_settings & 3u) != 0u {
+                        let hit = intersect_full(ray, i32(i));
+                        let ext = tri_exts[i];
+
+                        var texcoord = vec2f(0.0);
+
+                        texcoord += hit.bary.x * ext.vertices[0].texcoords[prim.material.albedo_texcoord];
+                        texcoord += hit.bary.y * ext.vertices[1].texcoords[prim.material.albedo_texcoord];
+                        texcoord += hit.bary.z * ext.vertices[2].texcoords[prim.material.albedo_texcoord];
+
+                        let alpha = sample_texture(prim.material.albedo, texcoord).a;
+
+                        if (prim.material.alpha_settings & 3u) == 1u {
+                            // MASK
+                            if alpha < f32(prim.material.alpha_settings >> 16u) / f32(1u << 16u) {
+                                continue;
+                            }
+                        } else {
+                            // BLEND
+                            if rand() > alpha {
+                                continue;
+                            }
+                        }
+                    }
                     best_i = i32(i);
                     best_t = t;
                 }
@@ -550,7 +574,6 @@ fn trace_bvh_shadow(ray: Ray, root: u32) -> bool {
     return false;
 }
 
-
 fn transform_dir(x: vec3f, t: mat4x4f) -> vec3f {
     return (t * vec4f(x.x, x.y, x.z, 0.0)).xyz;
 }
@@ -558,7 +581,6 @@ fn transform_dir(x: vec3f, t: mat4x4f) -> vec3f {
 fn transform_pos(x: vec3f, t: mat4x4f) -> vec3f {
     return (t * vec4f(x.x, x.y, x.z, 1.0)).xyz;
 }
-
 
 fn transform_normal(x: vec3f, t_inv: mat4x4f) -> vec3f {
     return normalize(transform_dir(x, transpose(t_inv)));
@@ -583,7 +605,7 @@ fn trace(ray: Ray) -> Hit {
         let t_ray = transform_ray(ray, primitives[i].inv_transform);
 
         var new_t = closest_t * scale_factor;
-        let new_idx = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t);
+        let new_idx = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
 
         if new_idx >= 0 {
             closest_t = new_t / scale_factor;
@@ -679,7 +701,6 @@ fn sky(dir: vec3f) -> vec3f {
     // return vec3f(1.0);
 }
 
-
 // from https://www.shadertoy.com/view/XtGGzG
 fn plasma_quintic( _x: f32 ) -> vec3f {
 	let x = saturate( _x );
@@ -741,7 +762,7 @@ fn camera_ray(pixel: vec2u) -> Ray {
     // let m = rand();
     // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
     // pixel_pos += up             * sin(a) * pow(m, 150.0);
-    let aperture_radius = 0.25;
+    let aperture_radius = 0.025;
     ray.dir  = normalize(pixel_pos - ray.origin);
 
     let aperture = aperture_radius * rand_disk();
@@ -771,6 +792,14 @@ fn fresnel_schlick(normal: vec3f, view: vec3f, f0: vec3f) -> vec3f {
     return f0 + (1.0 - f0) * pow(1.0 - dot(normal, view), 5.0);
 }
 
+fn project_to_hemisphere(dir: vec3f, normal: vec3f) -> vec3f {
+    if dot(dir, normal) < 0.0 {
+        return normalize(dir - dot(dir, normal) * normal);
+    } else {
+        return dir;
+    }
+}
+
 fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
     rand();
 
@@ -787,6 +816,9 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
     if length(sample.normal)  > 0.001 {
         // sample.normal = normalize(sample.normal);
         sample.normal = transform_normal(normalize(sample.normal), primitives[hit.prim_idx].inv_transform);
+        if dot(sample.normal, hit.normal) < 0.0 {
+            sample.normal = -sample.normal;
+        }
     } else {
         sample.normal = hit.normal;
     }
@@ -795,15 +827,15 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
     albedo = hit.material.albedo_factor.rgb;
     if hit.material.albedo.size != 0 {
         albedo *= to_linear(sample_texture(hit.material.albedo, sample.texcoords[hit.material.albedo_texcoord]).rgb);
+    } else {
+        // albedo *= dummy_texture(sample.texcoords[0]).rgb;
+        albedo *= vec3f(0.01, 0.02, 0.03);
     }
 
     emissive = hit.material.emissive_factor;
     if hit.material.emissive.size != 0 {
         emissive *= to_linear(sample_texture(hit.material.emissive, sample.texcoords[hit.material.emissive_texcoord]).rgb);
     }
-
-
-    
 
     var metallic_chance = hit.material.metallic_factor;
     var roughness = hit.material.roughness_factor;
@@ -819,9 +851,16 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
         f0 = albedo;
     }
 
-    let fresnel = fresnel_schlick(sample.normal, -(*ray).dir, f0);
+    let microfacet_normal = normalize(mix(sample.normal, rand_hemisphere(sample.normal), roughness * roughness * 0.8));
+
+    let fresnel = fresnel_schlick(microfacet_normal, -(*ray).dir, f0);
     
     var specular = rand() < fresnel.x;
+    
+
+    // emissive = sample.normal * 0.5 + 0.5;
+    // albedo *= 0.0;
+    // specular = false;
 
     *lighting += emissive * *throughput;
     if !specular || metal {
@@ -829,8 +868,10 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
     }
 
     if specular || metal {
-        (*ray).dir = reflect((*ray).dir, sample.normal);
-        (*ray).dir = mix((*ray).dir, rand_hemisphere(sample.normal), roughness * roughness);
+        (*ray).dir = reflect((*ray).dir, microfacet_normal);
+        // (*ray).dir = normalize((*ray).dir + rand_hemisphere(sample.normal) * );
+        // (*ray).dir *= sign11(dot(hit.normal, (*ray).dir));
+        (*ray).dir = project_to_hemisphere((*ray).dir, sample.normal);
         (*ray).idir = 1.0 / (*ray).dir;
     } else {
         sample_lambert(ray, sample.normal);
@@ -852,7 +893,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
 
     // let samples = u32(screen[id.x + globals.res.x * id.y].a);
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
-    const SHADOW_PROB = 0.0;
+    const SHADOW_PROB = 0.5;
     var ray = camera_ray(id.xy);
     for (var i = 0; i < 8; i++) {
         let hit = trace(ray);
@@ -864,8 +905,10 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             break;
         } else {
             if rand() < SHADOW_PROB {
+                throughput /= SHADOW_PROB;
                 break;
             } else {
+                throughput /= (1.0 - SHADOW_PROB);
                 handle_surface_hit_brdf(&ray, hit, &throughput, &lighting); 
             }
         }
