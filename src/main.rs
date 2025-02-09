@@ -70,6 +70,8 @@ struct Context {
     resources:                  ResourceManager,
 
     scene:                      Scene,
+
+    should_reupload:            bool,
 }
 
 impl Context {
@@ -245,26 +247,28 @@ impl Context {
             gpu
         );
 
-        gpu.queue.write_buffer(&triangles_ssbo.raw,         0, bytemuck::cast_slice(scene.tris.as_slice()));
-        gpu.queue.write_buffer(&triangles_ext_ssbo.raw,     0, bytemuck::cast_slice(scene.tri_exts.as_slice()));
-        gpu.queue.write_buffer(&bvh_ssbo.raw,               0, bytemuck::cast_slice(scene.bvh_node_data.as_slice()));
-        gpu.queue.write_buffer(&texture_data_ssbo.raw,      0, bytemuck::cast_slice(scene.texture_data.as_slice()));
-        gpu.queue.write_buffer(&primitive_data_ssbo.raw,    0, bytemuck::cast_slice(scene.primitives.as_slice()));
+        // gpu.queue.write_buffer(&triangles_ssbo.raw,         0, bytemuck::cast_slice(scene.tris.as_slice()));
+        // gpu.queue.write_buffer(&triangles_ext_ssbo.raw,     0, bytemuck::cast_slice(scene.tri_exts.as_slice()));
+        // gpu.queue.write_buffer(&bvh_ssbo.raw,               0, bytemuck::cast_slice(scene.bvh_node_data.as_slice()));
+        // gpu.queue.write_buffer(&texture_data_ssbo.raw,      0, bytemuck::cast_slice(scene.texture_data.as_slice()));
+        // gpu.queue.write_buffer(&primitive_data_ssbo.raw,    0, bytemuck::cast_slice(scene.primitives.as_slice()));
 
-        gpu.queue.write_texture(
-            env_map_texture.raw.as_image_copy(), 
-            bytemuck::cast_slice(scene.env_map_data.as_slice()), 
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(hdri_height * 2 * 4 * 4),
-                rows_per_image: None,
-            }, 
-            wgpu::Extent3d{
-                width: hdri_height * 2,
-                height: hdri_height,
-                depth_or_array_layers: 1,
-            },
-        );
+        // gpu.queue.write_texture(
+        //     env_map_texture.raw.as_image_copy(), 
+        //     bytemuck::cast_slice(scene.env_map_data.as_slice()), 
+        //     wgpu::ImageDataLayout {
+        //         offset: 0,
+        //         bytes_per_row: Some(hdri_height * 2 * 4 * 4),
+        //         rows_per_image: None,
+        //     }, 
+        //     wgpu::Extent3d{
+        //         width: hdri_height * 2,
+        //         height: hdri_height,
+        //         depth_or_array_layers: 1,
+        //     },
+        // );
+
+        let should_reupload = true;
 
         Context {
             screen_pipeline,
@@ -292,10 +296,13 @@ impl Context {
 
             resources,
             scene,
+
+            should_reupload,
         }
     }
 
     async fn try_change_scene(&mut self, mesh_path: &str, env_map_path: &str) {
+        println!("Attempting to change scene to {mesh_path}");
         if let Some(scene) = build_scene(mesh_path, env_map_path).await {
             self.scene = scene;
             self.frame_uniforms.scene = self.scene.to_gpu();
@@ -306,10 +313,15 @@ impl Context {
             if let Some(focus) = self.scene.closest_hit(self.scene.cameras[0].position(), self.scene.cameras[0].forward()) {
                 self.scene.cameras[0].focus(focus);
             };
+
+            self.should_reupload = true;
+        } else {
+            println!("Scene change failed!");
         }
     }
 
     async fn try_change_scene_bytes(&mut self, mesh_bytes: &[u8], env_map_path: &str) {
+        println!("Attempting to change scene");
         if let Some(scene) = build_scene_bytes(mesh_bytes, env_map_path).await {
             self.scene = scene;
             self.frame_uniforms.scene = self.scene.to_gpu();
@@ -320,10 +332,16 @@ impl Context {
             if let Some(focus) = self.scene.closest_hit(self.scene.cameras[0].position(), self.scene.cameras[0].forward()) {
                 self.scene.cameras[0].focus(focus);
             };
+
+            self.should_reupload = true;
+        } else {
+            println!("Scene change failed!");
         }
+        
     }
 
-    fn upload_scene(&self, gpu: &Gpu) {
+    fn upload_scene(&mut self, gpu: &Gpu) {
+        println!("Uploading scene to the gpu");
         gpu.queue.write_buffer(&self.triangles_ssbo,         0, bytemuck::cast_slice(self.scene.tris.as_slice()));
         gpu.queue.write_buffer(&self.triangles_ext_ssbo,     0, bytemuck::cast_slice(self.scene.tri_exts.as_slice()));
         gpu.queue.write_buffer(&self.bvh_ssbo,               0, bytemuck::cast_slice(self.scene.bvh_node_data.as_slice()));
@@ -344,6 +362,8 @@ impl Context {
                 depth_or_array_layers: 1,
             },
         );
+
+        self.should_reupload = false;
 
     }
 }
@@ -551,8 +571,12 @@ async fn run() {
 
                         
 
-                        if let Ok(mut ctx_guard) = ctx.try_lock(){
+                        if let Ok(mut ctx_guard) = ctx.try_lock() {
                             ctx_guard.scene.cameras[0].update(&mut input, dt);
+                            
+                            if ctx_guard.should_reupload {
+                                ctx_guard.upload_scene(&gpu);
+                            }
                             frame(&gpu, &mut ctx_guard, dt);
                         } else {
                             println!("Context is in use!");
@@ -610,14 +634,9 @@ async fn run() {
                             let ctx_clone = Arc::clone(&ctx);
                             async_spawn(async move {
                                 if let Ok(mut ctx_guard) = ctx_clone.lock() {
-                                    ctx_guard.try_change_scene(path_string.as_str(), "resources/trail.hdr").await
+                                    ctx_guard.try_change_scene(path_string.as_str(), "resources/trail.hdr").await;
                                 }
                             });
-                            if let Ok(ctx_guard) = ctx.lock() {
-                                println!("aquired lock to upload scene");
-                                ctx_guard.upload_scene(&gpu);
-                                println!("uploaded scene");
-                            }
 
                             // Im not sure why, but the window sometimes needs to be manually redrawn here
                             gpu.window.request_redraw();
@@ -638,11 +657,6 @@ async fn run() {
                                                 ctx_guard.try_change_scene_bytes(&file.read().await, "resources/trail.hdr").await
                                             }
                                         });
-                                        if let Ok(ctx_guard) = ctx.lock() {
-                                            println!("aquired lock to upload scene");
-                                            ctx_guard.upload_scene(&gpu);
-                                            println!("uploaded scene");
-                                        }
                                             
                                     };
                                 } else {
