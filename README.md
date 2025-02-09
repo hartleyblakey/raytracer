@@ -28,7 +28,7 @@
 
 - Technically can be built for the web
   - Hardcoded resolution to 512x512, no extra effort put in beyond getting it to run
-  - [hosted here (requires webgpu)](https://blue.cs.sonoma.edu/~hblakey/CS-375/Final-Project/generated/index.html)
+  - [hosted here (requires webgpu)](https://blue.cs.sonoma.edu/~hblakey/raytracer/src/index.html)
 
 
 #### Source Files
