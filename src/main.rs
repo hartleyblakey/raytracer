@@ -442,7 +442,7 @@ async fn fetch_bytes(path: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn async_spawn<F>(fut: F)
+pub fn spawn_future<F>(fut: F)
 where
     F: std::future::Future<Output = ()> + 'static,
 {
