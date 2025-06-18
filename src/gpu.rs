@@ -455,7 +455,7 @@ impl<'a> Gpu<'a> {
         self.queue.write_texture(
             tex.raw.as_image_copy(), 
             image.as_bytes(), 
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 bytes_per_row: Some(dim.0 * bytes_per_pixel),
                 rows_per_image: None,
                 offset: 0,
@@ -551,10 +551,11 @@ impl<'a> Gpu<'a> {
             {
                 match &error {
                     wgpu::Error::Validation { source: _, description } => {
+
+                        println!("{description}");
                         if description.contains("Device::create_shader_module") {
                             return;
                         }
-                        println!("{description}");
                     },
                     _ => (),
                 }

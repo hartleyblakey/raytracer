@@ -450,7 +450,7 @@ where
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn async_spawn<F>(fut: F)
+pub fn spawn_future<F>(fut: F)
 where
     F: std::future::Future<Output = ()>  + 'static,
 {
@@ -555,7 +555,9 @@ async fn run() {
                         // and reset it back when released
                         if input.rmb {
                             gpu.window.set_cursor_visible(false);
-                            gpu.window.set_cursor_grab(CursorGrabMode::Confined);
+                            if gpu.window.set_cursor_grab(CursorGrabMode::Locked).is_err() {
+                                gpu.window.set_cursor_grab(CursorGrabMode::Confined);
+                            }
                         } else {
                             gpu.window.set_cursor_position(last_cursor_pos);
                             gpu.window.set_cursor_visible(true);
@@ -575,8 +577,22 @@ async fn run() {
                     WindowEvent::DroppedFile(path) => {
                         if let Some(path_string) = path.to_str() {
                             let path_string = path_string.to_string();
+
+                            // TODO: accept HDR files
+                            let is_mesh = match path.extension() {
+                                None => true,
+                                Some(os_str) => match os_str.to_str() {
+                                    None => false,
+                                    Some("gltf") => true,
+                                    Some("GLTF") => true,
+                                    Some("glb") => true,
+                                    Some("GLB") => true,
+                                    _ => false,
+                                }
+
+                            };
                             let ctx_clone = Arc::clone(&ctx);
-                            async_spawn(async move {
+                            spawn_future(async move {
                                 if let Ok(mut ctx_guard) = ctx_clone.lock() {
                                     ctx_guard.try_change_scene(path_string.as_str(), "resources/trail.hdr").await;
                                 }
@@ -595,7 +611,7 @@ async fn run() {
                                     input.keys.insert(PhysicalKey::Code(code));
                                     if code == KeyCode::KeyO {
                                         let ctx_clone = Arc::clone(&ctx);
-                                        async_spawn(async move {
+                                        spawn_future(async move {
                                             if let Ok(mut ctx_guard) = ctx_clone.lock() {
                                                 let file = rfd::AsyncFileDialog::new().set_title("Pick a gltf (or glb) file to render").pick_file().await.unwrap();
                                                 ctx_guard.try_change_scene_bytes(&file.read().await, "resources/trail.hdr").await

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::GenericImageView;
-use rand::random;
 
 use crate::{fetch_bytes, input::*};
 
@@ -676,7 +675,6 @@ impl Scene {
         }
     }
 
-
     pub async fn from_path(mesh_path: &str, env_map_path: &str) -> Option<Scene> {
         if let Some(mesh_bytes) = fetch_bytes(mesh_path).await {
             Self::from_bytes(&mesh_bytes, env_map_path).await
@@ -1054,10 +1052,7 @@ impl Bvh {
         stack.push(0);
         let mut best_t = f32::MAX;
         let mut best_i = -1;
-        let mut node_count = 0;
-        let mut tri_count = 0;
         while !stack.is_empty() {
-            node_count += 1;
             let node = self.nodes[stack.pop().unwrap() as usize];
 
             let aabb_t = node.aabb.closest_hit(ro, rd);
@@ -1068,7 +1063,6 @@ impl Bvh {
 
             if node.count > 0 {
                 // leaf node
-                tri_count += node.count;
                 for i in 0..node.count {
                     if let Some(t) = tris[self.indices[(node.first + i ) as usize - self.offset] as usize].closest_hit(ro, rd) {
                         if t < best_t {
@@ -1097,10 +1091,7 @@ impl Bvh {
         stack.push(root);
         let mut best_t = f32::MAX;
         let mut best_i = -1;
-        let mut node_count = 0;
-        let mut tri_count = 0;
         while !stack.is_empty() {
-            node_count += 1;
             let node = nodes[stack.pop().unwrap() as usize];
 
             let aabb_t = node.aabb.closest_hit(ro, rd);
@@ -1111,7 +1102,6 @@ impl Bvh {
 
             if node.count > 0 {
                 // leaf node
-                tri_count += node.count;
                 for i in 0..node.count {
                     if let Some(t) = tris[(node.first + i ) as usize].closest_hit(ro, rd) {
                         if t < best_t {

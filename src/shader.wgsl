@@ -146,13 +146,6 @@ fn sample_texture(tex: GpuTextureRef, tc: vec2f) -> vec4f {
         return dummy_texture(tc);
     }
 
-    // // visualize texture IDs
-    // let backup = seed;
-    // seed = tc.size;
-    // let col = rand_color();
-    // seed = backup;
-    // return vec4f(col.r, col.g, col.b, 1.0);
-
     let size = tc_size(tex);
     let texel_pos = vec2u(fract(tc) * vec2f(size));
     let texel = texture_data[tex.offset + texel_pos.y * size.x + texel_pos.x];
@@ -694,8 +687,10 @@ fn sample_env_map(dir: vec3f) -> vec4f {
 }
 
 fn sky(dir: vec3f) -> vec3f {
+    // return vec3f(1);
     let horizon = vec3f(1.0 - SUN_COL);
     return sample_env_map(dir).rgb * 1.0;
+
     // return mix(horizon, SUN_COL,pow(max(dot(dir, TO_SUN_DIR), 0.0), 3.0)) * 1.00;
     // return to_linear(dir * 0.5 + 0.5);
     // return vec3f(1.0);
@@ -762,7 +757,8 @@ fn camera_ray(pixel: vec2u) -> Ray {
     // let m = rand();
     // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
     // pixel_pos += up             * sin(a) * pow(m, 150.0);
-    let aperture_radius = 0.025;
+//MARK: Aperture
+    let aperture_radius = 0.0025;
     ray.dir  = normalize(pixel_pos - ray.origin);
 
     let aperture = aperture_radius * rand_disk();
@@ -777,8 +773,14 @@ fn camera_ray(pixel: vec2u) -> Ray {
 
     return ray;
 }
-
-fn sample_lambert(ray: ptr<function, Ray>, normal: vec3f) {
+fn project_to_hemisphere(dir: vec3f, normal: vec3f) -> vec3f {
+    if dot(dir, normal) < 0.0 {
+        return normalize(dir - dot(dir, normal) * normal);
+    } else {
+        return dir;
+    }
+}
+fn sample_lambert(ray: ptr<function, Ray>, hit: Hit, normal: vec3f) {
     // from raytracing in one weekend
     (*ray).dir = normalize(normal + rand_sphere());
     (*ray).idir = vec3f(1.0) / (*ray).dir;
@@ -788,23 +790,68 @@ fn eval_lambert(to_light: vec3f, normal:  vec3f) -> f32 {
     return max(dot(to_light, normal), 0.0) / pi;
 }
 
-fn fresnel_schlick(normal: vec3f, view: vec3f, f0: vec3f) -> vec3f {
+// from https://schuttejoe.github.io/post/ggximportancesamplingpart2/
+fn eval_ggx_smith_masking(o_tangent: vec3f, a2: f32) -> f32 {
+    let dotNV = o_tangent.z;
+    let denomC = sqrt(a2 + (1.0 - a2) * dotNV * dotNV) + dotNV;
+
+    return 2.0 * dotNV / denomC;
+}
+
+// from https://schuttejoe.github.io/post/ggximportancesamplingpart2/
+fn eval_ggx_smith_shadowing_masking(i_tangent: vec3f, o_tangent: vec3f, a2: f32) -> f32 {
+    let dotNL = i_tangent.z;
+    let dotNV = o_tangent.z;
+
+    let denomA = dotNV * sqrt(a2 + (1.0 - a2) * dotNL * dotNL);
+    let denomB = dotNL * sqrt(a2 + (1.0 - a2) * dotNV * dotNV);
+
+    return 2.0 * dotNL * dotNV / (denomA + denomB);
+}
+
+// https://jcgt.org/published/0007/04/01/paper.pdf
+fn sample_ggx_smith_vndf(outgoing_tangent: vec3f, roughness: f32) -> vec3f {
+    let a = roughness * roughness;
+
+    // hemisphere scaled by roughness
+    let vh = normalize(vec3f(a, a, 1) * outgoing_tangent);
+
+    let len_2 = vh.x * vh.x + vh.y * vh.y;
+    let t1 = select(vec3f(1, 0, 0), vec3f(-vh.y, vh.x, 0) * inverseSqrt(len_2), len_2 > 0);
+    let t2 = cross(vh, t1);
+
+    // Use a robust method to find the first tangent vector
+    // let up = select(vec3f(0, 1, 0), vec3f(1, 0, 0), abs(vh.y) < 0.999);
+    // let t1 = normalize(cross(up, vh));
+    // let t2 = cross(vh, t1);
+
+    let r = sqrt(rand());
+    let phi = 2.0 * pi * rand();
+
+    let c1  = r * cos(phi);
+    var c2  = r * sin(phi);
+    let s = 0.5 * (1.0 + vh.z);
+
+    c2 = (1.0 - s) * sqrt(1.0 - c1 * c1) + s * c2;
+
+    // re-project back to hemisphere
+    let nh = c1 * t1 + c2 * t2 + sqrt(max(0.0, 1.0 - c1 * c1 - c2 * c2)) * vh;
+
+    let ne = normalize(vec3f(a * nh.x, a * nh.y, max(0.0, nh.z)));
+    return ne;
+}
+
+fn eval_fresnel_schlick(normal: vec3f, view: vec3f, f0: vec3f) -> vec3f {
     return f0 + (1.0 - f0) * pow(1.0 - dot(normal, view), 5.0);
 }
 
-fn project_to_hemisphere(dir: vec3f, normal: vec3f) -> vec3f {
-    if dot(dir, normal) < 0.0 {
-        return normalize(dir - dot(dir, normal) * normal);
-    } else {
-        return dir;
-    }
-}
 
+//MARK: Surface Hit
 fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
-    rand();
-
     (*ray).origin += (*ray).dir * hit.t;
     (*ray).origin += hit.normal * 0.001;
+
+    var debug_color = vec3f(0);
 
     var emissive = vec3f(0);
     var albedo   = vec3f(0);
@@ -822,6 +869,19 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
     } else {
         sample.normal = hit.normal;
     }
+
+    let tangent_z = sample.normal;
+    let up = select(vec3f(0, 1, 0), vec3f(0, 0, 1), abs(tangent_z.z) < 0.999);
+    let tangent_x = normalize(cross(up, tangent_z));
+    let tangent_y = normalize(cross(tangent_z, tangent_x));
+
+    let view_tangent = normalize(vec3f(
+        dot((*ray).dir, tangent_x),
+        dot((*ray).dir, tangent_y),
+        dot((*ray).dir, tangent_z)
+    ));
+
+    // debug_color = vec3f(-view_tangent.z);
 
     
     albedo = hit.material.albedo_factor.rgb;
@@ -845,42 +905,61 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
         roughness *= metallic_roughness.x;
     }
 
-    let metal = rand() < metallic_chance;
+    var metal = rand() < metallic_chance;
     var f0 = vec3f(0.04);
     if metal {
         f0 = albedo;
     }
 
-    let microfacet_normal = normalize(mix(sample.normal, rand_hemisphere(sample.normal), roughness * roughness * 0.8));
+    let normal_tangent = sample_ggx_smith_vndf(-view_tangent, roughness);
+    let outgoing_tangent = reflect(view_tangent, normal_tangent);
 
-    let fresnel = fresnel_schlick(microfacet_normal, -(*ray).dir, f0);
+   
+
+    // debug_color = vec3f(normal_tangent * 0.5 + 0.5);
+
+    let outgoing = normalize(
+        outgoing_tangent.x * tangent_x + 
+        outgoing_tangent.y * tangent_y + 
+        outgoing_tangent.z * tangent_z);
+
+    let fresnel = eval_fresnel_schlick(normal_tangent, -view_tangent, f0);
     
     var specular = rand() < fresnel.x;
-    
 
-    // emissive = sample.normal * 0.5 + 0.5;
-    // albedo *= 0.0;
-    // specular = false;
+    let a2 = roughness * roughness * roughness * roughness;
 
     *lighting += emissive * *throughput;
-    if !specular || metal {
-        *throughput *= albedo;
-    }
 
-    if specular || metal {
-        (*ray).dir = reflect((*ray).dir, microfacet_normal);
+    let incoming = (*ray).dir;
+    if outgoing_tangent.z < 0.0 {
+        *throughput *= 0.0;
+    } else if specular || metal {
+        (*ray).dir = outgoing;
         // (*ray).dir = normalize((*ray).dir + rand_hemisphere(sample.normal) * );
         // (*ray).dir *= sign11(dot(hit.normal, (*ray).dir));
-        (*ray).dir = project_to_hemisphere((*ray).dir, sample.normal);
+        //(*ray).dir = project_to_hemisphere((*ray).dir, sample.normal);
         (*ray).idir = 1.0 / (*ray).dir;
-    } else {
-        sample_lambert(ray, sample.normal);
-    }
-    
 
+        let g1 = eval_ggx_smith_masking(-view_tangent, a2); // importance sampled
+        let g2 = eval_ggx_smith_shadowing_masking(-view_tangent, outgoing_tangent, a2);
+        debug_color = vec3f(g2);
+        let t = fresnel * (g2 / g1);
+
+        // clamp fireflies
+        *throughput *= select(vec3f(0), t, all(t < vec3f(10000.0) ) && all(t > vec3f(0.0)));
+
+    } else {
+        *throughput *= albedo;
+        sample_lambert(ray, hit, sample.normal);
+    }
+
+    // *lighting = debug_color;
+    
 }
 
 fn handle_miss(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
+    // *lighting = vec3f(1);
     *lighting += *throughput * sky((*ray).dir);
 }
 @compute
@@ -893,6 +972,9 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
 
     // let samples = u32(screen[id.x + globals.res.x * id.y].a);
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
+
+    rand(); rand();
+
     const SHADOW_PROB = 0.5;
     var ray = camera_ray(id.xy);
     for (var i = 0; i < 8; i++) {
