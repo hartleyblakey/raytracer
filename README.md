@@ -79,3 +79,4 @@ wasm-bindgen --out-dir generated --web target/wasm32-unknown-unknown/release/ray
 ```
 `index.html` looks for the generated files in `raytracer/generated` by default
 
+If you have [just](https://github.com/casey/just), you can run `just web` from anywhere in `raytracer/` to accomplish the same thing.
