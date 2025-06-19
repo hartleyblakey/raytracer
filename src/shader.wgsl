@@ -682,7 +682,8 @@ fn rand_color() -> vec3f {
 }
 
 fn sample_env_map(dir: vec3f) -> vec4f {
-    let uv = vec2f(atan2(dir.y, dir.x) / (pi * 2.0), asin(-dir.z) / pi) + 0.5;
+    // correct for differences in blender env map export coordinate system
+    let uv = vec2f(atan2(dir.x, dir.y) / (pi * 2.0), asin(-dir.z) / pi) + 0.5;
     return textureLoad(env_map, vec2u(uv * vec2f(textureDimensions(env_map))), 0); 
 }
 
@@ -887,9 +888,6 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
     albedo = hit.material.albedo_factor.rgb;
     if hit.material.albedo.size != 0 {
         albedo *= to_linear(sample_texture(hit.material.albedo, sample.texcoords[hit.material.albedo_texcoord]).rgb);
-    } else {
-        // albedo *= dummy_texture(sample.texcoords[0]).rgb;
-        albedo *= vec3f(0.01, 0.02, 0.03);
     }
 
     emissive = hit.material.emissive_factor;
@@ -933,6 +931,7 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
 
     let incoming = (*ray).dir;
     if outgoing_tangent.z < 0.0 {
+        
         *throughput *= 0.0;
     } else if specular || metal {
         (*ray).dir = outgoing;

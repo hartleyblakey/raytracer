@@ -175,7 +175,7 @@ impl Context {
     }
 
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
-        let scene = Scene::from_path("resources/simple.glb", "resources/trail.hdr").await.unwrap();
+        let scene = Scene::from_path("resources/simple2.glb", "resources/trail.hdr").await.unwrap();
 
         println!("Bvh size : {} mb", (scene.bvh_node_data.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
