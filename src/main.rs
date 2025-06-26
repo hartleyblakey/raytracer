@@ -425,7 +425,7 @@ async fn fetch_bytes(path: &str) -> Option<Vec<u8>> {
     #[cfg(target_arch = "wasm32")] 
     {
 
-        let response: Response = JsFuture::from(web_sys::window().unwrap().fetch_with_str(path.as_str())).await.unwrap().dyn_into().unwrap();
+        let response: Response = JsFuture::from(web_sys::window().unwrap().fetch_with_str(path)).await.unwrap().dyn_into().unwrap();
         let array_buf = JsFuture::from(response.array_buffer().unwrap()).await.unwrap();
 
         let typed_arr = js_sys::Uint8Array::new(&array_buf);
