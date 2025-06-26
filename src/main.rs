@@ -355,7 +355,7 @@ impl Context {
 }
 
 fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
-    let surface_texture = gpu.surface.get_current_texture().expect("Failed to aquire next surface texture");
+    let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next surface texture");
     let surface_view = gpu.get_surface_view(&surface_texture);
 
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -424,19 +424,12 @@ async fn fetch_bytes(path: &str) -> Option<Vec<u8>> {
     
     #[cfg(target_arch = "wasm32")] 
     {
-        let mut web_path = String::from_str("../../").unwrap();
-        web_path.push_str(path);
-        // let opts = web_sys::RequestInit::new();
-        // opts.set_method("GET");
-        // opts.set_mode(web_sys::RequestMode::Cors);
-        // let request = web_sys::Request::new_with_str_and_init(web_path.as_str(), &opts).unwrap();
-        let response: Response = JsFuture::from(web_sys::window().unwrap().fetch_with_str(web_path.as_str())).await.unwrap().dyn_into().unwrap();
+
+        let response: Response = JsFuture::from(web_sys::window().unwrap().fetch_with_str(path.as_str())).await.unwrap().dyn_into().unwrap();
         let array_buf = JsFuture::from(response.array_buffer().unwrap()).await.unwrap();
-        // let response: ArrayBuffer = JsFuture::from(web_sys::window().unwrap().fetch_with_str(path)).await.unwrap().dyn_into().unwrap();
-        // assert!(wasm_bindgen::JsCast::is_instance_of::<ArrayBuffer>(&response));
+
         let typed_arr = js_sys::Uint8Array::new(&array_buf);
-        // web_sys::console::log_1(&response);
-        // web_sys::console::log(&js_sys::Array::from(&typed_arr));
+
         Some(typed_arr.to_vec())
     }
 }
