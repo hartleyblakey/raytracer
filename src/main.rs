@@ -39,8 +39,11 @@ struct FrameUniforms {
     node_count: u32,
     prim_count: u32,
     _pad: u32,
-
 }
+
+const SHADER_PATH: &'static str = "./src/shader.wgsl";
+const DEFAULT_MODEL_PATH: &'static str = "./resources/simple2.glb";
+const DEFAULT_ENV_PATH: &'static str = "./resources/trail.hdr";
 
 struct Context {
     screen_pipeline:            wgpu::RenderPipeline,
@@ -139,8 +142,6 @@ impl Context {
     fn check_recompile_shader(&mut self, gpu: &Gpu) -> bool {
     #[cfg(not(target_arch = "wasm32"))] 
     {
-        const SHADER_PATH: &str = "src/shader.wgsl";
-
         let metadata = std::fs::metadata(SHADER_PATH).unwrap();
         let last_write_time = metadata.modified().unwrap();
         
@@ -175,7 +176,7 @@ impl Context {
     }
 
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
-        let scene = Scene::from_path("resources/simple2.glb", "resources/trail.hdr").await.unwrap();
+        let scene = Scene::from_path(DEFAULT_MODEL_PATH, DEFAULT_ENV_PATH).await.unwrap();
 
         println!("Bvh size : {} mb", (scene.bvh_node_data.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
@@ -226,7 +227,7 @@ impl Context {
             source: wgpu::ShaderSource::Wgsl(
                 Cow::Borrowed(
                     std::str::from_utf8(
-                        fetch_bytes("src/shader.wgsl").await.unwrap().as_slice()
+                        fetch_bytes(SHADER_PATH).await.unwrap().as_slice()
                     ).expect("Shader is not valid UTF-8")
                 )
             ),
@@ -420,11 +421,10 @@ async fn fetch_bytes(path: &str) -> Option<Vec<u8>> {
         }
 
     }
-
     
     #[cfg(target_arch = "wasm32")] 
     {
-        let mut web_path = String::from_str("../").unwrap();
+        let mut web_path = String::from_str("../../").unwrap();
         web_path.push_str(path);
         // let opts = web_sys::RequestInit::new();
         // opts.set_method("GET");
@@ -594,7 +594,10 @@ async fn run() {
                             let ctx_clone = Arc::clone(&ctx);
                             spawn_future(async move {
                                 if let Ok(mut ctx_guard) = ctx_clone.lock() {
-                                    ctx_guard.try_change_scene(path_string.as_str(), "resources/trail.hdr").await;
+                                    if is_mesh {
+                                        ctx_guard.try_change_scene(path_string.as_str(), DEFAULT_ENV_PATH).await;
+                                    }
+                                    
                                 }
                             });
 
@@ -614,7 +617,7 @@ async fn run() {
                                         spawn_future(async move {
                                             if let Ok(mut ctx_guard) = ctx_clone.lock() {
                                                 let file = rfd::AsyncFileDialog::new().set_title("Pick a gltf (or glb) file to render").pick_file().await.unwrap();
-                                                ctx_guard.try_change_scene_bytes(&file.read().await, "resources/trail.hdr").await
+                                                ctx_guard.try_change_scene_bytes(&file.read().await, DEFAULT_ENV_PATH).await
                                             }
                                         });
                                             
