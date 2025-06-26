@@ -5,7 +5,7 @@ list:
 # compile to wasm and generate js bindings
 web:
     cargo build --target wasm32-unknown-unknown --release
-    wasm-bindgen --out-dir generated --web target/wasm32-unknown-unknown/release/raytracer.wasm
+    wasm-bindgen --out-dir site/build --web target/wasm32-unknown-unknown/release/raytracer.wasm
 
 # compile for just native
 native:
