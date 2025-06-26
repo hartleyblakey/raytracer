@@ -71,9 +71,9 @@ Once cargo is installed:
 ```bash
 cd raytracer
 
-cargo build --target wasm32-unknown-unknown --release
-
-wasm-bindgen --out-dir generated --web target/wasm32-unknown-unknown/release/raytracer.wasm
+  cargo build --target wasm32-unknown-unknown --release
+  
+  wasm-bindgen --out-dir site/build --web target/wasm32-unknown-unknown/release/raytracer.wasm
 ```
 `index.html` looks for the generated files in `raytracer/site/build` by default
 
