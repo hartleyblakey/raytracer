@@ -402,12 +402,19 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     }
 
     ctx.frame_uniforms.reject_hist = 0;
-
+    
     gpu.queue.submit(Some(encoder.finish()));
     surface_texture.present();
 }
 
-/// Fetch the bytes of a file
+enum FetchError {
+    IoError (std::io::Error),
+
+    
+}
+
+
+/// Fetch the bytes of a file. Returns None if an error occurred
 /// 
 /// # Panics
 /// when targetting WASM, panics if the file path is not found
@@ -424,9 +431,17 @@ async fn fetch_bytes(path: &str) -> Option<Vec<u8>> {
     
     #[cfg(target_arch = "wasm32")] 
     {
+        let Ok(js_future) = JsFuture::from(web_sys::window()?.fetch_with_str(path)).await 
+            else {return None};
 
-        let response: Response = JsFuture::from(web_sys::window().unwrap().fetch_with_str(path)).await.unwrap().dyn_into().unwrap();
-        let array_buf = JsFuture::from(response.array_buffer().unwrap()).await.unwrap();
+        let Ok(response) = js_future.dyn_into::<Response>()
+            else {return None};
+
+        let Ok(array_buf) = response.array_buffer()
+            else {return None};
+
+        let Ok(array_buf) = JsFuture::from(array_buf).await 
+            else {return None};
 
         let typed_arr = js_sys::Uint8Array::new(&array_buf);
 

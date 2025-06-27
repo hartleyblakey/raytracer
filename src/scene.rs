@@ -15,7 +15,7 @@ pub struct PointLight {
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct DirectionalLight {
+pub struct GpuDirectionalLight {
     direction: Vec4,
     intensity: Vec4,
 }
@@ -61,7 +61,7 @@ impl MatrixStack {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuSceneUniform {
     point_lights: [PointLight; 12],
-    directional_lights: [DirectionalLight; 4],
+    directional_lights: [GpuDirectionalLight; 4],
     pub camera: GpuCamera,
     pub tri_count: u32,
     pub num_point_lights: u32,
@@ -111,36 +111,13 @@ pub struct GpuVertexExt {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct TriExt {
+pub struct GpuTriExt {
     vertices: [GpuVertexExt; 3]
 }
 
-
-// pub struct Ray {
-//     origin: Vec3,
-//     dir: Vec3,
-//     idir: Vec3,
-// }
-
-// impl Ray {
-//     fn default() -> Ray {
-//         return Ray {
-//             origin: vec3(0.0, 0.0, 0.0),
-//             dir: vec3(1.0, f32::MIN, f32::MIN),
-//             idir: vec3(1.0, f32::MAX, f32::MAX)
-//         }
-//     }
-
-//     fn point(&mut self, dir: Vec3) {
-//         self.dir = dir;
-//         self.idir = vec3(1.0, 1.0, 1.0) / self.dir;
-//     }
-// }
-
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Material {
+pub struct GpuMaterial {
     albedo:             GpuTextureRef,
     emissive:           GpuTextureRef,
     normal:             GpuTextureRef,
@@ -164,7 +141,7 @@ pub struct Material {
 }
 
 
-impl Material {
+impl GpuMaterial {
     
     fn pack_alpha_settings(alpha_mode: gltf::material::AlphaMode, cutoff: f32) -> u32 {
         let mode = match alpha_mode {
@@ -179,16 +156,16 @@ impl Material {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Primitive {
+pub struct GpuPrimitive {
     transform:      Mat4,
     inv_transform:  Mat4,
-    material:       Material,
+    material:       GpuMaterial,
     bvh_idx:        u32,
     _pad:           [u32; 3],
 }
 
-impl Primitive {
-    fn new(transform: &Mat4, material: Material, bvh_idx: u32) -> Self {
+impl GpuPrimitive {
+    fn new(transform: &Mat4, material: GpuMaterial, bvh_idx: u32) -> Self {
         Self {
             transform: *transform,
             inv_transform: transform.as_dmat4().inverse().as_mat4(),
@@ -223,16 +200,11 @@ fn pack_vec3_octrahedral(mut n: Vec3) -> Vec2 {
 pub struct Scene {
 
     /// flat array of primitives that share a material
-    pub primitives:         Vec<Primitive>,
-
-    /// map from a mesh's json index to a map of json primitive indices to indices into my primitive array
-    /// 
-    /// resets on each file load
-    pub loaded_meshes:     HashMap<usize, HashMap<usize, usize>>,
+    pub primitives:         Vec<GpuPrimitive>,
 
     /// global buffer of triangle position data
     pub tris:               Vec<Tri>,
-    pub tri_exts:           Vec<TriExt>,
+    pub tri_exts:           Vec<GpuTriExt>,
 
     /// global buffer of rgba8 texture data
     pub texture_data:       Vec<u32>,
@@ -244,17 +216,20 @@ pub struct Scene {
     pub cameras:            Vec<Camera>,
 
     pub point_lights:       Vec<PointLight>,
-    pub directional_lights: Vec<DirectionalLight>,
+    pub directional_lights: Vec<GpuDirectionalLight>,
 
     /// rgba32f equirectangular environment map pixel data
     pub env_map_data:       Vec<[f32; 4]>,
 }
 
 
-
+type LoadedMeshCache = HashMap<usize, HashMap<usize, usize>>;
 
 impl Scene {
+    
+
     pub async fn add_gltf(&mut self, transform: &Mat4, path: &str) -> bool {
+        
         if let Some(bytes) = fetch_bytes(path).await {
             self.add_gltf_bytes(transform, bytes.as_slice());
             true
@@ -265,7 +240,8 @@ impl Scene {
     }
 
     pub fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) -> bool {
-        self.loaded_meshes.clear();
+        let mut cache = LoadedMeshCache::new();
+
         let (document, buffers, _) = match gltf::import_slice(bytes) {
             Ok(r) => r,
             Err(_) => return false,
@@ -276,7 +252,7 @@ impl Scene {
         ms.apply(&transform);
         for scene in document.scenes(){
             for node in scene.nodes() {
-                self.add_gltf_node(&buffers, node, &mut ms);
+                self.add_gltf_node(&buffers, node, &mut ms, &mut cache);
             }
         }
         true
@@ -339,7 +315,12 @@ impl Scene {
         }
     }
     
-    fn add_gltf_node(&mut self, buffers: &Vec<gltf::buffer::Data>, node: gltf::Node, ms: &mut MatrixStack) {
+    fn add_gltf_node(&mut self, 
+        buffers: &Vec<gltf::buffer::Data>, 
+        node: gltf::Node, 
+        ms: &mut MatrixStack, 
+        cache: &mut LoadedMeshCache) 
+    {
         ms.push();
         ms.apply(&Mat4::from_cols_array_2d(&node.transform().matrix()));
         let node_transform_mine = from_gltf_mat4(ms.top());
@@ -351,7 +332,7 @@ impl Scene {
             match light.kind() {
                 gltf::khr_lights_punctual::Kind::Directional => {
                     let dir = node_transform_mine.transform_vector3(FORWARD);
-                    let d = DirectionalLight { 
+                    let d = GpuDirectionalLight { 
                         direction: vec4(dir.x, dir.y, dir.z, 0.0), 
                         intensity: light.intensity() * vec4(light.color()[0], light.color()[1], light.color()[2], 0.0)
                     };
@@ -371,7 +352,7 @@ impl Scene {
         
         if let Some(mesh) = node.mesh() {
 
-            if let Some(loaded_primitives) = self.loaded_meshes.get(&mesh.index()) {
+            if let Some(loaded_primitives) = cache.get(&mesh.index()) {
                 for primitive in mesh.primitives() {
 
                     // if the primitive was already loaded, copy it and change the transforms
@@ -428,28 +409,9 @@ impl Scene {
                             found_texcoords.insert(id.clone(), texcoords);
                         };
 
-                        // let mut try_load_texture = |opt_tex : Option<(gltf::texture::Texture, u32)>| {
-                        //     let mut tex_ref = GpuTextureRef::default();
-                        //     let mut texcoord_id = 0;
-                        //     if let Some(tex) = opt_tex {
-                        //         tex_ref = self.add_gltf_texture(&tex.0, buffers);
-                        //         texcoord_id = tex.1;
-                        //     }
-                            
-                        //     //  base color texcoords
-                        //     let texcoords = reader.read_tex_coords(texcoord_id);
-                        //     let texcoords: Vec<Vec2> = if texcoords.is_some() {
-                        //         texcoords.unwrap().into_f32().map(|uv| Vec2::from_slice(&uv)).collect()
-                        //     } else {
-                        //         Vec::new()
-                        //     };
+                        let mut material = GpuMaterial::default();
 
-                        //     (tex_ref, texcoords, texcoord_id)
-                        // };
-
-                        let mut material = Material::default();
-
-                        material.alpha_settings = Material::pack_alpha_settings(
+                        material.alpha_settings = GpuMaterial::pack_alpha_settings(
                             primitive.material().alpha_mode(), 
                             primitive.material().alpha_cutoff().unwrap_or(0.5)
                         );
@@ -517,7 +479,7 @@ impl Scene {
                             // indexed mesh
                             let mut indices = indices.into_u32();
                             while let (Some(idx_0), Some(idx_1), Some(idx_2)) = (indices.next(), indices.next(), indices.next()) {
-                                let mut ext = TriExt::default();
+                                let mut ext = GpuTriExt::default();
 
                                 if !colors.is_empty() {
                                     ext.vertices[0].color = colors[idx_0 as usize];
@@ -564,7 +526,7 @@ impl Scene {
 
                         // add this primitive to the scene
                         self.primitives.push(
-                            Primitive::new(&node_transform_mine, material, bvh_root)
+                            GpuPrimitive::new(&node_transform_mine, material, bvh_root)
                         );
 
                         println!("Adding primitive with {} triangles, bvh root at index {}", self.tris.len() - first_new_tri, bvh_root);
@@ -581,7 +543,7 @@ impl Scene {
                 }
 
                 // mark this mesh index as already loaded, keeping a reference to the loaded primitives
-                self.loaded_meshes.insert(
+                cache.insert(
                     mesh.index(),
                     loaded_primitives
                 );
@@ -589,7 +551,7 @@ impl Scene {
         }
 
         for child in node.children() {
-            self.add_gltf_node(buffers, child, ms);
+            self.add_gltf_node(buffers, child, ms, cache);
         }
 
         ms.pop();
@@ -615,7 +577,7 @@ impl Scene {
 
     pub fn to_gpu(&self) -> GpuSceneUniform {
         let mut point_lights = [PointLight::default(); 12];
-        let mut directional_lights = [DirectionalLight::default(); 4];
+        let mut directional_lights = [GpuDirectionalLight::default(); 4];
 
         for i in 0..self.point_lights.len().min(point_lights.len()) {
             point_lights[i] = self.point_lights[i];
@@ -897,12 +859,12 @@ impl Bvh {
     }
 
     /// remove the layer of indirection used to build the BVH
-    pub fn flatten_triangles(&mut self, tris: &mut [Tri], tri_exts: &mut [TriExt]) {
+    pub fn flatten_triangles(&mut self, tris: &mut [Tri], tri_exts: &mut [GpuTriExt]) {
         let mut tris_new: Vec<Tri>    = Vec::new();
-        let mut exts_new: Vec<TriExt> = Vec::new();
+        let mut exts_new: Vec<GpuTriExt> = Vec::new();
 
         tris_new.resize(self.size, Tri::new(vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0)));
-        exts_new.resize(self.size, TriExt::default());
+        exts_new.resize(self.size, GpuTriExt::default());
 
         for i in 0..self.size {
             tris_new[i] = tris[self.indices[i] as usize];
