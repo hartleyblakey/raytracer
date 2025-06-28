@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use glam::{uvec2, vec2, vec3, vec4, IVec2, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::GenericImageView;
 
 use crate::{fetch_bytes, input::*};
@@ -196,8 +196,9 @@ fn pack_vec3_octrahedral(mut n: Vec3) -> Vec2 {
     return n.xy() * 0.5 + 0.5
 }
 
+
 #[derive(Default)]
-pub struct Scene {
+pub struct RenderScene {
 
     /// flat array of primitives that share a material
     pub primitives:         Vec<GpuPrimitive>,
@@ -225,7 +226,7 @@ pub struct Scene {
 
 type LoadedMeshCache = HashMap<usize, HashMap<usize, usize>>;
 
-impl Scene {
+impl RenderScene {
     
 
     pub async fn add_gltf(&mut self, transform: &Mat4, path: &str) -> bool {
@@ -637,7 +638,7 @@ impl Scene {
         }
     }
 
-    pub async fn from_path(mesh_path: &str, env_map_path: &str) -> Option<Scene> {
+    pub async fn from_path(mesh_path: &str, env_map_path: &str) -> Option<RenderScene> {
         if let Some(mesh_bytes) = fetch_bytes(mesh_path).await {
             Self::from_bytes(&mesh_bytes, env_map_path).await
         } else {
@@ -646,9 +647,9 @@ impl Scene {
         
     }
     
-    pub async fn from_bytes(mesh_bytes: &[u8], env_map_path: &str) -> Option<Scene> {
+    pub async fn from_bytes(mesh_bytes: &[u8], env_map_path: &str) -> Option<RenderScene> {
         println!("building scene");
-        let mut scene = Scene::default();
+        let mut scene = RenderScene::default();
         let mut ms = MatrixStack::new();
     
         scene.add_gltf_bytes(&Mat4::IDENTITY, mesh_bytes);

@@ -72,7 +72,7 @@ struct Context {
 
     resources:                  ResourceManager,
 
-    scene:                      Scene,
+    scene:                      RenderScene,
 
     should_reupload:            bool,
 }
@@ -176,7 +176,7 @@ impl Context {
     }
 
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
-        let scene = Scene::from_path(DEFAULT_MODEL_PATH, DEFAULT_ENV_PATH).await.unwrap();
+        let scene = RenderScene::from_path(DEFAULT_MODEL_PATH, DEFAULT_ENV_PATH).await.unwrap();
 
         println!("Bvh size : {} mb", (scene.bvh_node_data.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
@@ -310,7 +310,7 @@ impl Context {
 
     async fn try_change_scene_bytes(&mut self, mesh_bytes: &[u8], env_map_path: &str) {
         println!("Attempting to change scene");
-        if let Some(scene) = Scene::from_bytes(mesh_bytes, env_map_path).await {
+        if let Some(scene) = RenderScene::from_bytes(mesh_bytes, env_map_path).await {
             self.scene = scene;
             self.frame_uniforms.scene = self.scene.to_gpu();
             self.frame_uniforms.reject_hist = 1;
