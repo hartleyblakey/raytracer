@@ -1,6 +1,7 @@
 # WebGPU GLTF Raytracer
 
 ![screenshot](/screenshots/helmet.png?raw=true)
+![screenshot](/screenshots/web.png?raw=true)
 
 ### Features
 
@@ -16,17 +17,20 @@
 - Raytraces the bvh in a compute shader
   - Basic path tracing with HDRI environment
   - Khronos PBR Neutral Tone Mapper for easy comparison with other renderers
-  - Depth of field with hardcoded aperture size
+  - Depth of field
   - No texture samplers, all textures are nearest filtered
   - Two UV sets supported per GLTF primitive
 
-- Simple first person flycam
-  - WASD movement, scroll wheel zoom, LMB focus
+- Simple first person fly cam
   - Starts out the same as the first camera in the gltf file
+  - WASD movement, scroll wheel zoom, LMB focus
+  - Left Alt + Scroll to change aperture size
+  - Left Control + Scroll to change focus
+ 
 
 - Technically can be built for the web
   - Hardcoded resolution to 512x512, no extra effort put in beyond getting it to run
-  - [hosted here (requires webgpu)](https://hartleyblakey.github.io/raytracer)
+  - [hosted here (requires WebGPU, which currently means Chromium-based)](https://hartleyblakey.github.io/raytracer)
 
 
 #### Source Files
@@ -43,7 +47,7 @@
   - Initializes the raytracer and wgpu resources
 
 - `gpu.rs`:
-  - Contians helper functions and structs for opening the window and working with wgpu
+  - Contains helper functions and structs for opening the window and working with wgpu
 
 - `input.rs`:
   - Implements a simple camera controller

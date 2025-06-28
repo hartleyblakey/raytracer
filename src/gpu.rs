@@ -7,6 +7,10 @@ use bytemuck::bytes_of;
 use glam::UVec2;
 use image::GenericImageView;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsError;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsValue;
 use winit::{
     dpi::PhysicalSize, event_loop::EventLoop, window::Window
 };
@@ -30,35 +34,34 @@ and started on helper structs before I actually had a use for them
 ///////////////////////////////////////////////////////////////////////////////
 
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn new_window(event_loop: &EventLoop<()>, res: [u32; 2]) -> Result<winit::window::Window, winit::error::OsError> {
+    winit::window::WindowBuilder::new()
+        .with_inner_size(PhysicalSize::new(res[0], res[1]))
+        .build(&event_loop)
+}
 
-pub fn new_window(event_loop: &EventLoop<()>, res: [u32; 2]) -> winit::window::Window {
-    let mut builder = winit::window::WindowBuilder::new();
+#[cfg(target_arch = "wasm32")]
+pub fn new_window_in_canvas(event_loop: &EventLoop<()>, canvas_id: &'static str) -> Result<winit::window::Window, JsValue> {
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+    use wasm_bindgen::JsCast;
+    use winit::platform::web::WindowBuilderExtWebSys;
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        builder = builder
-            .with_inner_size(PhysicalSize::new(res[0], res[1]));
-    }
+    let canvas = web_sys::window()
+        .ok_or_else(|| JsValue::from_str("Could not get window object"))?
+        .document()
+        .ok_or_else(|| JsValue::from_str("Could not get document object"))?
+        .get_element_by_id(canvas_id)
+        .ok_or_else(|| JsValue::from_str(&format!("Could not find canvas element with id '{}'", canvas_id)))?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|e| JsValue::from_str(&format!("Could not cast element to HtmlCanvasElement: {:?}", e)))?;
 
-    #[cfg(target_arch = "wasm32")]
-    {
-        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-        use wasm_bindgen::JsCast;
-        use winit::platform::web::WindowBuilderExtWebSys;
-        let canvas = web_sys::window()
-            .unwrap()
-            .document()
-            .unwrap()
-            .get_element_by_id("canvas")
-            .unwrap()
-            .dyn_into::<web_sys::HtmlCanvasElement>()
-            .unwrap();
+    let window = winit::window::WindowBuilder::new()
+        .with_canvas(Some(canvas))
+        .build(&event_loop)
+        .map_err(|e| JsValue::from_str(&format!("Error building window: {:?}", e)))?;
 
-        builder = builder.with_canvas(Some(canvas));
-    }
-
-
-    builder.build(&event_loop).unwrap()
+    Ok(window)
 }
 
 /// Caches bind group layouts in probably the least efficient way possible
@@ -67,6 +70,7 @@ pub fn new_window(event_loop: &EventLoop<()>, res: [u32; 2]) -> winit::window::W
 pub struct ResourceManager {
     bind_group_layouts: HashMap<BindGroupLayoutEntries, wgpu::BindGroupLayout>,
 }
+
 impl ResourceManager {
     pub fn new() -> Self {
         Self {
@@ -525,14 +529,14 @@ impl<'a> Gpu<'a> {
     }
 
 
-    pub async fn new(window: &'a Window) -> Self {
+    pub async fn new(window: &'a Window) -> Option<Self> {
         let mut size = window.inner_size();
         size.width = size.width.max(1);
         size.height = size.height.max(1);
 
         let instance = wgpu::Instance::default();
 
-        let surface = instance.create_surface(window).unwrap();
+        let surface = instance.create_surface(window).ok()?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -600,14 +604,14 @@ impl<'a> Gpu<'a> {
 
         surface.configure(&device, &surface_config);
 
-        Self {
+        Some(Self {
             adapter,
             device,
             queue,
             surface,
             surface_config,
             window,
-        }
+        })
     }
 }
 

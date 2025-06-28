@@ -1,32 +1,70 @@
+<!DOCTYPE html>
+
 <html>
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <style>
-            canvas { width: 512px; height: 512px; }
-        </style>
+        <link rel="stylesheet" href="./site/style.css">
       </head>
 
   <body>
-    <canvas id="canvas"></canvas>
-    <script type="module">
-      import init from "./site/build/raytracer.js";
-      init();
-    </script>
-    <p>
-      Flycam Controls:
-      <ul>
-        
-        <li>Move: WASD</li>
-        <li>Look: Hold right click</li>
-        <li>Focus: Left click</li>
-        <li>Zoom: Scroll</li>
-      </ul>
-      Other Controls:
-      <ul>
-        
-        <li>Open gltf/glb file: O</li>
-      </ul>
-    </p>
+    <div id="wrapper">
+      <div id="header"></div>
+      <div id="content">
+        <div id="error-message-popup">
+          <h2>Error</h2>
+          <p>At the moment, only Chrome fully supports WebGPU. 
+          If this is not a Chromium-based browser, you can try opening this site in Chrome.
+          </p>
+          Raw Error Message:
+
+          <div id="error-message"></div>
+        </div>
+        <canvas id="canvas"></canvas>
+        <script type="module">
+          import init, {run_js} from "./site/build/raytracer.js";
+
+          if (!navigator.gpu) {
+            console.log("At the moment, only Chrome supports WebGPU");
+          } else {
+            try {
+             var wasm = await init();
+             var e = await run_js();
+             if (e) {
+              console.log("run_js returned: ", e);
+             }
+            } catch (error) {
+              console.log("Error in raytracer:", error);
+              document.getElementById("error-message-popup").style.display = 'block';
+              document.getElementById("error-message").textContent = error.toString();
+            }
+            
+          }
+
+
+          
+        </script>
+
+        <div id="controls">
+          <h2>Controls</h2>
+          Camera:
+          <ul>
+            
+            <li>Move: WASD</li>
+            <li>Look: Hold right click</li>
+            <li>Focus on the object in the center: Left click</li>
+            <li>Zoom: Scroll</li>
+            <li>Change camera aperture: Left Alt + Scroll</li>
+            <li>Change camera focus: Left Control + Scroll</li>
+          </ul>
+          File:
+          <ul>
+            <li>Open gltf/glb file: O</li>
+          </ul>
+          If the screen remains black, you can try using a Chromium-based browser
+        </div>
+      </div>
+      <div id="footer">@ Hartley Blakey 2025</div>
+    </div>
   </body>
 </html>

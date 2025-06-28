@@ -9,8 +9,9 @@ use pollster::FutureExt;
 #[cfg(target_arch = "wasm32")]
 use js_sys::ArrayBuffer;
 
+use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, JsError};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::{spawn_local, JsFuture};
@@ -454,13 +455,85 @@ where
     pollster::block_on(fut);
 }
 
-async fn run() {
-    let event_loop = EventLoop::new().unwrap();
+#[derive(Debug)]
+enum AppError {
+    #[cfg(not(target_arch = "wasm32"))]
+    PlatformError(winit::error::OsError),
+
+    #[cfg(target_arch = "wasm32")]
+    PlatformError(JsValue),
+
+    EventLoopError(winit::error::EventLoopError),
+    Text(String)
+
+
+}
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            AppError::PlatformError(err) => write!(f, "Platform error: {:?}", err),
+            AppError::EventLoopError(err) => write!(f, "Winit event loop error: {}", err),
+            AppError::Text(t) => write!(f, "Text error message: {}", t),
+        }
+    }
+}
+
+impl std::error::Error for AppError {}
+
+#[cfg(target_arch = "wasm32")]
+impl From<AppError> for JsValue {
+    fn from(error: AppError) -> JsValue {
+        use wasm_bindgen::JsError;
+        JsError::new(&error.to_string()).into()
+    }
+}
+
+impl From<winit::error::EventLoopError> for AppError {
+    fn from(value: winit::error::EventLoopError) -> Self {
+        Self::EventLoopError(value)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<winit::error::OsError> for AppError {
+    fn from(value: winit::error::OsError) -> Self {
+        Self::PlatformError(value)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<JsValue> for AppError {
+    fn from(value: JsValue) -> Self {
+        Self::PlatformError(value)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub async fn run_js() -> Result<(), JsValue> {
+    console_log::init().expect("could not initialize logger");
+    match run().await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn run() -> Result<(), AppError> {
+    let event_loop = EventLoop::new()?;
 
     // default size
-    let window = new_window(&event_loop, [512, 512]);
 
-    let mut gpu = Gpu::new(&window).await;
+    #[cfg(target_arch = "wasm32")]
+    let window = new_window_in_canvas(&event_loop, "canvas")?;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let window = new_window(&event_loop, [512, 512])?;
+
+    let mut gpu = match Gpu::new(&window).await {
+        Some(gpu) => gpu,
+        None => return Err(AppError::Text("Failed to create GPU".to_owned()))
+    };
 
     let ctx = Arc::new(Mutex::new(Context::init(&gpu).await));
 
@@ -638,8 +711,8 @@ async fn run() {
             _ => (),
         }
 
-    })
-    .unwrap();
+    })?;
+    Ok(())
 }
 
 pub fn main() {
@@ -649,9 +722,4 @@ pub fn main() {
             pollster::block_on(run())
         };
         
-        #[cfg(target_arch = "wasm32")]
-        {
-            console_log::init().expect("could not initialize logger");
-            wasm_bindgen_futures::spawn_local(run());
-        };
 }
