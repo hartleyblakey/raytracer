@@ -1,19 +1,32 @@
-use std::{borrow::Cow, collections::HashSet, f32::consts::PI, mem::swap, str::FromStr, sync::{Arc, Mutex}};
+
+
+
+
+use std::{borrow::Cow, collections::HashSet, sync::{Arc, Mutex}};
 
 use pollster::FutureExt;
 
+#[cfg(target_arch = "wasm32")]
 use js_sys::ArrayBuffer;
-use rand::random;
+
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::{spawn_local, JsFuture};
+
+
+#[cfg(target_arch = "wasm32")]
 use web_sys::Response;
 
 
 use winit::{
-    dpi::PhysicalPosition, event::{DeviceEvent, ElementState, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode
+    dpi::PhysicalPosition, event::{DeviceEvent, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode
 };
 
-use glam::{uvec2, Mat4};
+
+
+use glam::uvec2;
 use web_time::{Instant, SystemTime};
 
 mod input;
@@ -172,6 +185,8 @@ impl Context {
         return true;
         
     }
+
+    #[cfg(target_arch = "wasm32")]
         false
     }
 
@@ -248,27 +263,6 @@ impl Context {
             gpu
         );
 
-        // gpu.queue.write_buffer(&triangles_ssbo.raw,         0, bytemuck::cast_slice(scene.tris.as_slice()));
-        // gpu.queue.write_buffer(&triangles_ext_ssbo.raw,     0, bytemuck::cast_slice(scene.tri_exts.as_slice()));
-        // gpu.queue.write_buffer(&bvh_ssbo.raw,               0, bytemuck::cast_slice(scene.bvh_node_data.as_slice()));
-        // gpu.queue.write_buffer(&texture_data_ssbo.raw,      0, bytemuck::cast_slice(scene.texture_data.as_slice()));
-        // gpu.queue.write_buffer(&primitive_data_ssbo.raw,    0, bytemuck::cast_slice(scene.primitives.as_slice()));
-
-        // gpu.queue.write_texture(
-        //     env_map_texture.raw.as_image_copy(), 
-        //     bytemuck::cast_slice(scene.env_map_data.as_slice()), 
-        //     wgpu::ImageDataLayout {
-        //         offset: 0,
-        //         bytes_per_row: Some(hdri_height * 2 * 4 * 4),
-        //         rows_per_image: None,
-        //     }, 
-        //     wgpu::Extent3d{
-        //         width: hdri_height * 2,
-        //         height: hdri_height,
-        //         depth_or_array_layers: 1,
-        //     },
-        // );
-
         let should_reupload = true;
 
         Context {
@@ -317,7 +311,8 @@ impl Context {
             self.frame_uniforms.node_count = self.scene.bvh_node_data.len() as u32;
             self.frame_uniforms.prim_count = self.scene.primitives.len() as u32;
 
-            self.scene.focus_camera(0);
+            // self.scene.focus_camera(0);
+            // self.scene.cameras[0].update(&mut InputState::default(), 1.0 / 60.0);
 
             self.should_reupload = true;
         } else {
@@ -337,7 +332,7 @@ impl Context {
         gpu.queue.write_texture(
             self.env_map_texture.as_image_copy(), 
             bytemuck::cast_slice(self.scene.env_map_data.as_slice()), 
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(self.env_map_texture.height() * 2 * 4 * 4),
                 rows_per_image: None,
@@ -407,17 +402,11 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     surface_texture.present();
 }
 
-enum FetchError {
-    IoError (std::io::Error),
-
-    
-}
-
 
 /// Fetch the bytes of a file. Returns None if an error occurred
 /// 
 /// # Panics
-/// when targetting WASM, panics if the file path is not found
+/// when targeting WASM, panics if the file path is not found
 async fn fetch_bytes(path: &str) -> Option<Vec<u8>> {
     #[cfg(not(target_arch = "wasm32"))] 
     {
@@ -473,7 +462,7 @@ async fn run() {
 
     let mut gpu = Gpu::new(&window).await;
 
-    let mut ctx = Arc::new(Mutex::new(Context::init(&gpu).await));
+    let ctx = Arc::new(Mutex::new(Context::init(&gpu).await));
 
     let mut input = InputState {
         keys: HashSet::new(),
@@ -486,9 +475,9 @@ async fn run() {
 
     let mut last_second = Instant::now();
     let mut last_frame  = Instant::now();
-    let mut this_frame  = Instant::now();
     let mut frames_in_second: u32 = 0;
     let mut last_cursor_pos = PhysicalPosition::new(0.0, 0.0);
+    let scale_factor = window.scale_factor();
 
     event_loop.run(
     move |event, target| {
@@ -500,7 +489,7 @@ async fn run() {
                 input.mouse_x += delta.0;
                 input.mouse_y += delta.1;
             },
-            Event::WindowEvent { window_id, event } => {
+            Event::WindowEvent { window_id: _, event } => {
                 match event {
                     WindowEvent::Resized(new_size) => {
                         // Reconfigure the surface with the new size
@@ -518,7 +507,7 @@ async fn run() {
                     }
 
                     WindowEvent::RedrawRequested => {
-                        this_frame = Instant::now();
+                        let this_frame = Instant::now();
                         frames_in_second += 1;
                         gpu.window.request_redraw();
                         let dt = (this_frame - last_frame).as_secs_f32();
@@ -545,8 +534,8 @@ async fn run() {
                         
                         last_frame = this_frame;
                     },
-                    WindowEvent::CursorMoved { device_id, position } => if !input.rmb {last_cursor_pos = position},
-                    WindowEvent::MouseInput { device_id, state, button } => {
+                    WindowEvent::CursorMoved { device_id: _, position } => if !input.rmb {last_cursor_pos = position},
+                    WindowEvent::MouseInput { device_id: _, state, button } => {
                         match button {
                             MouseButton::Left =>  {
                                 if let Ok(mut ctx_guard) = ctx.try_lock(){
@@ -563,23 +552,28 @@ async fn run() {
                         // and reset it back when released
                         if input.rmb {
                             gpu.window.set_cursor_visible(false);
-                            if gpu.window.set_cursor_grab(CursorGrabMode::Locked).is_err() {
-                                gpu.window.set_cursor_grab(CursorGrabMode::Confined);
-                            }
+                            gpu.window.set_cursor_grab(CursorGrabMode::Locked)
+                                .or_else(|_e| gpu.window.set_cursor_grab(CursorGrabMode::Confined))
+                                .or_else(|_e| gpu.window.set_cursor_grab(CursorGrabMode::None))
+                                .expect("Failed to set any cursor grab modes");
                         } else {
-                            gpu.window.set_cursor_position(last_cursor_pos);
+                            // ignored because it is non-essential
+                            let _ = gpu.window.set_cursor_position(last_cursor_pos);
                             gpu.window.set_cursor_visible(true);
-                            gpu.window.set_cursor_grab(CursorGrabMode::None);
+                            match gpu.window.set_cursor_grab(CursorGrabMode::None) {
+                                Ok(_) => (),
+                                Err(e) => panic!("Failed to let go of cursor: {e}"),
+                            }
 
                         }
 
                     }
-                    WindowEvent::MouseWheel { device_id, delta, phase } => {
+                    WindowEvent::MouseWheel { device_id: _, delta, phase: _ } => {
                         // hack: I have no idea how to keep a consistent sensitivity between these
                         //       two units. This works well enough for the devices I tested it on
                         match delta {
                             winit::event::MouseScrollDelta::LineDelta(_, y) => input.scroll += y as f64 / 2.0,
-                            winit::event::MouseScrollDelta::PixelDelta(physical_position) => input.scroll += physical_position.y / 128.0,
+                            winit::event::MouseScrollDelta::PixelDelta(physical_position) => input.scroll += physical_position.y / 128.0 / scale_factor,
                         }
                     },
                     WindowEvent::DroppedFile(path) => {
@@ -615,7 +609,7 @@ async fn run() {
                         
                     },
                     WindowEvent::CloseRequested => target.exit(),
-                    WindowEvent::KeyboardInput { device_id, event, is_synthetic } => {
+                    WindowEvent::KeyboardInput { device_id: _, event, is_synthetic: _ } => {
                         match event.physical_key {
                             PhysicalKey::Code(code) => {
                                 if event.state.is_pressed() {
@@ -647,18 +641,17 @@ async fn run() {
     })
     .unwrap();
 }
+
 pub fn main() {
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            #[cfg(not(target_arch = "wasm32"))]
             env_logger::init();
-            #[cfg(not(target_arch = "wasm32"))]
             pollster::block_on(run())
         };
         
+        #[cfg(target_arch = "wasm32")]
         {
-            #[cfg(target_arch = "wasm32")]
             console_log::init().expect("could not initialize logger");
-            #[cfg(target_arch = "wasm32")]
             wasm_bindgen_futures::spawn_local(run());
         };
 }

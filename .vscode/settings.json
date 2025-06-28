@@ -1,5 +1,28 @@
 {
     "cSpell.words": [
-        "torrence"
+        "Aabb",
+        "bmax",
+        "bmin",
+        "cpass",
+        "dmat",
+        "fovy",
+        "Luma",
+        "multisampled",
+        "multisampling",
+        "renderable",
+        "rmax",
+        "rmin",
+        "rpass",
+        "signum",
+        "Texel",
+        "tmax",
+        "tmin",
+        "torrence",
+        "tris",
+        "Unorm",
+        "uvec",
+        "workgroups",
+        "yfov",
+        "Zeroable"
     ]
 }

@@ -758,8 +758,8 @@ fn camera_ray(pixel: vec2u) -> Ray {
     // let m = rand();
     // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
     // pixel_pos += up             * sin(a) * pow(m, 150.0);
-//MARK: Aperture
-    let aperture_radius = 0.0025;
+
+    let aperture_radius = globals.scene.camera.aperture;
     ray.dir  = normalize(pixel_pos - ray.origin);
 
     let aperture = aperture_radius * rand_disk();

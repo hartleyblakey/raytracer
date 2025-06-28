@@ -8,6 +8,7 @@ pub const UP: Vec3 = vec3(0.0, 0.0, 1.0);
 pub const RIGHT: Vec3 = vec3(0.0, -1.0, 0.0);
 pub const YAW_PITCH_ROLL: glam::EulerRot = glam::EulerRot::ZYX;
 
+#[derive(Default)]
 pub struct InputState {
     pub keys: HashSet<PhysicalKey>,
     pub mouse_x: f64,
@@ -81,10 +82,6 @@ impl Camera {
         self.rot().mul_vec3(FORWARD)
     }
 
-    pub fn up(&self) -> Vec3 {
-        self.rot().mul_vec3(UP)
-    }
-
     pub fn right(&self) -> Vec3 {
         self.rot().mul_vec3(RIGHT)
     }
@@ -140,6 +137,12 @@ impl Camera {
         self.focus = self.focus.max(0.0);
     }
 
+    pub fn aperture_delta(&mut self, delta: f32) {
+        self.moved = true;
+        self.aperture += delta;
+        self.aperture = self.aperture.clamp(0.0, 1.0);
+    }
+
     pub fn focus(&mut self, focus: f32) {
         if self.focus != focus {
             self.moved = true;
@@ -149,11 +152,18 @@ impl Camera {
 
     pub fn update(&mut self, input: &mut InputState, dt: f32) {
         use KeyCode::*;
-        let s = if input.keys.contains(&PhysicalKey::Code(ControlLeft)) {
+
+        let ctrl = input.keys.contains(&PhysicalKey::Code(ControlLeft));
+        let alt = input.keys.contains(&PhysicalKey::Code(AltLeft));
+
+        let (ctrl, alt) = (ctrl && !alt, alt && !ctrl);
+
+        let s = if ctrl {
             0.1
         } else {
             1.0
         };
+
         for key in input.keys.iter() {
             if let PhysicalKey::Code(code) = key {
                 let forward = self.forward();
@@ -184,16 +194,16 @@ impl Camera {
         }
 
         if input.scroll != 0.0 {
-            if input.keys.contains(&PhysicalKey::Code(ControlLeft)) {
+            if ctrl {
                 self.focus_delta(input.scroll as f32);
-                
-                input.scroll = 0.0;
+            } else if alt {
+                self.aperture_delta(input.scroll as f32 / 100.0);
             } else {
                 self.zoom((input.scroll * 0.1) as f32);
-                input.scroll = 0.0;
             }
 
         }
+        input.scroll = 0.0;
 
         self.rmb_last = input.rmb;
         self.lmb_last = input.lmb;
@@ -212,7 +222,7 @@ impl Camera {
             moved: false,
             lmb_last: true,
             rmb_last: true,
-            aperture: 1.0,
+            aperture: 0.1,
             exposure: 1.0,
             bloom: 1.0,
             dispersion: 1.0,

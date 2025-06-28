@@ -1,28 +1,45 @@
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, hash::Hash, num::NonZero, rc::Rc, str::FromStr};
+// Because I hope to re-use some of this in other projects, dead code
+// TODO: move to separate library crate
+#![allow(dead_code)]
+
+use std::{collections::HashMap, hash::Hash, num::NonZero};
 use bytemuck::bytes_of;
 use glam::UVec2;
 use image::GenericImageView;
-use pollster::FutureExt;
-use wgpu::util::DeviceExt;
+
 use winit::{
-    dpi::{PhysicalSize, Size}, event::{Event, WindowEvent}, event_loop::EventLoop, window::Window
+    dpi::PhysicalSize, event_loop::EventLoop, window::Window
 };
+
+#[cfg(target_arch = "wasm32")]
+use pollster::FutureExt;
+
+#[cfg(target_arch = "wasm32")]
+use wgpu::util::DeviceExt;
+
+
 
 ///////////////////////////////////////////////////////////////////////////////
 /*
-This file contians the GPU struct and wrapper structs for some WGPU resources
-(and a handfull of helper functions for windowing)
+This file contains the GPU struct and wrapper structs for some WGPU resources
+(and a handful of helper functions for windowing)
 
-The wrappers were a dumb idea, I thought I would be using webgpu more for this
-and started trying to make helper structs before actually using it directly
+The wrappers were a bad idea, I thought I would be using wgpu more
+and started on helper structs before I actually had a use for them
 */
 ///////////////////////////////////////////////////////////////////////////////
 
 
 
 pub fn new_window(event_loop: &EventLoop<()>, res: [u32; 2]) -> winit::window::Window {
-    let mut builder = winit::window::WindowBuilder::new()
-        .with_inner_size(PhysicalSize::new(res[0], res[1]));
+    let mut builder = winit::window::WindowBuilder::new();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        builder = builder
+            .with_inner_size(PhysicalSize::new(res[0], res[1]));
+    }
+
     #[cfg(target_arch = "wasm32")]
     {
         std::panic::set_hook(Box::new(console_error_panic_hook::hook));
@@ -36,8 +53,11 @@ pub fn new_window(event_loop: &EventLoop<()>, res: [u32; 2]) -> winit::window::W
             .unwrap()
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .unwrap();
+
         builder = builder.with_canvas(Some(canvas));
     }
+
+
     builder.build(&event_loop).unwrap()
 }
 
@@ -96,7 +116,7 @@ impl Texture {
     }
 
     fn new_view(&mut self) -> &TextureView {
-        let mut s = String::new();
+        let s;
         let label = if self.label.is_some() {
             s = format!("View of {}", self.label.as_ref().unwrap());
             Some(s.as_str())

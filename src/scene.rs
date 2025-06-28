@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use glam::{uvec2, vec2, vec3, vec4, IVec2, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::GenericImageView;
 
 use crate::{fetch_bytes, input::*};
@@ -40,15 +40,6 @@ impl MatrixStack {
             self.stack.pop();
         }
     }
-    pub fn rotate_y(&mut self, rad: f32) {
-        self.apply(&Mat4::from_rotation_y(rad));
-    }
-    pub fn translate(&mut self, delta: Vec3) {
-        self.apply(&Mat4::from_translation(delta));
-    }
-    pub fn scale(&mut self, scale: Vec3) {
-        self.apply(&Mat4::from_scale(scale));
-    }
     pub fn apply(&mut self, t: &Mat4) {
         if self.stack.len() == 1 {
             self.push();
@@ -69,6 +60,10 @@ pub struct GpuSceneUniform {
     pub _pad: u32,
 }
 
+
+/// A reference to a span of pixel data on the GPU
+/// 
+/// Special cased for zero size, in which case offset is a transmuted f32 literal
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTextureRef {
@@ -85,18 +80,12 @@ impl GpuTextureRef {
         }
     }
 
-    fn new_literal(val: f32) -> Self {
-        Self {
-            offset: bytemuck::cast(val),
-            size: 0,
-        }
-    }
-
     fn size(&self) -> UVec2 {
         uvec2(self.size >> 16, self.size & 0xFFFF)
     }
 }
 
+// TODO: make this dynamic based on loaded mesh
 const GPU_TEXCOORD_COUNT: usize = 2;
 
 #[repr(C)]
@@ -186,7 +175,7 @@ fn oct_wrap(v: Vec2) -> Vec2 {
 }
 
 // https://knarkowicz.wordpress.com/2014/04/16/octahedron-normal-vector-encoding/
-fn pack_vec3_octrahedral(mut n: Vec3) -> Vec2 {
+fn pack_vec3_octahedral(mut n: Vec3) -> Vec2 {
     n /= n.x.abs() + n.y.abs() + n.z.abs();
     if n.z < 0.0 {
         let wrap = oct_wrap(n.xy());
@@ -227,18 +216,6 @@ pub struct RenderScene {
 type LoadedMeshCache = HashMap<usize, HashMap<usize, usize>>;
 
 impl RenderScene {
-    
-
-    pub async fn add_gltf(&mut self, transform: &Mat4, path: &str) -> bool {
-        
-        if let Some(bytes) = fetch_bytes(path).await {
-            self.add_gltf_bytes(transform, bytes.as_slice());
-            true
-        } else {
-            false
-        }
-        
-    }
 
     pub fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) -> bool {
         let mut cache = LoadedMeshCache::new();
@@ -395,7 +372,7 @@ impl RenderScene {
                         let mut found_texcoords: HashMap<u32, Vec<Vec2>> = HashMap::new();
 
                         // if the primitive has a texcoord attribute with this id, load it into a vec
-                        // if we already loaded the texcoords of that ID, we dont need to do anything 
+                        // if we already loaded the texcoords of that ID, we don't need to do anything 
                         let mut try_load_texcoords = |id| {
                             if found_texcoords.contains_key(id) {
                                 return;
@@ -469,7 +446,7 @@ impl RenderScene {
                         let normals: Vec<Vec2> = if normals.is_some() {
                             normals.unwrap().map(
                                 |c| 
-                                pack_vec3_octrahedral(Self::from_gltf_vec3(vec3(c[0], c[1], c[2]).normalize()))
+                                pack_vec3_octahedral(Self::from_gltf_vec3(vec3(c[0], c[1], c[2]).normalize()))
                             ).collect()
                         } else {
                             Vec::new()
@@ -559,7 +536,7 @@ impl RenderScene {
     }
 
     /// loads the pixel data from a given equirectangular environment map into the scene
-    /// returns true if the file was found, false otherise
+    /// returns true if the file was found, false otherwise
     /// 
     /// panics if the file path is valid but not an image
     pub async fn set_equirectangular_env_map(&mut self, path: &str) -> bool {
@@ -650,7 +627,6 @@ impl RenderScene {
     pub async fn from_bytes(mesh_bytes: &[u8], env_map_path: &str) -> Option<RenderScene> {
         println!("building scene");
         let mut scene = RenderScene::default();
-        let mut ms = MatrixStack::new();
     
         scene.add_gltf_bytes(&Mat4::IDENTITY, mesh_bytes);
     
@@ -665,6 +641,9 @@ impl RenderScene {
         println!("Tri count: {}", scene.tris.len());
         println!("Tri size : {} mb", (scene.tris.len() * size_of::<Tri>()) / (1000 * 1000));
         println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
+
+        println!("Focused camera: {}", scene.focus_camera(0));
+
         Some(scene)
     }
     
@@ -1010,7 +989,8 @@ impl Bvh {
         self.subdivide(children_idx + 1, tris);
     }
 
-    pub fn closest_hit(&self, tris: &Vec<Tri>, ro: Vec3, rd: Vec3) -> Option<f32> {
+    // preserved for the eventual switch to rendering with indexed triangles on the GPU
+    pub fn _closest_hit(&self, tris: &Vec<Tri>, ro: Vec3, rd: Vec3) -> Option<f32> {
         let mut stack: Vec<u32> = Vec::new();
         stack.push(0);
         let mut best_t = f32::MAX;
