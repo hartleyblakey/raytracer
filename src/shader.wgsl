@@ -154,15 +154,23 @@ fn sample_texture(tex: GpuTextureRef, tc: vec2f) -> vec4f {
 
 struct GpuVertexExt {
     texcoords: array<vec2f, NUM_TEXCOORDS>,
-    normal: vec2f,
+    normal: u32,
+    tangent: u32,
     color: u32,
-    _pad: f32
+    t_sign: f32,
 }
 
 struct ExtSample {
     color: vec4f,
-    texcoords: array<vec2f, NUM_TEXCOORDS>,
+    albedo: vec4f,
     normal: vec3f,
+    emissive: vec3f,
+    metallic_roughness: vec3f,
+    smooth_normal: vec3f,
+    tangent: vec3f,
+    t_sign: f32,
+    bi_tangent: vec3f,
+    texcoords: array<vec2f, NUM_TEXCOORDS>,
 }
 
 fn unpack_rgba8(x: u32) -> vec4f {
@@ -175,7 +183,7 @@ fn unpack_rgba8(x: u32) -> vec4f {
 }
 
 // https://gamedev.stackexchange.com/questions/169508/octahedral-impostors-octahedral-mapping
-fn unpack_vec3_octrahedral(f_in: vec2f) -> vec3f {
+fn unpack_unit_octahedral(f_in: vec2f) -> vec3f {
     var f = f_in;
     f = f * 2.0 - 1.0;
  
@@ -189,6 +197,11 @@ fn unpack_vec3_octrahedral(f_in: vec2f) -> vec3f {
     return normalize(n);
 }
 
+fn unpack_unit_oct32(u_in: u32) -> vec3f {
+    let f = vec2f(f32(u_in >> 16u), f32(u_in & 0xFFFF)) / f32(0xFFFF);
+    return unpack_unit_octahedral(f);
+}
+
 
 struct TriExt {
     vertices: array<GpuVertexExt, 3>
@@ -198,17 +211,20 @@ fn zeroed_ext_sample() -> ExtSample {
     var s: ExtSample;
     s.color = vec4f(0.0, 0.0, 0.0, 0.0);
     s.normal = vec3f(0.0, 0.0, 0.0);
-    for (var i = 0; i < NUM_TEXCOORDS; i++) {
-        s.texcoords[i] = vec2f(0.0, 0.0);
-    }
+    s.albedo = vec4f(0.0, 0.0, 0.0, 0.0);
+    s.metallic_roughness = vec3f(0.0, 0.0, 0.0);
+    s.emissive = vec3f(0.0, 0.0, 0.0);
+    s.smooth_normal = vec3f(0);
+    s.tangent = vec3f(0);
+    s.bi_tangent = vec3f(0);
+    s.t_sign = 0.0;
+    s.texcoords[0] = vec2f(0);
+    s.texcoords[1] = vec2f(0);
     return s;
 }
 
 // red checkerboard for missing textures
 fn dummy_texture(uv: vec2f) -> vec4f {
-
-
-
     const scale = 256.0;
     let checker = f32((u32(uv.x * scale) + u32(uv.y * scale + 1.0)) % 2u);
     var col = mix(vec3f(0.8, 0.3, 0.3), vec3f(0.8, 0.3, 0.3) * 0.5, checker);
@@ -218,29 +234,53 @@ fn dummy_texture(uv: vec2f) -> vec4f {
     // return vec4f(checker, uv.x, uv.y, 1.0);
 }
 
+
+fn sign_of_uint(x: u32) -> f32 {
+    if x == 0 {
+        return -1.0;
+    } else {
+        return 1.0;
+    }
+}
+
 // barycentric interpolation of vertex attributes
 fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     var res = zeroed_ext_sample();
 
-    // cant loop: cannot index into value of type `vec3<f32>`
-
+    // cant loop: cannot index into value of type `vec3<f32>`, and no copy-paste macros in wgsl
     res.color += bary.x * unpack_rgba8((*tri).vertices[0].color);
     res.texcoords[0] += bary.x * (*tri).vertices[0].texcoords[0];
     res.texcoords[1] += bary.x * (*tri).vertices[0].texcoords[1];
-    res.normal += bary.x * unpack_vec3_octrahedral((*tri).vertices[0].normal);
+    res.smooth_normal += bary.x * unpack_unit_oct32((*tri).vertices[0].normal);
+    res.tangent += bary.x * unpack_unit_oct32((*tri).vertices[0].tangent);
+    res.t_sign += bary.x * (*tri).vertices[0].t_sign;
+    res.bi_tangent += bary.x * (*tri).vertices[0].t_sign * cross(
+        unpack_unit_oct32((*tri).vertices[0].normal), 
+        unpack_unit_oct32((*tri).vertices[0].tangent)
+    );
 
     res.color += bary.y * unpack_rgba8((*tri).vertices[1].color);
     res.texcoords[0] += bary.y * (*tri).vertices[1].texcoords[0];
     res.texcoords[1] += bary.y * (*tri).vertices[1].texcoords[1];
-    res.normal += bary.y * unpack_vec3_octrahedral((*tri).vertices[1].normal);
+    res.smooth_normal += bary.y * unpack_unit_oct32((*tri).vertices[1].normal);
+    res.tangent += bary.y * unpack_unit_oct32((*tri).vertices[1].tangent);
+    res.t_sign += bary.y * (*tri).vertices[1].t_sign;
+    res.bi_tangent += bary.y * (*tri).vertices[1].t_sign * cross(
+        unpack_unit_oct32((*tri).vertices[1].normal), 
+        unpack_unit_oct32((*tri).vertices[1].tangent)
+    );
 
     res.color += bary.z * unpack_rgba8((*tri).vertices[2].color);
     res.texcoords[0] += bary.z * (*tri).vertices[2].texcoords[0];
     res.texcoords[1] += bary.z * (*tri).vertices[2].texcoords[1];
-    res.normal += bary.z * unpack_vec3_octrahedral((*tri).vertices[2].normal);
+    res.smooth_normal += bary.z * unpack_unit_oct32((*tri).vertices[2].normal);
+    res.tangent += bary.z * unpack_unit_oct32((*tri).vertices[2].tangent);
+    res.t_sign += bary.z * (*tri).vertices[2].t_sign;
+    res.bi_tangent += bary.z * (*tri).vertices[2].t_sign * cross(
+        unpack_unit_oct32((*tri).vertices[2].normal), 
+        unpack_unit_oct32((*tri).vertices[2].tangent)
+    );
 
-    res.normal = normalize(res.normal);
-   
    //  res.tex0 = vec4f(tc0, 0.0, 1.0);
     return res;
 }
@@ -687,6 +727,26 @@ fn sample_env_map(dir: vec3f) -> vec4f {
     return textureLoad(env_map, vec2u(uv * vec2f(textureDimensions(env_map))), 0); 
 }
 
+/// branchlessONB from "Building an Orthonormal Basis, Revisited"
+///
+/// # Citation
+/// Tom Duff, James Burgess, Per Christensen, 
+/// Christophe Hery, Andrew Kensler, Max Liani, 
+/// and Ryusuke Villemin, Building an Orthonormal Basis, 
+/// Revisited, Journal of Computer Graphics Techniques (JCGT), 
+/// vol. 6, no. 1, 1-8, 2017
+/// Available online http://jcgt.org/published/0006/01/01/
+///
+fn orthonormal_basis(n: vec3f) -> mat3x3<f32> {
+    let sign = sign11(n.z);
+    let a = -1.0 / (sign + n.z);
+    let b = n.x * n.y * a;
+    let b1 = vec3f(1.0 + sign * n.x * n.x * a, sign * b, -sign * n.x);
+    let b2 = vec3f(b, sign + n.y * n.y * a, -n.y);
+    return mat3x3<f32>(b1, b2, n);
+}
+
+
 fn sky(dir: vec3f) -> vec3f {
     // return vec3f(1);
     let horizon = vec3f(1.0 - SUN_COL);
@@ -721,6 +781,11 @@ fn magma_quintic( _x: f32 ) -> vec3f {
 fn to_linear(srgb: vec3f) -> vec3f {
     // not correct but close enough for now
     return pow(srgb, vec3f(2.2));
+}
+
+fn to_linear_4(srgb: vec4f) -> vec4f {
+    // not correct but close enough for now
+    return pow(srgb, vec4f(2.2));
 }
 
 // false color visualizations, x will be clamped from 0..1
@@ -846,6 +911,64 @@ fn eval_fresnel_schlick(normal: vec3f, view: vec3f, f0: vec3f) -> vec3f {
     return f0 + (1.0 - f0) * pow(1.0 - dot(normal, view), 5.0);
 }
 
+fn compute_tangent(hit: Hit) {
+    var ext = tri_exts[hit.idx];
+
+}
+
+
+fn sample_hit(hit: Hit) -> ExtSample {
+    var ext = tri_exts[hit.idx];
+    var sample = tri_ext_interpolate(&ext, hit.bary);
+
+    // get smooth_normal into world space, if it exists
+    if length(sample.smooth_normal) > 0.001 {
+        sample.smooth_normal = transform_normal(normalize(sample.smooth_normal), primitives[hit.prim_idx].inv_transform);
+        if dot(sample.smooth_normal, hit.normal) < 0.0 {
+           sample.smooth_normal = -sample.smooth_normal;
+        }
+    } else {
+        sample.smooth_normal = hit.normal;
+    }
+    
+
+    sample.normal = sample.smooth_normal;
+    if (hit.material.normal.size != 0) {
+        let normal_tangent = (sample_texture(hit.material.normal, sample.texcoords[hit.material.normal_texcoord]).xyz * 2.0 - 1.0) * hit.material.normal_scale;
+
+        // this is what the guys website says, but it looks a little off to me
+        // let bt = sample.t_sign * cross(sample.smooth_normal, sample.tangent);
+        let bt = sample.bi_tangent;
+        sample.normal = normalize(
+            normal_tangent.x * sample.tangent + normal_tangent.y * bt + normal_tangent.z * sample.smooth_normal
+        );
+    }
+
+    sample.albedo = hit.material.albedo_factor;
+    if hit.material.albedo.size != 0 {
+        sample.albedo *= to_linear_4(sample_texture(hit.material.albedo, sample.texcoords[hit.material.albedo_texcoord]));
+    }
+
+    sample.emissive = hit.material.emissive_factor;
+    if hit.material.emissive.size != 0 {
+        sample.emissive *= to_linear(sample_texture(hit.material.emissive, sample.texcoords[hit.material.emissive_texcoord]).rgb);
+    }
+
+    sample.metallic_roughness = vec3f(0.0, hit.material.metallic_factor, hit.material.roughness_factor);
+    if hit.material.metallic_roughness.size != 0 {
+        sample.metallic_roughness *= sample_texture(hit.material.metallic_roughness, sample.texcoords[hit.material.metal_r_texcoord]).rgb;
+    }
+
+    return sample;
+}
+
+const DEBUG: bool = false;
+
+/// convert a direction in my coordinate space into the space used by the reference GLTF viewer
+fn compare_gltf_space(v: vec3f) -> vec3f {
+   return v.xzy * vec3f(-1.0, 1.0, 1.0);
+}
+
 
 //MARK: Surface Hit
 fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
@@ -857,33 +980,12 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
     var emissive = vec3f(0);
     var albedo   = vec3f(0);
 
-    // sample extra vertex data
-    var ext = tri_exts[hit.idx];
-    var sample = tri_ext_interpolate(&ext, hit.bary);
+    // sample normals, textures, and vertex colors
+    let sample = sample_hit(hit);
 
-    if length(sample.normal)  > 0.001 {
-        // sample.normal = normalize(sample.normal);
-        sample.normal = transform_normal(normalize(sample.normal), primitives[hit.prim_idx].inv_transform);
-        if dot(sample.normal, hit.normal) < 0.0 {
-            sample.normal = -sample.normal;
-        }
-    } else {
-        sample.normal = hit.normal;
-    }
+    let tbn = orthonormal_basis(sample.normal);
 
-    let tangent_z = sample.normal;
-    let up = select(vec3f(0, 1, 0), vec3f(0, 0, 1), abs(tangent_z.z) < 0.999);
-    let tangent_x = normalize(cross(up, tangent_z));
-    let tangent_y = normalize(cross(tangent_z, tangent_x));
-
-    let view_tangent = normalize(vec3f(
-        dot((*ray).dir, tangent_x),
-        dot((*ray).dir, tangent_y),
-        dot((*ray).dir, tangent_z)
-    ));
-
-    // debug_color = vec3f(-view_tangent.z);
-
+    let view_tangent = normalize((*ray).dir * tbn);
     
     albedo = hit.material.albedo_factor.rgb;
     if hit.material.albedo.size != 0 {
@@ -894,6 +996,10 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
     if hit.material.emissive.size != 0 {
         emissive *= to_linear(sample_texture(hit.material.emissive, sample.texcoords[hit.material.emissive_texcoord]).rgb);
     }
+
+    albedo = sample.albedo.rgb;
+    emissive = sample.emissive;
+
 
     var metallic_chance = hit.material.metallic_factor;
     var roughness = hit.material.roughness_factor;
@@ -912,14 +1018,10 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
     let normal_tangent = sample_ggx_smith_vndf(-view_tangent, roughness);
     let outgoing_tangent = reflect(view_tangent, normal_tangent);
 
-   
-
     // debug_color = vec3f(normal_tangent * 0.5 + 0.5);
+    debug_color = compare_gltf_space(sample.normal) * 0.5 + 0.5;
 
-    let outgoing = normalize(
-        outgoing_tangent.x * tangent_x + 
-        outgoing_tangent.y * tangent_y + 
-        outgoing_tangent.z * tangent_z);
+    let outgoing = tbn * outgoing_tangent;
 
     let fresnel = eval_fresnel_schlick(normal_tangent, -view_tangent, f0);
     
@@ -942,7 +1044,7 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
 
         let g1 = eval_ggx_smith_masking(-view_tangent, a2); // importance sampled
         let g2 = eval_ggx_smith_shadowing_masking(-view_tangent, outgoing_tangent, a2);
-        debug_color = vec3f(g2);
+        // debug_color = vec3f(g2);
         let t = fresnel * (g2 / g1);
 
         // clamp fireflies
@@ -953,7 +1055,10 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
         sample_lambert(ray, hit, sample.normal);
     }
 
-    // *lighting = debug_color;
+    if DEBUG {
+        *lighting = debug_color;
+    }
+    
     
 }
 
@@ -975,8 +1080,15 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     rand(); rand();
 
     const SHADOW_PROB = 0.5;
+
+    // const, but no way to select() in const expressions apparently
+    var NUM_BOUNCES = 8;
+    if DEBUG {
+        NUM_BOUNCES = 1;
+    }
     var ray = camera_ray(id.xy);
-    for (var i = 0; i < 8; i++) {
+
+    for (var i = 0; i < NUM_BOUNCES; i++) {
         let hit = trace(ray);
         
         // shade(hit, ray.dir, &throughput, &lighting);
@@ -987,35 +1099,22 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         } else {
             if rand() < SHADOW_PROB {
                 throughput /= SHADOW_PROB;
+                // TODO: basic light sampling
+                // ray.origin += hit.t * ray.dir;
+                // ray.origin += hit.normal * 0.001;
+                // ray.dir = normalize(TO_SUN_DIR + rand_sphere() * 0.01);
+                // ray.idir = vec3f(1.0) / ray.dir;
+                // let lambert = eval_lambert(TO_SUN_DIR, hit.normal);
+                
+                // if lambert > 0.0 && !trace_shadow(ray) {
+                //         lighting += throughput * SUN_COL * 12.0 * lambert;
+                // }
                 break;
             } else {
                 throughput /= (1.0 - SHADOW_PROB);
                 handle_surface_hit_brdf(&ray, hit, &throughput, &lighting); 
             }
         }
-
-        // ray.origin += ray.dir * hit.t + hit.normal * 0.0001;
-        // 
-        // if rand() < SHADOW_PROB {
-            
-        //     // sun shadow ray
-        //     throughput /= SHADOW_PROB;
-
-        //     ray.dir = normalize(TO_SUN_DIR + rand_sphere() * 0.01);
-        //     ray.idir = vec3f(1.0) / ray.dir;
-        //     let lambert = eval_lambert(TO_SUN_DIR, hit.normal);
-        //     if lambert > 0.0 && !trace_shadow(ray) {
-        //         lighting += throughput * SUN_COL * 12.0 * lambert;
-        //     }
-        //     break;
-        // } else {
-        //     // diffuse ray
-        //     throughput /= (1.0 - SHADOW_PROB);
-            
-
-
-        //     sample_lambert(&ray, hit);
-        // }
         
     }
 
@@ -1084,8 +1183,11 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     let uv = p.xy / vec2f(f32(globals.res.x), f32(globals.res.y));
 
     // divide total by number of samples
-    var col = scr.rgb / scr.a;
-    col = tonemap_pbr_neutral(col * EXPOSURE);
+    var col = scr.rgb / scr.a * EXPOSURE;
+
+    if !DEBUG {
+        col = tonemap_pbr_neutral(col);
+    }
     
     // col = to_linear(sample_texture(primitives[1].material.albedo, uv).rgb);
     // col = pow(col, vec3f(1.0 / 2.2));

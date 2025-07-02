@@ -20,6 +20,7 @@ pub struct GpuDirectionalLight {
     intensity: Vec4,
 }
 
+type UnitOct32 = u32;
 
 pub struct MatrixStack {
     stack: Vec<Mat4>,
@@ -92,9 +93,10 @@ const GPU_TEXCOORD_COUNT: usize = 2;
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuVertexExt {
     texcoords:   [Vec2; GPU_TEXCOORD_COUNT],
-    normal: Vec2, // XY components of normalized vector
+    normal: u32, // XY components of normalized vector
+    tangent: u32,
     color:  u32,
-    _pad:   f32
+    tangent_sign: f32,
 }
 
 
@@ -175,14 +177,19 @@ fn oct_wrap(v: Vec2) -> Vec2 {
 }
 
 // https://knarkowicz.wordpress.com/2014/04/16/octahedron-normal-vector-encoding/
-fn pack_vec3_octahedral(mut n: Vec3) -> Vec2 {
-    n /= n.x.abs() + n.y.abs() + n.z.abs();
-    if n.z < 0.0 {
-        let wrap = oct_wrap(n.xy());
-        n.x = wrap.x;
-        n.y = wrap.y;
+fn pack_vec3_octahedral(v: Vec3) -> Vec2 {
+    let mut o = v.xy();
+    o /= v.x.abs() + v.y.abs() + v.z.abs();
+    if v.z < 0.0 {
+        o = oct_wrap(o);
     }
-    return n.xy() * 0.5 + 0.5
+    return o * 0.5 + 0.5
+}
+
+
+fn pack_unit_oct32(v: Vec3) -> UnitOct32 {
+    let o = pack_vec3_octahedral(v);
+    (((o.x * u16::MAX as f32) as u32) << 16) | (o.y * u16::MAX as f32) as u32
 }
 
 
@@ -212,6 +219,52 @@ pub struct RenderScene {
     pub env_map_data:       Vec<[f32; 4]>,
 }
 
+// https://gamedev.stackexchange.com/questions/169508/octahedral-impostors-octahedral-mapping
+fn unpack_unit_octahedral(mut f: Vec2) -> Vec3 {
+    f = f * 2.0 - 1.0;
+ 
+    // https://twitter.com/Stubbesaurus/status/937994790553227264
+    let mut n = vec3(f.x, f.y, 1.0 - f.x.abs() - f.y.abs());
+    let t = (-n.z).clamp(0.0, 1.0);
+
+    n.x -= t * n.x.signum();
+    n.y -= t * n.y.signum();
+    // n.xy += n.xy >= 0.0 ? -t : t;
+    n.normalize()
+}
+
+fn unpack_unit_oct32(u_in: u32) -> Vec3 {
+    let f = vec2((u_in >> 16) as f32, (u_in & 0xFFFF) as f32) / (0xFFFF as f32);
+    unpack_unit_octahedral(f)
+}
+
+impl mikktspace_sys::MikkTSpaceInterface for RenderScene {
+    fn get_num_faces(&self) -> usize {
+        self.tris.len()
+    }
+
+    fn get_num_vertices_of_face(&self, face: usize) -> usize {
+        3
+    }
+
+    fn get_position(&self, face: usize, vert: usize) -> [f32; 3] {
+        self.tris[face].vertices[vert].xyz().to_array()
+    }
+
+    fn get_normal(&self, face: usize, vert: usize) -> [f32; 3] {
+        unpack_unit_oct32(self.tri_exts[face].vertices[vert].normal).to_array()
+    }
+
+    fn get_tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
+        self.tri_exts[face].vertices[vert].texcoords[0].to_array()
+    }
+
+    fn set_tspace_basic(&mut self, tangent: [f32; 3], sign: f32, face: usize, vert: usize) {
+        self.tri_exts[face].vertices[vert].tangent = pack_unit_oct32(Vec3::from_array(tangent));
+        self.tri_exts[face].vertices[vert].tangent_sign = sign;
+    }
+}
+
 
 type LoadedMeshCache = HashMap<usize, HashMap<usize, usize>>;
 
@@ -233,6 +286,7 @@ impl RenderScene {
                 self.add_gltf_node(&buffers, node, &mut ms, &mut cache);
             }
         }
+        mikktspace_sys::gen_tang_space_default(self);
         true
     }   
 
@@ -443,10 +497,20 @@ impl RenderScene {
                         };
 
                         let normals = reader.read_normals();
-                        let normals: Vec<Vec2> = if normals.is_some() {
+                        let normals: Vec<UnitOct32> = if normals.is_some() {
                             normals.unwrap().map(
                                 |c| 
-                                pack_vec3_octahedral(Self::from_gltf_vec3(vec3(c[0], c[1], c[2]).normalize()))
+                                pack_unit_oct32(Self::from_gltf_vec3(vec3(c[0], c[1], c[2]).normalize()))
+                            ).collect()
+                        } else {
+                            Vec::new()
+                        };
+
+                        let tangents = reader.read_tangents();
+                        let tangents: Vec<UnitOct32> = if tangents.is_some() {
+                            tangents.unwrap().map(
+                                |c| 
+                                pack_unit_oct32(Self::from_gltf_vec3(vec3(c[0], c[1], c[2]).normalize()))
                             ).collect()
                         } else {
                             Vec::new()
@@ -471,12 +535,22 @@ impl RenderScene {
                                     ext.vertices[2].normal = normals[idx_2 as usize];
                                 }
 
+                                if !tangents.is_empty() {
+                                    ext.vertices[0].tangent = tangents[idx_0 as usize];
+                                    ext.vertices[1].tangent = tangents[idx_1 as usize];
+                                    ext.vertices[2].tangent = tangents[idx_2 as usize];
+                                }
+
                                 for i in 0..GPU_TEXCOORD_COUNT {
                                     if let Some(tc) = found_texcoords.get(&(i as u32)) {
                                         ext.vertices[0].texcoords[i] = tc[idx_0 as usize];
                                         ext.vertices[1].texcoords[i] = tc[idx_1 as usize];
                                         ext.vertices[2].texcoords[i] = tc[idx_2 as usize];
                                     }
+                                }
+
+                                if found_texcoords.get(&(GPU_TEXCOORD_COUNT as u32)).is_some() {
+                                    eprintln!("Model has more texcoords than supported by GPU renderer ({GPU_TEXCOORD_COUNT})");
                                 }
 
                                 self.tris.push(Tri::new(positions[idx_0 as usize], positions[idx_1 as usize], positions[idx_2 as usize]));
@@ -643,7 +717,7 @@ impl RenderScene {
         println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
 
         println!("Focused camera: {}", scene.focus_camera(0));
-
+        mikktspace_sys::gen_tang_space_default(&mut scene);
         Some(scene)
     }
     
