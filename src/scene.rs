@@ -238,30 +238,30 @@ fn unpack_unit_oct32(u_in: u32) -> Vec3 {
     unpack_unit_octahedral(f)
 }
 
-impl mikktspace_sys::MikkTSpaceInterface for RenderScene {
-    fn get_num_faces(&self) -> usize {
+impl mikktspace::Geometry for RenderScene {
+    fn num_faces(&self) -> usize {
         self.tris.len()
     }
 
-    fn get_num_vertices_of_face(&self, face: usize) -> usize {
+    fn num_vertices_of_face(&self, face: usize) -> usize {
         3
     }
 
-    fn get_position(&self, face: usize, vert: usize) -> [f32; 3] {
+    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
         self.tris[face].vertices[vert].xyz().to_array()
     }
 
-    fn get_normal(&self, face: usize, vert: usize) -> [f32; 3] {
+    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
         unpack_unit_oct32(self.tri_exts[face].vertices[vert].normal).to_array()
     }
 
-    fn get_tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
+    fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
         self.tri_exts[face].vertices[vert].texcoords[0].to_array()
     }
 
-    fn set_tspace_basic(&mut self, tangent: [f32; 3], sign: f32, face: usize, vert: usize) {
-        self.tri_exts[face].vertices[vert].tangent = pack_unit_oct32(Vec3::from_array(tangent));
-        self.tri_exts[face].vertices[vert].tangent_sign = sign;
+    fn set_tangent_encoded(&mut self, tangent: [f32; 4], face: usize, vert: usize) {
+        self.tri_exts[face].vertices[vert].tangent = pack_unit_oct32(Vec3::from_array(*tangent.first_chunk().unwrap()));
+        self.tri_exts[face].vertices[vert].tangent_sign = tangent[3];
     }
 }
 
@@ -286,7 +286,7 @@ impl RenderScene {
                 self.add_gltf_node(&buffers, node, &mut ms, &mut cache);
             }
         }
-        mikktspace_sys::gen_tang_space_default(self);
+        mikktspace::generate_tangents(self);
         true
     }   
 
@@ -717,7 +717,7 @@ impl RenderScene {
         println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
 
         println!("Focused camera: {}", scene.focus_camera(0));
-        mikktspace_sys::gen_tang_space_default(&mut scene);
+        mikktspace::generate_tangents(&mut scene);
         Some(scene)
     }
     
