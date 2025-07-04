@@ -122,20 +122,8 @@ struct FrameUniforms {
     reject_hist:    u32,
     node_count:     u32,
     prim_count:     u32,
+    debug_mode:     u32,
 }
-
-// struct FrameUniforms {
-//     camera: Camera,
-//     res:    vec2u,
-//     frame:  u32,
-//     tri_count: u32,
-//     time:   f32,
-//     reject_hist: u32,
-//     num_point_lights: u32,
-//     num_directional_lights: u32,
-//     point_lights: array<PointLight, 12>,
-//     directional_lights: array<DirectionalLight, 4>,
-// }
 
 fn tc_size(tc: GpuTextureRef) -> vec2u {
     return vec2u(tc.size >> 16u, tc.size & 0xFFFFu);
@@ -147,9 +135,24 @@ fn sample_texture(tex: GpuTextureRef, tc: vec2f) -> vec4f {
     }
 
     let size = tc_size(tex);
+
+    let sub_pos = fract(fract(tc) * vec2f(size));
     let texel_pos = vec2u(fract(tc) * vec2f(size));
-    let texel = texture_data[tex.offset + texel_pos.y * size.x + texel_pos.x];
-    return unpack_rgba8(texel);
+
+    let x0 = clamp(texel_pos.x, 0u, size.x - 1u);
+    let x1 = clamp(texel_pos.x + 1u, 0u, size.x - 1u);
+    let y0 = clamp(texel_pos.y, 0u, size.y - 1u);
+    let y1 = clamp(texel_pos.y + 1u, 0u, size.y - 1u);
+
+    let ll = unpack_rgba8(texture_data[tex.offset + y0 * size.x + x0]);
+    let lr = unpack_rgba8(texture_data[tex.offset + y0 * size.x + x1]);
+    let ur = unpack_rgba8(texture_data[tex.offset + y1 * size.x + x1]);
+    let ul = unpack_rgba8(texture_data[tex.offset + y1 * size.x + x0]);
+
+    let u = mix(ul, ur, sub_pos.x);
+    let l = mix(ll, lr, sub_pos.x);
+
+    return mix(l, u, sub_pos.y);
 }
 
 struct GpuVertexExt {
@@ -166,10 +169,9 @@ struct ExtSample {
     normal: vec3f,
     emissive: vec3f,
     metallic_roughness: vec3f,
-    smooth_normal: vec3f,
+    vertex_normal: vec3f,
     tangent: vec3f,
     t_sign: f32,
-    bi_tangent: vec3f,
     texcoords: array<vec2f, NUM_TEXCOORDS>,
 }
 
@@ -214,9 +216,8 @@ fn zeroed_ext_sample() -> ExtSample {
     s.albedo = vec4f(0.0, 0.0, 0.0, 0.0);
     s.metallic_roughness = vec3f(0.0, 0.0, 0.0);
     s.emissive = vec3f(0.0, 0.0, 0.0);
-    s.smooth_normal = vec3f(0);
+    s.vertex_normal = vec3f(0);
     s.tangent = vec3f(0);
-    s.bi_tangent = vec3f(0);
     s.t_sign = 0.0;
     s.texcoords[0] = vec2f(0);
     s.texcoords[1] = vec2f(0);
@@ -230,7 +231,7 @@ fn dummy_texture(uv: vec2f) -> vec4f {
     var col = mix(vec3f(0.8, 0.3, 0.3), vec3f(0.8, 0.3, 0.3) * 0.5, checker);
     // col = vec3f(uv.x, uv.y, 0.0);
     // col = vec3f(checker) * 0.15 + 0.2;
-    return vec4f(col.r, col.g, col.b, 1.0);
+    return vec4f(col, 1.0);
     // return vec4f(checker, uv.x, uv.y, 1.0);
 }
 
@@ -251,37 +252,28 @@ fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     res.color += bary.x * unpack_rgba8((*tri).vertices[0].color);
     res.texcoords[0] += bary.x * (*tri).vertices[0].texcoords[0];
     res.texcoords[1] += bary.x * (*tri).vertices[0].texcoords[1];
-    res.smooth_normal += bary.x * unpack_unit_oct32((*tri).vertices[0].normal);
+    res.vertex_normal += bary.x * unpack_unit_oct32((*tri).vertices[0].normal);
     res.tangent += bary.x * unpack_unit_oct32((*tri).vertices[0].tangent);
     res.t_sign += bary.x * (*tri).vertices[0].t_sign;
-    res.bi_tangent += bary.x * (*tri).vertices[0].t_sign * cross(
-        unpack_unit_oct32((*tri).vertices[0].normal), 
-        unpack_unit_oct32((*tri).vertices[0].tangent)
-    );
 
     res.color += bary.y * unpack_rgba8((*tri).vertices[1].color);
     res.texcoords[0] += bary.y * (*tri).vertices[1].texcoords[0];
     res.texcoords[1] += bary.y * (*tri).vertices[1].texcoords[1];
-    res.smooth_normal += bary.y * unpack_unit_oct32((*tri).vertices[1].normal);
+    res.vertex_normal += bary.y * unpack_unit_oct32((*tri).vertices[1].normal);
     res.tangent += bary.y * unpack_unit_oct32((*tri).vertices[1].tangent);
     res.t_sign += bary.y * (*tri).vertices[1].t_sign;
-    res.bi_tangent += bary.y * (*tri).vertices[1].t_sign * cross(
-        unpack_unit_oct32((*tri).vertices[1].normal), 
-        unpack_unit_oct32((*tri).vertices[1].tangent)
-    );
 
     res.color += bary.z * unpack_rgba8((*tri).vertices[2].color);
     res.texcoords[0] += bary.z * (*tri).vertices[2].texcoords[0];
     res.texcoords[1] += bary.z * (*tri).vertices[2].texcoords[1];
-    res.smooth_normal += bary.z * unpack_unit_oct32((*tri).vertices[2].normal);
+    res.vertex_normal += bary.z * unpack_unit_oct32((*tri).vertices[2].normal);
     res.tangent += bary.z * unpack_unit_oct32((*tri).vertices[2].tangent);
     res.t_sign += bary.z * (*tri).vertices[2].t_sign;
-    res.bi_tangent += bary.z * (*tri).vertices[2].t_sign * cross(
-        unpack_unit_oct32((*tri).vertices[2].normal), 
-        unpack_unit_oct32((*tri).vertices[2].tangent)
-    );
 
-   //  res.tex0 = vec4f(tc0, 0.0, 1.0);
+
+    res.vertex_normal = normalize(res.vertex_normal);
+    res.tangent = normalize(res.tangent);
+
     return res;
 }
 
@@ -922,25 +914,30 @@ fn sample_hit(hit: Hit) -> ExtSample {
     var sample = tri_ext_interpolate(&ext, hit.bary);
 
     // get smooth_normal into world space, if it exists
-    if length(sample.smooth_normal) > 0.001 {
-        sample.smooth_normal = transform_normal(normalize(sample.smooth_normal), primitives[hit.prim_idx].inv_transform);
-        if dot(sample.smooth_normal, hit.normal) < 0.0 {
-           sample.smooth_normal = -sample.smooth_normal;
+    if length(sample.vertex_normal) > 0.001 {
+        sample.vertex_normal = transform_normal(normalize(sample.vertex_normal), primitives[hit.prim_idx].inv_transform);
+        if dot(sample.vertex_normal, hit.normal) < 0.0 {
+            // flip face if vertex normal pointing away from geometric normal
+           sample.vertex_normal = -sample.vertex_normal;
+           sample.tangent = -sample.tangent;
+           sample.t_sign *= -1.0;
         }
     } else {
-        sample.smooth_normal = hit.normal;
+        sample.vertex_normal = hit.normal;
     }
     
 
-    sample.normal = sample.smooth_normal;
+    sample.normal = sample.vertex_normal;
     if (hit.material.normal.size != 0) {
         let normal_tangent = (sample_texture(hit.material.normal, sample.texcoords[hit.material.normal_texcoord]).xyz * 2.0 - 1.0) * hit.material.normal_scale;
 
         // this is what the guys website says, but it looks a little off to me
-        // let bt = sample.t_sign * cross(sample.smooth_normal, sample.tangent);
-        let bt = sample.bi_tangent;
+        let bt = sample.t_sign * cross(sample.vertex_normal, sample.tangent);
+        // let bt = sample.bi_tangent;
+
+        // TODO: HACK: flipped y component of normal map as if to convert to a left-handed coordinate system
         sample.normal = normalize(
-            normal_tangent.x * sample.tangent + normal_tangent.y * bt + normal_tangent.z * sample.smooth_normal
+            normal_tangent.x * sample.tangent + -normal_tangent.y * bt + normal_tangent.z * sample.vertex_normal
         );
     }
 
@@ -962,7 +959,7 @@ fn sample_hit(hit: Hit) -> ExtSample {
     return sample;
 }
 
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 /// convert a direction in my coordinate space into the space used by the reference GLTF viewer
 fn compare_gltf_space(v: vec3f) -> vec3f {
@@ -1019,7 +1016,19 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
     let outgoing_tangent = reflect(view_tangent, normal_tangent);
 
     // debug_color = vec3f(normal_tangent * 0.5 + 0.5);
-    debug_color = compare_gltf_space(sample.normal) * 0.5 + 0.5;
+    if globals.debug_mode == 1 {
+        debug_color = albedo;
+    }
+    if globals.debug_mode == 2 {
+        debug_color = compare_gltf_space(sample.normal) * 0.5 + 0.5;
+    }
+    if globals.debug_mode == 4 {
+        debug_color = compare_gltf_space(sample.tangent) * 0.5 + 0.5;
+    }
+    if globals.debug_mode == 5 {
+        debug_color = clamp(vec3f(-sample.t_sign, sample.t_sign, 0.0), vec3f(0), vec3f(1));
+    }
+    
 
     let outgoing = tbn * outgoing_tangent;
 
@@ -1055,7 +1064,7 @@ fn handle_surface_hit_brdf(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<fu
         sample_lambert(ray, hit, sample.normal);
     }
 
-    if DEBUG {
+    if DEBUG && globals.debug_mode != 0 {
         *lighting = debug_color;
     }
     
@@ -1079,18 +1088,21 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
 
     rand(); rand();
 
-    const SHADOW_PROB = 0.5;
+    var SHADOW_PROB = 0.5;
 
     // const, but no way to select() in const expressions apparently
     var NUM_BOUNCES = 8;
-    if DEBUG {
+    if DEBUG && globals.debug_mode != 0 {
         NUM_BOUNCES = 1;
+        SHADOW_PROB = 0.0;
     }
+
+    
+
     var ray = camera_ray(id.xy);
 
     for (var i = 0; i < NUM_BOUNCES; i++) {
         let hit = trace(ray);
-        
         // shade(hit, ray.dir, &throughput, &lighting);
 
         if (hit.idx == -1) {
@@ -1118,13 +1130,21 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         
     }
 
+    if DEBUG {
+        if globals.debug_mode == 3 {
+            lighting = magma_quintic(debug / 128.0);
+        }
+    }
+
     if (debug < 0.0) {
         lighting = vec3f(1.0, 1.0, 0.0);
     }
 
+
+
     // screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);
 
-    if (globals.reject_hist == 1) {
+    if (globals.reject_hist > 0) {
         screen[id.x + globals.res.x * id.y] = vec4f(lighting, 1.0);
     } else {
         screen[id.x + globals.res.x * id.y] += vec4f(lighting, 1.0);
@@ -1183,10 +1203,10 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     let uv = p.xy / vec2f(f32(globals.res.x), f32(globals.res.y));
 
     // divide total by number of samples
-    var col = scr.rgb / scr.a * EXPOSURE;
+    var col = scr.rgb / scr.a;
 
-    if !DEBUG {
-        col = tonemap_pbr_neutral(col);
+    if !(DEBUG && globals.debug_mode != 0) {
+        col = tonemap_pbr_neutral(col * EXPOSURE);
     }
     
     // col = to_linear(sample_texture(primitives[1].material.albedo, uv).rgb);

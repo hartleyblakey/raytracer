@@ -52,7 +52,7 @@ struct FrameUniforms {
     reject_hist: u32,
     node_count: u32,
     prim_count: u32,
-    _pad: u32,
+    debug_mode: u32,
 }
 
 const SHADER_PATH: &'static str = "./src/shader.wgsl";
@@ -205,7 +205,7 @@ impl Context {
             reject_hist: 1,
             node_count: scene.bvh_node_data.len() as u32,
             prim_count: scene.primitives.len() as u32,
-            _pad: 0,
+            debug_mode: 0,
         };
 
         let u_frame_buffer = gpu.new_uniform_buffer(&u_frame_0);
@@ -370,9 +370,12 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     ctx.frame_uniforms.time += dt; // hack
     ctx.frame_uniforms.scene.camera = ctx.scene.cameras[0].to_gpu();
 
+
     if ctx.check_recompile_shader(gpu) || ctx.scene.cameras[0].check_moved() {
         ctx.frame_uniforms.reject_hist = 1;
     }
+
+
     
     gpu.queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
@@ -519,6 +522,14 @@ pub async fn run_js() -> Result<(), JsValue> {
     }
 }
 
+fn update_debug_mode(key_code: KeyCode, numeral: u32, input: &InputState, frame_uniforms: &mut FrameUniforms) {
+    if input.keys.contains(&PhysicalKey::Code(key_code)) && frame_uniforms.debug_mode != numeral {
+        frame_uniforms.debug_mode = numeral;
+        frame_uniforms.reject_hist = 1;
+    }
+}
+
+
 async fn run() -> Result<(), AppError> {
     let event_loop = EventLoop::new()?;
 
@@ -593,6 +604,21 @@ async fn run() -> Result<(), AppError> {
                             if ctx_guard.should_reupload {
                                 ctx_guard.upload_scene(&gpu);
                             }
+
+                            // not the most elegant code in the world
+                            // TODO: add a digits array to the InputState struct, if it would
+                            // do anything other than move this logic into the key press event
+                            update_debug_mode(KeyCode::Digit0, 0, &input, &mut ctx_guard.frame_uniforms);
+                            update_debug_mode(KeyCode::Digit1, 1, &input, &mut ctx_guard.frame_uniforms);
+                            update_debug_mode(KeyCode::Digit2, 2, &input, &mut ctx_guard.frame_uniforms);
+                            update_debug_mode(KeyCode::Digit3, 3, &input, &mut ctx_guard.frame_uniforms);
+                            update_debug_mode(KeyCode::Digit4, 4, &input, &mut ctx_guard.frame_uniforms);
+                            update_debug_mode(KeyCode::Digit5, 5, &input, &mut ctx_guard.frame_uniforms);
+                            update_debug_mode(KeyCode::Digit6, 6, &input, &mut ctx_guard.frame_uniforms);
+                            update_debug_mode(KeyCode::Digit7, 7, &input, &mut ctx_guard.frame_uniforms);
+                            update_debug_mode(KeyCode::Digit8, 8, &input, &mut ctx_guard.frame_uniforms);
+                            update_debug_mode(KeyCode::Digit9, 9, &input, &mut ctx_guard.frame_uniforms);
+
                             frame(&gpu, &mut ctx_guard, dt);
                         } else {
                             println!("Context is in use!");
@@ -691,8 +717,9 @@ async fn run() -> Result<(), AppError> {
                                         let ctx_clone = Arc::clone(&ctx);
                                         spawn_future(async move {
                                             if let Ok(mut ctx_guard) = ctx_clone.lock() {
-                                                let file = rfd::AsyncFileDialog::new().set_title("Pick a gltf (or glb) file to render").pick_file().await.unwrap();
-                                                ctx_guard.try_change_scene_bytes(&file.read().await, DEFAULT_ENV_PATH).await
+                                                if let Some(file) = rfd::AsyncFileDialog::new().set_title("Pick a gltf (or glb) file to render").pick_file().await {
+                                                    ctx_guard.try_change_scene_bytes(&file.read().await, DEFAULT_ENV_PATH).await
+                                                }
                                             }
                                         });
                                             

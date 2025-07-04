@@ -152,17 +152,25 @@ pub struct GpuPrimitive {
     inv_transform:  Mat4,
     material:       GpuMaterial,
     bvh_idx:        u32,
-    _pad:           [u32; 3],
+    tri_start:      u32,
+    tri_count:      u32,
+    /// [ 31x unused | has_tangents ]
+    flags:          u32,
 }
 
 impl GpuPrimitive {
-    fn new(transform: &Mat4, material: GpuMaterial, bvh_idx: u32) -> Self {
+    const TANGENT_FLAG: u32 = 1;
+
+    fn new(transform: &Mat4, material: GpuMaterial, bvh_idx: u32, tri_start: u32, tri_count: u32, has_tangents: bool) -> Self {
         Self {
             transform: *transform,
             inv_transform: transform.as_dmat4().inverse().as_mat4(),
             material,
             bvh_idx,
-            _pad: [0; 3],
+            tri_start,
+            tri_count,
+            flags: if has_tangents {Self::TANGENT_FLAG} else {0},
+
         }
     }
 }
@@ -238,9 +246,31 @@ fn unpack_unit_oct32(u_in: u32) -> Vec3 {
     unpack_unit_octahedral(f)
 }
 
-impl mikktspace::Geometry for RenderScene {
+pub struct PrimitiveGeometry<'a> {
+    scene: &'a mut RenderScene,
+    primitive_idx: usize,
+}
+
+impl<'a> PrimitiveGeometry<'a> {
+    pub fn new(scene: &'a mut RenderScene, primitive_idx: usize) -> Self {
+        let prim = scene.primitives[primitive_idx];
+
+        Self {
+            scene,
+            primitive_idx,
+        }
+    }
+
+    /// convert a local idx into a global idx for RenderScene::tris and friends
+    pub fn idx(&self, idx: usize) -> usize {
+        self.scene.primitives[self.primitive_idx].tri_start as usize + idx
+    }
+}
+
+
+impl<'a> mikktspace::Geometry for PrimitiveGeometry<'a> {
     fn num_faces(&self) -> usize {
-        self.tris.len()
+        self.scene.primitives[self.primitive_idx].tri_count as usize
     }
 
     fn num_vertices_of_face(&self, face: usize) -> usize {
@@ -248,20 +278,25 @@ impl mikktspace::Geometry for RenderScene {
     }
 
     fn position(&self, face: usize, vert: usize) -> [f32; 3] {
-        self.tris[face].vertices[vert].xyz().to_array()
+        self.scene.tris[self.idx(face)].vertices[vert].xyz().to_array()
     }
 
     fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
-        unpack_unit_oct32(self.tri_exts[face].vertices[vert].normal).to_array()
+        unpack_unit_oct32(self.scene.tri_exts[self.idx(face)].vertices[vert].normal).to_array()
     }
 
     fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
-        self.tri_exts[face].vertices[vert].texcoords[0].to_array()
+        self.scene.tri_exts[self.idx(face)].vertices[vert].texcoords[0].to_array()
     }
 
     fn set_tangent_encoded(&mut self, tangent: [f32; 4], face: usize, vert: usize) {
-        self.tri_exts[face].vertices[vert].tangent = pack_unit_oct32(Vec3::from_array(*tangent.first_chunk().unwrap()));
-        self.tri_exts[face].vertices[vert].tangent_sign = tangent[3];
+        let idx = self.idx(face);
+        // TODO: HACK: track which primitives have tangents and generate them on a per-primitive level
+        if (self.scene.primitives[self.primitive_idx].flags & GpuPrimitive::TANGENT_FLAG) == 0 {
+            self.scene.tri_exts[idx].vertices[vert].tangent = pack_unit_oct32(Vec3::from_array(*tangent.first_chunk().unwrap()));
+            self.scene.tri_exts[idx].vertices[vert].tangent_sign = tangent[3];
+        }
+        // self.scene.primitives[self.primitive_idx].flags |= GpuPrimitive::TANGENT_FLAG;
     }
 }
 
@@ -286,7 +321,7 @@ impl RenderScene {
                 self.add_gltf_node(&buffers, node, &mut ms, &mut cache);
             }
         }
-        mikktspace::generate_tangents(self);
+        
         true
     }   
 
@@ -304,7 +339,7 @@ impl RenderScene {
     }
 
     fn add_gltf_texture(&mut self, tex: &gltf::texture::Texture, buffers: &Vec<gltf::buffer::Data>) -> GpuTextureRef {
-        
+
         // if we have not already loaded the image
         if !self.texture_map.contains_key(&tex.index()) {
             // load the image
@@ -506,15 +541,18 @@ impl RenderScene {
                             Vec::new()
                         };
 
+
                         let tangents = reader.read_tangents();
-                        let tangents: Vec<UnitOct32> = if tangents.is_some() {
+                        let tangents: Vec<(UnitOct32, f32)> = if tangents.is_some() {
                             tangents.unwrap().map(
                                 |c| 
-                                pack_unit_oct32(Self::from_gltf_vec3(vec3(c[0], c[1], c[2]).normalize()))
+                                (pack_unit_oct32(Self::from_gltf_vec3(vec3(c[0], c[1], c[2]).normalize())), c[3])
                             ).collect()
                         } else {
                             Vec::new()
                         };
+
+                        let has_tangents = !tangents.is_empty();
 
                         let first_new_tri = self.tris.len();
                         if let Some(indices) = reader.read_indices() {
@@ -536,9 +574,13 @@ impl RenderScene {
                                 }
 
                                 if !tangents.is_empty() {
-                                    ext.vertices[0].tangent = tangents[idx_0 as usize];
-                                    ext.vertices[1].tangent = tangents[idx_1 as usize];
-                                    ext.vertices[2].tangent = tangents[idx_2 as usize];
+                                    ext.vertices[0].tangent = tangents[idx_0 as usize].0;
+                                    ext.vertices[1].tangent = tangents[idx_1 as usize].0;
+                                    ext.vertices[2].tangent = tangents[idx_2 as usize].0;
+
+                                    ext.vertices[0].tangent_sign = tangents[idx_0 as usize].1;
+                                    ext.vertices[1].tangent_sign = tangents[idx_1 as usize].1;
+                                    ext.vertices[2].tangent_sign = tangents[idx_2 as usize].1;
                                 }
 
                                 for i in 0..GPU_TEXCOORD_COUNT {
@@ -576,11 +618,22 @@ impl RenderScene {
                             }
                         }
 
-                        // add this primitive to the scene
-                        self.primitives.push(
-                            GpuPrimitive::new(&node_transform_mine, material, bvh_root)
+                        let gpu_primitive = GpuPrimitive::new(
+                            &node_transform_mine, 
+                            material, 
+                            bvh_root, 
+                            first_new_tri as u32, 
+                            (self.tris.len() - first_new_tri) as u32, 
+                            has_tangents
                         );
 
+                        // add this primitive to the scene
+                        self.primitives.push(gpu_primitive);
+
+                        if !has_tangents {
+                            mikktspace::generate_tangents(&mut PrimitiveGeometry::new(self, self.primitives.len() - 1));
+                        }
+                        
                         println!("Adding primitive with {} triangles, bvh root at index {}", self.tris.len() - first_new_tri, bvh_root);
 
                         // mark this primitive as already loaded
@@ -717,7 +770,7 @@ impl RenderScene {
         println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
 
         println!("Focused camera: {}", scene.focus_camera(0));
-        mikktspace::generate_tangents(&mut scene);
+        
         Some(scene)
     }
     
