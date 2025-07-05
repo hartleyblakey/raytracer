@@ -714,8 +714,10 @@ fn rand_color() -> vec3f {
 }
 
 fn sample_env_map(dir: vec3f) -> vec4f {
-    // correct for differences in blender env map export coordinate system
-    let uv = vec2f(atan2(dir.x, dir.y) / (pi * 2.0), asin(-dir.z) / pi) + 0.5;
+    // HACK: For comparison with blender, use their coordinate system for sampling the HDRI
+    let d = dir.yxz;
+    
+    let uv = vec2f(atan2(d.y, d.x) + pi, acos(d.z)) / vec2f(2.0 * pi, pi);
     return textureLoad(env_map, vec2u(uv * vec2f(textureDimensions(env_map))), 0); 
 }
 
@@ -923,6 +925,7 @@ fn sample_hit(hit: Hit) -> ExtSample {
            sample.t_sign *= -1.0;
         }
     } else {
+        
         sample.vertex_normal = hit.normal;
     }
     
@@ -932,12 +935,11 @@ fn sample_hit(hit: Hit) -> ExtSample {
         let normal_tangent = (sample_texture(hit.material.normal, sample.texcoords[hit.material.normal_texcoord]).xyz * 2.0 - 1.0) * hit.material.normal_scale;
 
         // this is what the guys website says, but it looks a little off to me
-        let bt = sample.t_sign * cross(sample.vertex_normal, sample.tangent);
+        let bt = normalize(sample.t_sign * cross(sample.vertex_normal, sample.tangent));
         // let bt = sample.bi_tangent;
 
-        // TODO: HACK: flipped y component of normal map as if to convert to a left-handed coordinate system
         sample.normal = normalize(
-            normal_tangent.x * sample.tangent + -normal_tangent.y * bt + normal_tangent.z * sample.vertex_normal
+            normal_tangent.x * sample.tangent + normal_tangent.y * bt + normal_tangent.z * sample.vertex_normal
         );
     }
 

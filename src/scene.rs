@@ -200,6 +200,12 @@ fn pack_unit_oct32(v: Vec3) -> UnitOct32 {
     (((o.x * u16::MAX as f32) as u32) << 16) | (o.y * u16::MAX as f32) as u32
 }
 
+pub struct EnvironmentMap {
+    data: Vec<[f32; 4]>,
+    
+}
+
+
 
 #[derive(Default)]
 pub struct RenderScene {
@@ -286,7 +292,17 @@ impl<'a> mikktspace::Geometry for PrimitiveGeometry<'a> {
     }
 
     fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
-        self.scene.tri_exts[self.idx(face)].vertices[vert].texcoords[0].to_array()
+        let mut tc = self.scene.tri_exts[self.idx(face)].vertices[vert].texcoords[0].to_array();
+
+        // https://github.com/KhronosGroup/glTF-Sample-Models/issues/174
+        // https://github.com/KhronosGroup/glTF/issues/2056
+        // GLTF (and me i guess) use a texture coordinate system where (0, 0) is the bottom left
+        // mikktspace and blender use (0, 0) as the upper left
+        // this is the same as flipping the sign of the bitangent for generated meshes, which
+        // is the fix most other implementations appear to use
+        tc[1] = 1.0 - tc[1];
+        tc
+
     }
 
     fn set_tangent_encoded(&mut self, tangent: [f32; 4], face: usize, vert: usize) {
@@ -325,7 +341,12 @@ impl RenderScene {
         true
     }   
 
+    
     pub fn from_gltf_vec3(v: Vec3) -> Vec3 {
+        // GLTF coordinate system: "glTF defines +Y as up, +Z as forward, and -X as right; the front of a glTF asset faces +Z."
+
+        // from (left, up, forward)
+        // to   (forward, left, up)
         vec3(v.z, v.x, v.y)
     }
 

@@ -210,8 +210,8 @@ impl Camera {
     }
 
     pub fn default() -> Camera {
-        Camera {
-            pitch: f32::to_radians(-45.0),
+        let c = Camera {
+            pitch: f32::to_radians(0.0),
             yaw: f32::to_radians(0.0),
             roll: 0.0,
             position: vec3(0.0, 0.0, 0.0) - FORWARD * 5.0 + UP * 5.0,
@@ -226,7 +226,9 @@ impl Camera {
             exposure: 1.0,
             bloom: 1.0,
             dispersion: 1.0,
-        }
+        };
+        println!("Forward: {}", c.forward());
+        c
     }
 
     pub fn from_gltf(gltf: gltf::Camera, gltf_transform: &Mat4) -> Camera {
@@ -236,7 +238,7 @@ impl Camera {
 
         let (yaw, pitch, roll) = transform.to_euler(YAW_PITCH_ROLL);
 
-        // yaw is off for some reason
+        // GLTF cameras look down -forward, mine look down +forward - turn it around
         let yaw = yaw - PI;
         
         let (fovy, aspect) = match gltf.projection() {
