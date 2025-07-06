@@ -6,7 +6,10 @@
 @group(1) @binding(3) var<storage, read_write> screen :         array<vec4f>;
 @group(1) @binding(4) var<storage, read_write> texture_data :   array<u32>;
 @group(1) @binding(5) var<storage, read_write> primitives :     array<Primitive>;
-@group(1) @binding(6) var                      env_map:         texture_2d<f32>;
+@group(1) @binding(6) var<storage, read_write> env_map_rows_cdf:array<f32>;
+@group(1) @binding(7) var                      env_map:         texture_2d<f32>;
+@group(1) @binding(8) var                      env_map_col_cdf: texture_2d<f32>;
+@group(1) @binding(9) var                      env_map_pdf:     texture_2d<f32>;
 
 const pi = 3.141592654;
 

@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::{cmp::Ordering, collections::HashMap, f32::consts::PI};
 
 use glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::GenericImageView;
+use rand::random;
 
-use crate::{fetch_bytes, input::*};
+use crate::{fetch_bytes, input::*, DEFAULT_ENV_PATH};
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -201,14 +202,178 @@ fn pack_unit_oct32(v: Vec3) -> UnitOct32 {
 }
 
 pub struct EnvironmentMap {
-    data: Vec<[f32; 4]>,
+    /// The width of the texture. Must be 2x height
+    pub width: usize,
+
+    /// The height of the texture. Must be half the width
+    pub height: usize,
+
+    /// The raw luminance values
+    /// 
+    /// A 2D array of width x height
+    pub data: Vec<[f32; 4]>,
+
+    /// The probability of sampling each pixel
+    /// 
+    /// luminance * sin(theta), same dimensions as data
+    pub pdf: Vec<f32>,
+
+    /// The conditional cumulative probability of sampling each pixel in its row
+    /// 
+    /// same dimensions as data and the pdf
+    pub cdf_col: Vec<f32>,
+
+    /// The marginal cumulative probability of sampling each row of the texture
+    /// 
+    /// This is a 1D array the length of the height of the texture
+    pub cdf_rows: Vec<f32>
+}
+
+impl EnvironmentMap {
+    pub async fn from_hdr_path(path: &str) -> Option<Self> {
+        let buffer = fetch_bytes(path).await?;
+        let mut data = Vec::new();
+        let image = image::load_from_memory(buffer.as_slice()).expect(format!("Expected valid image at path {path}").as_str());
+        let image = image.into_rgba32f();
+        for pixel in image.pixels() {
+            data.push(pixel.0);
+        };
+        
+        let height = image.height() as usize;
+        let width = image.width() as usize;
+
+        if width != height * 2 {
+            return None;
+        }
+
+        Some(Self::new(data, width, height))
+    }
+
+    pub fn new(data: Vec<[f32; 4]>, width: usize, height: usize) -> Self {
+        let mut pdf = Vec::new();
+        let mut pdf_total = 0.0;
+        for y in 0..height {
+            let theta = ((y as f64 + 0.5) / height as f64) * core::f64::consts::PI;
+            let sin_theta = theta.sin().max(1e-6) as f32;
+            for x in 0..width {
+                let v = (Self::luminance(data[y * width + x]) * sin_theta);
+
+                pdf.push(v);
+                pdf_total += v;
+            }
+        }
+
+        for v in &mut pdf {
+            *v /= pdf_total;
+        }
+        
+
+        let mut cdf_col = Vec::new();
+
+        let mut cdf_rows = Vec::new();
+        let mut cdf_rows_total = 0.0;
+
+        for y in 0..height {
+            let mut row_prob_sum = 0.0;
+            for x in 0..width {
+                row_prob_sum += pdf[y * width + x];
+                cdf_col.push(row_prob_sum);
+            }
+
+            // at this point row_prob_sum is the total pdf within row y, and the maximum value of cdf_col
+            if row_prob_sum != 0.0 {
+                for x in 0..width {
+                    cdf_col[y * width + x] /= row_prob_sum;
+                }
+            } else {
+                // values really should not matter here since it should never get picked
+                for x in 0..width {
+                    cdf_col[y * width + x] = (x as f32 + 1.0) / width as f32;
+                }
+            }
+
+            
+            cdf_rows_total += row_prob_sum;
+            cdf_rows.push(cdf_rows_total);
+        }
+
+        for row in 0..height {
+            cdf_rows[row] /= cdf_rows_total;
+        }
+
+        // ensure a valid cdf in the face of floating point error
+        cdf_rows[height - 1] = 1.0;
+
+
+        EnvironmentMap {
+            width,
+            height,
+            data,
+            pdf,
+            cdf_col,
+            cdf_rows
+        }
+    }
+
+    /// perceived luminance of an rgb pixel. Ignores alpha
+    fn luminance(v: [f32; 4]) -> f32 {
+        // Rec. 709 linear luminance coefficients
+        v[0] * 0.2126 + v[1] * 0.7152 + v[2] * 0.0722
+    }
+
     
+    /// Returns the index of the chosen pixel alongside its pdf
+    pub fn sample(&self, u: (f32, f32)) -> (UVec2, f32) {
+
+        let row = self.cdf_rows
+            .binary_search_by(|p| p.partial_cmp(&u.0).unwrap_or(Ordering::Greater))
+            .unwrap_or_else(|i| i)
+            .min(self.height - 1);
+
+        let col = self.cdf_col[row * self.width..(row + 1) * self.width]
+            .binary_search_by(|p| p.partial_cmp(&u.1).unwrap_or(Ordering::Greater))
+            .unwrap_or_else(|i| i)
+            .min(self.width - 1);
+
+        (uvec2(col as u32, row as u32), self.pdf[row * self.width + col])
+    }
+
+    pub fn test_distribution(&self) -> Vec<[f32; 4]> {
+
+        let mut samples = Vec::with_capacity(self.width * self.height);
+        for _ in 0..self.width * self.height {
+            samples.push([0.0, 0.0, 0.0, 1.0]);
+        }
+        let n = 50.0;
+        for _ in 0..(self.width * self.height * n as usize) {
+            let u = (random(), random());
+            let (p, pdf) = self.sample(u);
+            let sin_theta = ( (p.y as f32 + 0.5) * PI / self.height as f32 ).sin().max(1e-6);
+            let pdf = pdf / ( ( (2.0 * PI * PI) / (self.width * self.height) as f32 ) * sin_theta);
+            let s = &mut samples[p.y as usize * self.width + p.x as usize];
+
+            s[0] += (1.0 / pdf) / n;
+            s[1] += (1.0 / pdf) / n;
+            s[2] += (1.0 / pdf) / n;
+        }
+
+        samples
+    }
+}
+
+impl Default for EnvironmentMap {
+    fn default() -> Self {
+        let data = vec![[1.0, 0.7, 0.3, 1.0], [0.4, 0.4, 0.1, 1.0]];
+        Self::new(data, 2, 1)
+    }
 }
 
 
 
 #[derive(Default)]
 pub struct RenderScene {
+    // path to the environment map texture
+    pub env_map_path:       String,
 
     /// flat array of primitives that share a material
     pub primitives:         Vec<GpuPrimitive>,
@@ -230,7 +395,7 @@ pub struct RenderScene {
     pub directional_lights: Vec<GpuDirectionalLight>,
 
     /// rgba32f equirectangular environment map pixel data
-    pub env_map_data:       Vec<[f32; 4]>,
+    pub env_map:            EnvironmentMap,
 }
 
 // https://gamedev.stackexchange.com/questions/169508/octahedral-impostors-octahedral-mapping
@@ -688,17 +853,14 @@ impl RenderScene {
     /// 
     /// panics if the file path is valid but not an image
     pub async fn set_equirectangular_env_map(&mut self, path: &str) -> bool {
-        let buffer = match fetch_bytes(path).await {
-            Some(buffer) => buffer,
-            None => return false,
-        };
-        let image = image::load_from_memory(buffer.as_slice()).expect(format!("Expected valid image at path {path}").as_str());
-        let image = image.into_rgba32f();
-        self.env_map_data.clear();
-        for pixel in image.pixels() {
-            self.env_map_data.push(pixel.0);
-        };
-        true
+        if let Some(e) = EnvironmentMap::from_hdr_path(path).await {
+            self.env_map = e;
+            self.env_map_path = path.to_owned();
+            true
+        } else {
+            println!("Failed to make an EnvironmentMap from path \"{path}\"");
+            false
+        }
     }
 
     pub fn to_gpu(&self) -> GpuSceneUniform {

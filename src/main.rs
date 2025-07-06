@@ -77,6 +77,9 @@ struct Context {
     primitive_data_ssbo:        Buffer,
 
     env_map_texture:            Texture,
+    env_map_col_cdf:           Texture,
+    env_map_pdf:                Texture,
+    env_map_rows_cdf:            Buffer,
 
     rt_data_binding:            BindGroup,
 
@@ -193,6 +196,29 @@ impl Context {
         false
     }
 
+    /// Update the wgpu texture to match the data in self.scene
+    fn update_env_map_texture(&mut self, gpu: &Gpu) {
+        self.env_map_texture = gpu.new_texture(uvec2(2 * self.scene.env_map.height as u32, self.scene.env_map.height as u32), wgpu::TextureFormat::Rgba32Float, false);
+
+        self.env_map_rows_cdf = gpu.new_storage_buffer((self.scene.env_map.height * self.scene.env_map.width * size_of::<f32>()) as u64);
+
+        self.env_map_col_cdf = gpu.new_texture(uvec2(2 * self.scene.env_map.height as u32, self.scene.env_map.height as u32), wgpu::TextureFormat::R32Float, false);
+        self.env_map_pdf = gpu.new_texture(uvec2(2 * self.scene.env_map.height as u32, self.scene.env_map.height as u32), wgpu::TextureFormat::R32Float, false);
+        self.rt_data_binding = gpu.new_bind_group()
+            .with_buffer(&self.triangles_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.triangles_ext_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.bvh_ssbo.view_all(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.primitive_data_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.env_map_rows_cdf.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&self.env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&self.env_map_col_cdf,                wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&self.env_map_pdf,                     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            
+            .finish(&mut self.resources);
+    }
+
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
         let scene = RenderScene::from_path(DEFAULT_MODEL_PATH, DEFAULT_ENV_PATH).await.unwrap();
 
@@ -226,8 +252,11 @@ impl Context {
         let primitive_data_ssbo =   gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
-        let hdri_height = f32::sqrt(scene.env_map_data.len() as f32 / 2.0) as u32; // 4 channels
-        let env_map_texture = gpu.new_texture(uvec2(2 * hdri_height, hdri_height), wgpu::TextureFormat::Rgba32Float, false);
+        let env_map_rows_cdf = gpu.new_storage_buffer((scene.env_map.height * scene.env_map.width * size_of::<f32>()) as u64);
+
+        let env_map_texture = gpu.new_texture(uvec2(2 * scene.env_map.height as u32, scene.env_map.height as u32), wgpu::TextureFormat::Rgba32Float, false);
+        let env_map_col_cdf = gpu.new_texture(uvec2(2 * scene.env_map.height as u32, scene.env_map.height as u32), wgpu::TextureFormat::R32Float, false);
+        let env_map_pdf = gpu.new_texture(uvec2(2 * scene.env_map.height as u32, scene.env_map.height as u32), wgpu::TextureFormat::R32Float, false);
 
         let rt_data_bg = gpu.new_bind_group()
             .with_buffer(&triangles_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
@@ -236,7 +265,10 @@ impl Context {
             .with_buffer(&screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&primitive_data_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&env_map_rows_cdf.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&env_map_col_cdf,                wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&env_map_pdf,                     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut resources);
 
         // fetch shader
@@ -288,7 +320,10 @@ impl Context {
             texture_data_ssbo,
             primitive_data_ssbo,
 
+            env_map_col_cdf,
             env_map_texture,
+            env_map_pdf,
+            env_map_rows_cdf,
 
             rt_data_binding: rt_data_bg,
 
@@ -302,6 +337,45 @@ impl Context {
     async fn try_change_scene(&mut self, mesh_path: &str, env_map_path: &str) {
         if let Some(mesh_bytes) = fetch_bytes(mesh_path).await {
             self.try_change_scene_bytes(&mesh_bytes, env_map_path).await
+        }
+    }
+
+    async fn try_add_file(&mut self, path: &std::path::Path) {
+        let is_mesh = match path.extension() {
+            None => false,
+            Some(os_str) => match os_str.to_str() {
+                None => false,
+                Some("gltf") => true,
+                Some("GLTF") => true,
+                Some("glb") => true,
+                Some("GLB") => true,
+                _ => false,
+            }
+
+        };
+
+        let Some(path_str) = path.as_os_str().to_str() else {
+            return;
+        };
+
+        // TODO: Test other HDR image formats
+        let is_env = match path.extension() {
+            None => false,
+            Some(os_str) => match os_str.to_str() {
+                None => false,
+                Some("hdr") => true,
+                _ => false,
+            }
+        };
+
+        if is_env {
+            println!("Trying to add env map");
+            self.scene.set_equirectangular_env_map(path_str).await;
+            
+            self.should_reupload = true;
+        } else if is_mesh {
+            let old_env = self.scene.env_map_path.clone();
+            self.try_change_scene(path_str, &old_env).await
         }
     }
 
@@ -331,10 +405,11 @@ impl Context {
         gpu.queue.write_buffer(&self.bvh_ssbo,               0, bytemuck::cast_slice(self.scene.bvh_node_data.as_slice()));
         gpu.queue.write_buffer(&self.texture_data_ssbo,      0, bytemuck::cast_slice(self.scene.texture_data.as_slice()));
         gpu.queue.write_buffer(&self.primitive_data_ssbo,    0, bytemuck::cast_slice(self.scene.primitives.as_slice()));
+        gpu.queue.write_buffer(&self.env_map_rows_cdf,       0, bytemuck::cast_slice(self.scene.env_map.cdf_rows.as_slice()));
 
         gpu.queue.write_texture(
             self.env_map_texture.as_image_copy(), 
-            bytemuck::cast_slice(self.scene.env_map_data.as_slice()), 
+            bytemuck::cast_slice(&self.scene.env_map.data.as_slice()), 
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(self.env_map_texture.height() * 2 * 4 * 4),
@@ -343,6 +418,36 @@ impl Context {
             wgpu::Extent3d{
                 width: self.env_map_texture.width(),
                 height: self.env_map_texture.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+
+        gpu.queue.write_texture(
+            self.env_map_col_cdf.as_image_copy(), 
+            bytemuck::cast_slice(&self.scene.env_map.cdf_col.as_slice()), 
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.env_map_col_cdf.width() * 4),
+                rows_per_image: None,
+            }, 
+            wgpu::Extent3d{
+                width: self.env_map_col_cdf.width(),
+                height: self.env_map_col_cdf.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+
+        gpu.queue.write_texture(
+            self.env_map_pdf.as_image_copy(), 
+            bytemuck::cast_slice(&self.scene.env_map.pdf.as_slice()), 
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.env_map_pdf.width() * 4),
+                rows_per_image: None,
+            }, 
+            wgpu::Extent3d{
+                width: self.env_map_pdf.width(),
+                height: self.env_map_pdf.height(),
                 depth_or_array_layers: 1,
             },
         );
@@ -604,6 +709,7 @@ async fn run() -> Result<(), AppError> {
                             ctx_guard.scene.cameras[0].update(&mut input, dt);
                             
                             if ctx_guard.should_reupload {
+                                ctx_guard.update_env_map_texture(&gpu);
                                 ctx_guard.upload_scene(&gpu);
                             }
 
@@ -678,29 +784,12 @@ async fn run() -> Result<(), AppError> {
                         }
                     },
                     WindowEvent::DroppedFile(path) => {
-                        if let Some(path_string) = path.to_str() {
-                            let path_string = path_string.to_string();
-
-                            // TODO: accept HDR files
-                            let is_mesh = match path.extension() {
-                                None => true,
-                                Some(os_str) => match os_str.to_str() {
-                                    None => false,
-                                    Some("gltf") => true,
-                                    Some("GLTF") => true,
-                                    Some("glb") => true,
-                                    Some("GLB") => true,
-                                    _ => false,
-                                }
-
-                            };
+                        // preempt some errors while the failure path is convenient
+                        if path.to_str().is_some() {
                             let ctx_clone = Arc::clone(&ctx);
                             spawn_future(async move {
                                 if let Ok(mut ctx_guard) = ctx_clone.lock() {
-                                    if is_mesh {
-                                        ctx_guard.try_change_scene(path_string.as_str(), DEFAULT_ENV_PATH).await;
-                                    }
-                                    
+                                    ctx_guard.try_add_file(&path).await;
                                 }
                             });
 
@@ -719,8 +808,18 @@ async fn run() -> Result<(), AppError> {
                                         let ctx_clone = Arc::clone(&ctx);
                                         spawn_future(async move {
                                             if let Ok(mut ctx_guard) = ctx_clone.lock() {
-                                                if let Some(file) = rfd::AsyncFileDialog::new().set_title("Pick a gltf (or glb) file to render").pick_file().await {
-                                                    ctx_guard.try_change_scene_bytes(&file.read().await, DEFAULT_ENV_PATH).await
+                                                if let Some(file) = rfd::AsyncFileDialog::new().set_title("Pick a gltf (or glb) file to render, or a .hdr if on native").pick_file().await {
+                                                #[cfg(target_arch = "wasm32")]
+                                                {
+                                                    let old_env = ctx_guard.scene.env_map_path.clone();
+                                                    ctx_guard.try_change_scene_bytes(file.read().await.as_slice(), &old_env).await;
+                                                }
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                {
+                                                    ctx_guard.try_add_file(&file.path()).await
+                                                };
+
+                                                    
                                                 }
                                             }
                                         });
