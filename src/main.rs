@@ -96,21 +96,28 @@ struct Context {
 
 impl Context {
 
+    fn update_rt_binding(&mut self, gpu: &Gpu) {
+        self.rt_data_binding = gpu.new_bind_group()
+            .with_buffer(&self.triangles_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.triangles_ext_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.bvh_ssbo.view_all(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.primitive_data_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.env_map_rows_cdf.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&self.env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&self.env_map_col_cdf,                wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&self.env_map_pdf,                     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .finish(&mut self.resources);
+    }
+
     fn update_resolution(&mut self, gpu: &Gpu) {
         let res = [gpu.surface_config.width, gpu.surface_config.height];
         self.frame_uniforms.res = res;
         println!("x: {}, y: {}", res[0], res[1]);
         self.screen_ssbo = gpu.new_storage_buffer(res[0] as u64 * res[1]  as u64 * 4 * 4);
 
-        self.rt_data_binding = gpu.new_bind_group()
-            .with_buffer(&self.triangles_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.triangles_ext_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.bvh_ssbo.view_all(),             wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.screen_ssbo.view_all(),          wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.texture_data_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.primitive_data_ssbo.view_all(),  wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_texture(&self.env_map_texture,                wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .finish(&mut self.resources);
+        self.update_rt_binding(gpu);
     }
 
     fn create_pipelines(
@@ -156,7 +163,7 @@ impl Context {
         (screen_pipeline, raytrace_pipeline)
     }
 
-    const DEBOUNCE_TIME: std::time::Duration = std::time::Duration::from_millis(200);
+    const DEBOUNCE_TIME: std::time::Duration = std::time::Duration::from_millis(600);
 
     fn check_recompile_shader(&mut self, gpu: &Gpu) -> bool {
     #[cfg(not(target_arch = "wasm32"))] 
@@ -204,19 +211,7 @@ impl Context {
 
         self.env_map_col_cdf = gpu.new_texture(uvec2(2 * self.scene.env_map.height as u32, self.scene.env_map.height as u32), wgpu::TextureFormat::R32Float, false);
         self.env_map_pdf = gpu.new_texture(uvec2(2 * self.scene.env_map.height as u32, self.scene.env_map.height as u32), wgpu::TextureFormat::R32Float, false);
-        self.rt_data_binding = gpu.new_bind_group()
-            .with_buffer(&self.triangles_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.triangles_ext_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.bvh_ssbo.view_all(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.primitive_data_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.env_map_rows_cdf.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_texture(&self.env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_texture(&self.env_map_col_cdf,                wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_texture(&self.env_map_pdf,                     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            
-            .finish(&mut self.resources);
+        self.update_rt_binding(gpu);
     }
 
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
