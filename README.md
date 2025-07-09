@@ -1,6 +1,6 @@
 # WebGPU GLTF Raytracer
 
-![screenshot](/screenshots/helmet.png?raw=true)
+![screenshot](/screenshots/helmet_sun.png?raw=true)
 ![screenshot](/screenshots/web.png?raw=true)
 
 ### Features
@@ -15,10 +15,10 @@
 - Builds a simple BVH around the triangle positions and extra data, based on the first 2.5 articles of "Build A BVH" by Jacco Bikker
 
 - Raytraces the bvh in a compute shader
-  - Basic path tracing with HDRI environment
+  - Basic MIS path tracing with HDRI environment sampling, GGX specular, and lambertian diffuse.
   - Khronos PBR Neutral Tone Mapper for easy comparison with other renderers
   - Depth of field
-  - No texture samplers, all textures are nearest filtered
+  - No texture samplers, all textures are manually bilinear filtered
   - Two UV sets supported per GLTF primitive
 
 - Simple first person fly cam
