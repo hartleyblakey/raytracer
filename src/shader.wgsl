@@ -19,14 +19,9 @@ const RIGHT = vec3f(0.0, -1.0, 0.0);
 
 const NUM_TEXCOORDS = 2;
 
-// const SUN_DIR = vec3f(0.707106781187, 0.0 , 0.707106781187);
-const TO_SUN_VAL = vec3f(0.5, 0.4, 1.49);
+const EXPOSURE = 1.0;
 
-const TO_SUN_DIR = TO_SUN_VAL / sqrt(TO_SUN_VAL.x * TO_SUN_VAL.x + TO_SUN_VAL.y * TO_SUN_VAL.y + TO_SUN_VAL.z * TO_SUN_VAL.z);
-
-const SUN_COL = vec3f(1.0, 0.5, 0.3) * 5.0;
-const EXPOSURE = 1.0 / 1.0;
-
+var<private> debug: f32;
 
 struct Camera {
     dir:        vec3f,
@@ -232,22 +227,12 @@ fn dummy_texture(uv: vec2f) -> vec4f {
     const scale = 256.0;
     let checker = f32((u32(uv.x * scale) + u32(uv.y * scale + 1.0)) % 2u);
     var col = mix(vec3f(0.8, 0.3, 0.3), vec3f(0.8, 0.3, 0.3) * 0.5, checker);
-    // col = vec3f(uv.x, uv.y, 0.0);
-    // col = vec3f(checker) * 0.15 + 0.2;
     return vec4f(col, 1.0);
-    // return vec4f(checker, uv.x, uv.y, 1.0);
 }
 
+// MARK: sample interpolation
 
-fn sign_of_uint(x: u32) -> f32 {
-    if x == 0 {
-        return -1.0;
-    } else {
-        return 1.0;
-    }
-}
-
-// barycentric interpolation of vertex attributes
+/// barycentric interpolation of vertex attributes
 fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     var res = zeroed_ext_sample();
 
@@ -280,10 +265,59 @@ fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     return res;
 }
 
+/// gather material parameters for a hit
+fn sample_hit(hit: Hit) -> ExtSample {
+    var ext = tri_exts[hit.idx];
+    var sample = tri_ext_interpolate(&ext, hit.bary);
 
+    // get smooth_normal into world space, if it exists
+    if length(sample.vertex_normal) > 0.001 {
+        sample.vertex_normal = transform_normal(normalize(sample.vertex_normal), primitives[hit.prim_idx].inv_transform);
+        if dot(sample.vertex_normal, hit.normal) < 0.0 {
+            // flip face if vertex normal pointing away from geometric normal
+           sample.vertex_normal = -sample.vertex_normal;
+           sample.tangent = -sample.tangent;
+           sample.t_sign *= -1.0;
+        }
+    } else {
+        
+        sample.vertex_normal = hit.normal;
+    }
+    
 
+    sample.normal = sample.vertex_normal;
+    if (hit.material.normal.size != 0) {
+        let normal_tangent = (sample_texture(hit.material.normal, sample.texcoords[hit.material.normal_texcoord]).xyz * 2.0 - 1.0) * hit.material.normal_scale;
 
+        // this is what the guys website says, but it looks a little off to me
+        let bt = normalize(sample.t_sign * cross(sample.vertex_normal, sample.tangent));
+        // let bt = sample.bi_tangent;
 
+        sample.normal = normalize(
+            normal_tangent.x * sample.tangent + normal_tangent.y * bt + normal_tangent.z * sample.vertex_normal
+        );
+    }
+
+    sample.albedo = hit.material.albedo_factor;
+    if hit.material.albedo.size != 0 {
+        sample.albedo *= to_linear_4(sample_texture(hit.material.albedo, sample.texcoords[hit.material.albedo_texcoord]));
+    }
+
+    sample.emissive = hit.material.emissive_factor;
+    if hit.material.emissive.size != 0 {
+        sample.emissive *= to_linear(sample_texture(hit.material.emissive, sample.texcoords[hit.material.emissive_texcoord]).rgb);
+    }
+
+    sample.metallic_roughness = vec3f(0.0, hit.material.roughness_factor, hit.material.metallic_factor);
+    if hit.material.metallic_roughness.size != 0 {
+        sample.metallic_roughness *= sample_texture(hit.material.metallic_roughness, sample.texcoords[hit.material.metal_r_texcoord]).rgb;
+    }
+    sample.metallic_roughness.g = clamp(sample.metallic_roughness.g, 0.015, 1.0);
+
+    return sample;
+}
+
+// MARK: AABB
 ////////////// aabb //////////////
 struct Aabb {
     data: array<f32, 6>
@@ -298,6 +332,8 @@ fn aabb_mid(aabb: Aabb) -> vec3f {
     return 0.5 * vec3f(aabb.data[3] + aabb.data[0], aabb.data[4] + aabb.data[1], aabb.data[5] + aabb.data[2]);
 }
 
+
+// MARK: BVH Node
 ////////////// bvh node //////////////
 struct BvhNode {
     aabb: Aabb,
@@ -309,6 +345,8 @@ struct BvhNode {
     count: u32,
 }
 
+
+// MARK: Tri
 ////////////// triangle //////////////
 struct Tri {
     d0: vec4f,
@@ -325,7 +363,7 @@ fn assert(condition: bool) {
     }
 }
 
-
+// MARK: Stack
 ////////////// stack //////////////
 struct Stack {
     data: array<u32, 23>,
@@ -344,14 +382,7 @@ fn pop(stack: ptr<function, Stack>) -> u32 {
     return (*stack).data[(*stack).size];
 }
 
-
-////////////// ray //////////////
-struct Ray {
-    origin: vec3f,
-    dir: vec3f,
-    idir: vec3f,
-}
-
+// MARK: Hit
 ////////////// hit //////////////
 struct Hit {
     t: f32,
@@ -361,6 +392,15 @@ struct Hit {
     normal: vec3f,
     bary: vec3f,
 }
+
+// MARK: Ray
+////////////// ray //////////////
+struct Ray {
+    origin: vec3f,
+    dir: vec3f,
+    idir: vec3f,
+}
+
 
 // https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
 // epsilon stolen from https://www.shadertoy.com/view/wlsfRs
@@ -465,7 +505,9 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
     return t0;
 }
 
-var<private> debug: f32;
+// MARK: trace_bvh
+
+
 
 fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) -> i32 {
     var stack: Stack;
@@ -716,13 +758,27 @@ fn rand_color() -> vec3f {
     // return 1.0 - pow(vec3f(0.25), normalize(vec3f(rand(), rand(), rand())) + 0.1);
 }
 
-fn sample_env_map_pdf(dir: vec3f) -> f32 {
-    let uv = dir_to_env_map(dir);
-    let res = vec2f(textureDimensions(env_map));
-    let sin_theta = max(sin( (uv.y * res.y + 0.5) * pi / res.y), 1e-6);
-    let pixel_pdf = textureLoad(env_map_pdf, vec2u(uv * res), 0).r;
-    let solid_angle_pdf = pixel_pdf / ( ( (2.0 * pi * pi) / (res.x * res.y) ) * sin_theta);
-    return solid_angle_pdf;
+
+
+
+
+// MARK: Environment map
+
+fn dir_to_env_map(dir: vec3f) -> vec2f {
+    // HACK: For comparison with blender, use their coordinate system for sampling the HDRI
+    let d = dir.yxz;
+    
+    return vec2f(atan2(d.y, d.x) + pi, acos(d.z)) / vec2f(2.0 * pi, pi);
+}
+
+fn env_map_to_dir(e: vec2f) -> vec3f {
+    var v = vec3f(0);
+    v.z = cos(e.y * pi);
+    let phi = e.x * 2.0 * pi - pi;
+    let sin_theta = sin(e.y * pi);
+    v.x = sin_theta * cos(phi);
+    v.y = sin_theta * sin(phi);
+    return v.yxz;
 }
 
 /// Returns the index of the chosen pixel
@@ -777,11 +833,13 @@ fn sample_env_map() -> vec3f {
     return env_map_to_dir(uv);
 }
 
-fn dir_to_env_map(dir: vec3f) -> vec2f {
-    // HACK: For comparison with blender, use their coordinate system for sampling the HDRI
-    let d = dir.yxz;
-    
-    return vec2f(atan2(d.y, d.x) + pi, acos(d.z)) / vec2f(2.0 * pi, pi);
+fn sample_env_map_pdf(dir: vec3f) -> f32 {
+    let uv = dir_to_env_map(dir);
+    let res = vec2f(textureDimensions(env_map));
+    let sin_theta = max(sin( (uv.y * res.y + 0.5) * pi / res.y), 1e-6);
+    let pixel_pdf = textureLoad(env_map_pdf, vec2u(uv * res), 0).r;
+    let solid_angle_pdf = pixel_pdf / ( ( (2.0 * pi * pi) / (res.x * res.y) ) * sin_theta);
+    return solid_angle_pdf;
 }
 
 fn evaluate_env_map(dir: vec3f) -> vec4f {
@@ -789,15 +847,6 @@ fn evaluate_env_map(dir: vec3f) -> vec4f {
     return textureLoad(env_map, vec2u(uv * vec2f(textureDimensions(env_map))), 0); 
 }
 
-fn env_map_to_dir(e: vec2f) -> vec3f {
-    var v = vec3f(0);
-    v.z = cos(e.y * pi);
-    let phi = e.x * 2.0 * pi - pi;
-    let sin_theta = sin(e.y * pi);
-    v.x = sin_theta * cos(phi);
-    v.y = sin_theta * sin(phi);
-    return v.yxz;
-}
 
 /// branchlessONB from "Building an Orthonormal Basis, Revisited"
 ///
@@ -816,17 +865,6 @@ fn orthonormal_basis(n: vec3f) -> mat3x3<f32> {
     let b1 = vec3f(1.0 + sign * n.x * n.x * a, sign * b, -sign * n.x);
     let b2 = vec3f(b, sign + n.y * n.y * a, -n.y);
     return mat3x3<f32>(b1, b2, n);
-}
-
-
-fn sky(dir: vec3f) -> vec3f {
-    // return vec3f(1);
-    let horizon = vec3f(1.0 - SUN_COL);
-    return evaluate_env_map(dir).rgb * 1.0;
-
-    // return mix(horizon, SUN_COL,pow(max(dot(dir, TO_SUN_DIR), 0.0), 3.0)) * 1.00;
-    // return to_linear(dir * 0.5 + 0.5);
-    // return vec3f(1.0);
 }
 
 // from https://www.shadertoy.com/view/XtGGzG
@@ -871,6 +909,7 @@ fn ramp(x: f32) -> vec3f {
     return to_linear(clamp(magma_quintic(x), vec3f(0.0), vec3f(1.0)));
 }
 
+// MARK: camera_ray
 fn camera_ray(pixel: vec2u) -> Ray {
     var ray: Ray;
 
@@ -890,7 +929,7 @@ fn camera_ray(pixel: vec2u) -> Ray {
     pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor * aspect;
     pixel_pos += up    * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
     
-    // // "bloom"
+    // "bloom"
     // let a = rand() * pi * 2.0;
     // let m = rand();
     // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
@@ -911,6 +950,7 @@ fn camera_ray(pixel: vec2u) -> Ray {
 
     return ray;
 }
+
 fn project_to_hemisphere(dir: vec3f, normal: vec3f) -> vec3f {
     if dot(dir, normal) < 0.0 {
         return normalize(dir - dot(dir, normal) * normal);
@@ -918,17 +958,24 @@ fn project_to_hemisphere(dir: vec3f, normal: vec3f) -> vec3f {
         return dir;
     }
 }
+
 fn sample_lambert(normal: vec3f) -> vec3f {
     // from raytracing in one weekend
     return normalize(normal + rand_sphere());
+}
+
+// cosign hemisphere sampling pdf
+fn sample_lambert_pdf(wi: vec3f, n: vec3f) -> f32 {
+    return max(0.0, dot(wi, n)) / pi;
 }
 
 fn evaluate_lambert(to_light: vec3f, normal:  vec3f) -> f32 {
     return max(dot(to_light, normal), 0.0) / pi;
 }
 
+// MARK: GGX
 // from https://schuttejoe.github.io/post/ggximportancesamplingpart2/
-fn eval_ggx_smith_masking(o_tangent: vec3f, a2: f32) -> f32 {
+fn evaluate_ggx_smith_masking(o_tangent: vec3f, a2: f32) -> f32 {
     let dotNV = o_tangent.z;
     let denomC = sqrt(a2 + (1.0 - a2) * dotNV * dotNV) + dotNV;
 
@@ -936,7 +983,7 @@ fn eval_ggx_smith_masking(o_tangent: vec3f, a2: f32) -> f32 {
 }
 
 // from https://schuttejoe.github.io/post/ggximportancesamplingpart2/
-fn eval_ggx_smith_shadowing_masking(i_tangent: vec3f, o_tangent: vec3f, a2: f32) -> f32 {
+fn evaluate_ggx_smith_shadowing_masking(i_tangent: vec3f, o_tangent: vec3f, a2: f32) -> f32 {
     let dotNL = i_tangent.z;
     let dotNV = o_tangent.z;
 
@@ -944,6 +991,21 @@ fn eval_ggx_smith_shadowing_masking(i_tangent: vec3f, o_tangent: vec3f, a2: f32)
     let denomB = dotNL * sqrt(a2 + (1.0 - a2) * dotNV * dotNV);
 
     return 2.0 * dotNL * dotNV / (denomA + denomB);
+}
+
+fn evaluate_fresnel_schlick(normal: vec3f, view: vec3f, f0: vec3f) -> vec3f {
+    return f0 + (1.0 - f0) * pow(1.0 - dot(normal, view), 5.0);
+}
+
+// one_minus_NoH_squared from
+// https://github.com/google/filament/blob/main/shaders/src/surface_brdf.fs
+// for floating point precision concerns at low roughness
+fn evaluate_ggx_distribution(h_tangent: vec3f, a2: f32) -> f32 {
+    let NoH = saturate(h_tangent.z);
+    let NxH = cross(vec3f(0.0, 0.0, 1.0), h_tangent);
+    let one_minus_NoH_squared = dot(NxH, NxH);
+    let D_denom_sqr = (NoH * NoH) * a2 + one_minus_NoH_squared;
+    return a2 / (D_denom_sqr * D_denom_sqr * pi);
 }
 
 // https://jcgt.org/published/0007/04/01/paper.pdf
@@ -956,11 +1018,6 @@ fn sample_ggx_smith_vndf(view_tangent: vec3f, roughness: f32) -> vec3f {
     let len_2 = vh.x * vh.x + vh.y * vh.y;
     let t1 = select(vec3f(1, 0, 0), vec3f(-vh.y, vh.x, 0) * inverseSqrt(len_2), len_2 > 0);
     let t2 = cross(vh, t1);
-
-    // Use a robust method to find the first tangent vector
-    // let up = select(vec3f(0, 1, 0), vec3f(1, 0, 0), abs(vh.y) < 0.999);
-    // let t1 = normalize(cross(up, vh));
-    // let t2 = cross(vh, t1);
 
     let r = sqrt(rand());
     let phi = 2.0 * pi * rand();
@@ -978,65 +1035,21 @@ fn sample_ggx_smith_vndf(view_tangent: vec3f, roughness: f32) -> vec3f {
     return ne;
 }
 
-fn eval_fresnel_schlick(normal: vec3f, view: vec3f, f0: vec3f) -> vec3f {
-    return f0 + (1.0 - f0) * pow(1.0 - dot(normal, view), 5.0);
-}
-
-fn compute_tangent(hit: Hit) {
-    var ext = tri_exts[hit.idx];
-
-}
-
-
-fn sample_hit(hit: Hit) -> ExtSample {
-    var ext = tri_exts[hit.idx];
-    var sample = tri_ext_interpolate(&ext, hit.bary);
-
-    // get smooth_normal into world space, if it exists
-    if length(sample.vertex_normal) > 0.001 {
-        sample.vertex_normal = transform_normal(normalize(sample.vertex_normal), primitives[hit.prim_idx].inv_transform);
-        if dot(sample.vertex_normal, hit.normal) < 0.0 {
-            // flip face if vertex normal pointing away from geometric normal
-           sample.vertex_normal = -sample.vertex_normal;
-           sample.tangent = -sample.tangent;
-           sample.t_sign *= -1.0;
-        }
-    } else {
-        
-        sample.vertex_normal = hit.normal;
-    }
+/// returns the pdf with respect to wi_tangent ( reflect(-wo_tangent, h_tangent) )
+fn sample_ggx_smith_vndf_pdf(wo_tangent: vec3f, h_tangent: vec3f, r: f32) -> f32 {
+    let a2 = r * r * r * r;
     
-
-    sample.normal = sample.vertex_normal;
-    if (hit.material.normal.size != 0) {
-        let normal_tangent = (sample_texture(hit.material.normal, sample.texcoords[hit.material.normal_texcoord]).xyz * 2.0 - 1.0) * hit.material.normal_scale;
-
-        // this is what the guys website says, but it looks a little off to me
-        let bt = normalize(sample.t_sign * cross(sample.vertex_normal, sample.tangent));
-        // let bt = sample.bi_tangent;
-
-        sample.normal = normalize(
-            normal_tangent.x * sample.tangent + normal_tangent.y * bt + normal_tangent.z * sample.vertex_normal
-        );
+    let D = evaluate_ggx_distribution(h_tangent, a2);
+    
+    if wo_tangent.z <= 0.0 || h_tangent.z <= 0.0 {
+        return 0.0;
     }
+    let G1 = evaluate_ggx_smith_masking(wo_tangent, a2);
+    // let pdf_h = G1 * max(0.0, dot(wo_tangent, h_tangent)) * D / wo_tangent.z;
+    // let reflect_jacobian = 1.0 / (4.0 * saturate(dot(wo_tangent, h_tangent)));
+    let pdf_h_times_jacobian = G1 * D / (wo_tangent.z * 4.0);
 
-    sample.albedo = hit.material.albedo_factor;
-    if hit.material.albedo.size != 0 {
-        sample.albedo *= to_linear_4(sample_texture(hit.material.albedo, sample.texcoords[hit.material.albedo_texcoord]));
-    }
-
-    sample.emissive = hit.material.emissive_factor;
-    if hit.material.emissive.size != 0 {
-        sample.emissive *= to_linear(sample_texture(hit.material.emissive, sample.texcoords[hit.material.emissive_texcoord]).rgb);
-    }
-
-    sample.metallic_roughness = vec3f(0.0, hit.material.roughness_factor, hit.material.metallic_factor);
-    if hit.material.metallic_roughness.size != 0 {
-        sample.metallic_roughness *= sample_texture(hit.material.metallic_roughness, sample.texcoords[hit.material.metal_r_texcoord]).rgb;
-    }
-    sample.metallic_roughness.g = clamp(sample.metallic_roughness.g, 0.015, 1.0);
-
-    return sample;
+    return pdf_h_times_jacobian;
 }
 
 const DEBUG: bool = true;
@@ -1048,7 +1061,7 @@ fn compare_gltf_space(v: vec3f) -> vec3f {
 
 
 //MARK: Surface Hit
-fn sample_brdf(wo: vec3f, sample: ExtSample, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>, pdf: ptr<function, f32>) -> vec3f {
+fn sample_brdf(wo: vec3f, sample: ExtSample, lighting: ptr<function, vec3f>, pdf: ptr<function, f32>) -> vec3f {
     var debug_color = vec3f(0);
     *pdf= 0.0;
     var albedo   = vec3f(0);
@@ -1086,82 +1099,32 @@ fn sample_brdf(wo: vec3f, sample: ExtSample, throughput: ptr<function, vec3f>, l
     }
     var wi: vec3f;
 
-
-
-    let fresnel = eval_fresnel_schlick(wo_tangent, h_tangent, f0);
-    let specular_chance = (fresnel.r + fresnel.g + fresnel.b) / 3.0;
+    let fresnel = evaluate_fresnel_schlick(wo_tangent, h_tangent, f0);
+    let specular_chance = clamp(fresnel.r + fresnel.g + fresnel.b, 0.0, 2.999) / 3.0;
 
     if rand() < specular_chance {
         let wi_tangent = reflect(-wo_tangent, h_tangent);
 
-        *pdf = ggx_smith_vndf_pdf(wo_tangent, h_tangent, roughness);
-
-        if wi_tangent.z < 0.0 {
-            *throughput *= 0.0;
-        }
-
-
-        if wi_tangent.z < 0.0 {
-            (*throughput) *= 0.0;
-        }
         wi = tbn * wi_tangent;
 
         let a2 = roughness * roughness * roughness * roughness;
-        let g1 = eval_ggx_smith_masking(wo_tangent, a2); // importance sampled
-        let g2 = eval_ggx_smith_shadowing_masking(wi_tangent, wo_tangent , a2);
+        let g1 = evaluate_ggx_smith_masking(wo_tangent, a2); // importance sampled
+        let g2 = evaluate_ggx_smith_shadowing_masking(wi_tangent, wo_tangent , a2);
         // debug_color = vec3f(g2);
         let t = fresnel * (g2 / g1) / specular_chance;
 
-        // clamp fireflies
-        *throughput *= select(vec3f(0), t, all(t < vec3f(10000.0) ) && all(t > vec3f(0.0)));
-
     } else {
-        *throughput *= albedo / clamp(1.0 - specular_chance, 0.0001, 1.0);
-        *throughput *= (1.0 - metallic_chance);
+
         wi = sample_lambert(sample.normal);
-        *pdf = evaluate_cosign_pdf(wi, sample.normal);
     }
+
+    *pdf = mix(sample_lambert_pdf(wi, sample.normal), sample_ggx_smith_pdf(wi, wo, sample.normal, roughness), specular_chance);
 
     if DEBUG && globals.debug_mode != 0 {
         *lighting = debug_color;
     }
 
     return wi;
-    
-}
-
-fn D_ggx(h_tangent: vec3f, a2: f32) -> f32 {
-    let NoH = saturate(h_tangent.z);
-    let NxH = cross(vec3f(0.0, 0.0, 1.0), h_tangent);
-    let one_minus_NoH_squared = dot(NxH, NxH);
-    let D_denom_sqr = (NoH * NoH) * a2 + one_minus_NoH_squared;
-    return a2 / (D_denom_sqr * D_denom_sqr * pi);
-}
-
-fn ggx_smith_vndf_pdf(wo_tangent: vec3f, h_tangent: vec3f, r: f32) -> f32 {
-    let a2 = r * r * r * r;
-    
-
-
-    let D = D_ggx(h_tangent, a2);
-    
-
-
-    if wo_tangent.z <= 0.0 || h_tangent.z <= 0.0 {
-        return 0.0;
-    }
-    
-
-    let G1 = eval_ggx_smith_masking(wo_tangent, a2);
-
-
-    // let pdf_h = G1 * max(0.0, dot(wo_tangent, h_tangent)) * D / wo_tangent.z;
-    // let reflect_jacobian = 1.0 / (4.0 * saturate(dot(wo_tangent, h_tangent)));
-
-
-    let pdf_h_times_jacobian = G1 * D / (wo_tangent.z * 4.0);
-    // debug = pdf_h_times_jacobian / 9999999999999999999.0;
-    return pdf_h_times_jacobian;
 }
 
 fn sample_ggx_smith(wo: vec3f, n: vec3f, r: f32, pdf: ptr<function, f32>) -> vec3f {
@@ -1169,20 +1132,15 @@ fn sample_ggx_smith(wo: vec3f, n: vec3f, r: f32, pdf: ptr<function, f32>) -> vec
     let wo_tangent = wo * tbn;
     let h_tangent = sample_ggx_smith_vndf(wo_tangent, r);
     let wi_tangent = reflect(-wo_tangent, h_tangent);
-    (*pdf) = ggx_smith_vndf_pdf(wo_tangent, h_tangent, r);
+    (*pdf) = sample_ggx_smith_vndf_pdf(wo_tangent, h_tangent, r);
     return tbn * wi_tangent;
 }
 
-// /// https://github.com/google/filament/blob/main/shaders/src/surface_brdf.fs
-// fn ggx_D_filament(alpha: f32, NoH: f32, h_tangent: vec3f) -> f32 {
-
-    
-// }
 
 /// Journal of Computer Graphics Techniques
 /// Sampling the GGX Distribution of Visible Normals
 /// https://jcgt.org/published/0007/04/01/paper.pdf
-fn evaluate_ggx_smith_pdf(wi: vec3f, wo: vec3f, n: vec3f, r: f32) -> f32 {
+fn sample_ggx_smith_pdf(wi: vec3f, wo: vec3f, n: vec3f, r: f32) -> f32 {
     let a = r * r;
     let a2 = a * a;
     let tbn = orthonormal_basis(n);
@@ -1191,18 +1149,14 @@ fn evaluate_ggx_smith_pdf(wi: vec3f, wo: vec3f, n: vec3f, r: f32) -> f32 {
 
     // halfway vector and microfacet normal
     let ne_tangent = normalize(wi_tangent + wo_tangent);
-    return ggx_smith_vndf_pdf(wo_tangent, ne_tangent, r);
+    return sample_ggx_smith_vndf_pdf(wo_tangent, ne_tangent, r);
 }
 
-// exact cosign hemisphere sampling pdf
-fn evaluate_cosign_pdf(wi: vec3f, n: vec3f) -> f32 {
-    return max(0.0, dot(wi, n)) / pi;
-}
 
 
 // what is the probability the brdf sampling returned wi given the surface properties
 // maybe not 100% accurate, hopefully good enough for MIS weighting
-fn evaluate_brdf_pdf(wi: vec3f, wo: vec3f, sample: ExtSample) -> f32 {
+fn sample_brdf_pdf(wi: vec3f, wo: vec3f, sample: ExtSample) -> f32 {
     let h = normalize(wi + wo);
     if dot(wi, sample.normal) < 0.0 {
         return 0.0;
@@ -1210,11 +1164,18 @@ fn evaluate_brdf_pdf(wi: vec3f, wo: vec3f, sample: ExtSample) -> f32 {
     let metallic_chance = sample.metallic_roughness.b;
     let r = sample.metallic_roughness.g;
     // not sure this is technically correct
-    var f0 = mix(vec3f(0.04), sample.albedo.rgb, metallic_chance);
-    let fresnel = eval_fresnel_schlick(wo, h, f0);
-    let specular_chance = (fresnel.r + fresnel.g + fresnel.b) / 3.0;
-    let specular_pdf = evaluate_ggx_smith_pdf(wi, wo, h, r);
-    let diffuse_pdf = evaluate_cosign_pdf(wi, h);
+    // var f0 = mix(vec3f(0.04), sample.albedo.rgb, metallic_chance);
+    let fresnel_metal = evaluate_fresnel_schlick(wo, h, sample.albedo.rgb);
+    let fresnel_diffuse = evaluate_fresnel_schlick(wo, h, vec3f(0.04));
+
+    let specular_given_metal = (fresnel_metal.r + fresnel_metal.g + fresnel_metal.b) / 3.0;
+    let specular_given_diffuse = (fresnel_diffuse.r + fresnel_diffuse.g + fresnel_diffuse.b) / 3.0;
+
+    let specular_chance = mix(specular_given_diffuse, specular_given_metal, metallic_chance);
+
+
+    let specular_pdf = sample_ggx_smith_pdf(wi, wo, sample.normal, r);
+    let diffuse_pdf = sample_lambert_pdf(wi, sample.normal);
     return mix(diffuse_pdf, specular_pdf, specular_chance);
 }
 
@@ -1229,9 +1190,9 @@ fn evaluate_ggx(wo_tangent: vec3f, wi_tangent: vec3f, f0: vec3f, a2: f32) -> vec
     let NoV = max(wo_tangent.z, 0.0);
     let NoL = max(wi_tangent.z, 0.0);
     
-    let D = D_ggx(h_tangent, a2);
-    let G = eval_ggx_smith_shadowing_masking(wo_tangent, wi_tangent, a2);
-    let F = eval_fresnel_schlick(wo_tangent, h_tangent, f0);
+    let D = evaluate_ggx_distribution(h_tangent, a2);
+    let G = evaluate_ggx_smith_shadowing_masking(wo_tangent, wi_tangent, a2);
+    let F = evaluate_fresnel_schlick(wo_tangent, h_tangent, f0);
     
     let denom = 4.0 * NoV * NoL;
     // return vec3f(G);
@@ -1259,7 +1220,7 @@ fn evaluate_brdf(wi: vec3f, wo: vec3f, sample: ExtSample) -> vec3f {
 
     let h_tangent = normalize(wi_tangent + wo_tangent);
 
-    let fresnel = eval_fresnel_schlick(wo_tangent, h_tangent, f0);
+    let fresnel = evaluate_fresnel_schlick(wo_tangent, h_tangent, f0);
 
     // return vec3f(fresnel);
 
@@ -1270,11 +1231,16 @@ fn evaluate_brdf(wi: vec3f, wo: vec3f, sample: ExtSample) -> vec3f {
 
 } 
 
+fn mis_power_heuristic(a: f32, b: f32, a_prob: f32, b_prob: f32) -> f32 {
+    let ap = a * a_prob;
+    let bp = b * b_prob;
+    if !(ap * bp> 0.0) {
+        return 0.0;
+    }
 
-fn handle_miss(ray: ptr<function, Ray>, hit: Hit, throughput: ptr<function, vec3f>, lighting: ptr<function, vec3f>) {
-    // *lighting = vec3f(1);
-    *lighting += *throughput * sky((*ray).dir);
+    return (ap * ap) / (ap * ap + bp * bp);
 }
+
 @compute
 @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
@@ -1283,20 +1249,20 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     var lighting   = vec3f(0);
     var throughput = vec3f(1);
 
-    // let samples = u32(screen[id.x + globals.res.x * id.y].a);
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
-
+    // spin the rng to improve the quality of the first samples
     rand(); rand();
 
     var NEE_PROB = 0.5;
 
-    // const, but no way to select() in const expressions apparently
+    // constant, but no way to select() in const expressions apparently
     var NUM_BOUNCES = 8;
     if DEBUG && globals.debug_mode != 0 {
         NUM_BOUNCES = 1;
         NEE_PROB = 0.0;
     }
 
+    // debug variable
     var right = id.x > globals.res.x / 2;
 
     var ray = camera_ray(id.xy);
@@ -1305,7 +1271,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         let hit = trace(ray);
 
         if (hit.idx == -1) {
-            handle_miss(&ray, hit, &throughput, &lighting);
+            lighting += throughput * evaluate_env_map(ray.dir).rgb;
             break;
         } else {
             let sample = sample_hit(hit);
@@ -1313,6 +1279,9 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             ray.origin += hit.normal * 0.001;
             var wi: vec3f;
             var brdf_pdf: f32;
+            var nee_pdf: f32;
+            var mis_weight: f32;
+            var mis_pdf: f32;
             let wo = -ray.dir;
             lighting += sample.emissive * throughput;
             if rand() < NEE_PROB {
@@ -1321,48 +1290,40 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
                 let brdf = evaluate_brdf(wi, wo, sample);
                 let n_dot_l = max(dot(wi, sample.normal), 0.0);
                 throughput *= brdf * n_dot_l;
-                if right {
-                    brdf_pdf = evaluate_ggx_smith_pdf(wi, wo, sample.normal, sample.metallic_roughness.g);
-                } else {
-                    brdf_pdf = evaluate_brdf_pdf(wi, wo, sample);
-                }
+                brdf_pdf = sample_brdf_pdf(wi, wo, sample);
+
+                nee_pdf = sample_env_map_pdf(wi);
+
+                mis_weight = mis_power_heuristic(nee_pdf, brdf_pdf, NEE_PROB, 1.0 - NEE_PROB);
                 
+                mis_pdf = nee_pdf * NEE_PROB;
             } else {
 
                 // brdf sampling
-                var dummy = vec3f(1);
 
-                if right {
-                    wi = sample_ggx_smith(wo, sample.normal, sample.metallic_roughness.g, &brdf_pdf);
-                } else {
-                    wi = sample_brdf(wo, sample, &dummy, &lighting, &brdf_pdf);
-                }
-                
-
+                wi = sample_brdf(wo, sample, &lighting, &brdf_pdf);
 
                 let n_dot_l = max(dot(wi, sample.normal), 0.0);
                 let brdf = evaluate_brdf(wi, wo, sample);
 
-                debug = (brdf.g / brdf_pdf);
                 throughput *= n_dot_l * brdf;
+
+                nee_pdf = sample_env_map_pdf(wi);
+
+                mis_weight = mis_power_heuristic(brdf_pdf, nee_pdf, 1.0 - NEE_PROB, NEE_PROB);
                 
-
-
+                mis_pdf = brdf_pdf * (1.0 - NEE_PROB);
             }
-            var nee_pdf = sample_env_map_pdf(wi);
-            
-            let mis_pdf = NEE_PROB * nee_pdf + (1.0 - NEE_PROB) * brdf_pdf;
 
             if mis_pdf > 0.0 {
                 throughput /= mis_pdf;
+                throughput *= mis_weight; // sanity check - commenting this works (in conjunction with ^)
             } else {
                 throughput *= 0.0;
             }
             
             ray.dir = wi;
             ray.idir = 1.0 / ray.dir;
-
-            
         }
         
     }
@@ -1376,10 +1337,6 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     if (debug < 0.0) {
         lighting = vec3f(1.0, 1.0, 0.0);
     }
-
-
-
-    // screen[id.x][id.y] += vec4f(hit.t * 10.0, hit.t, sin(f32(hit.idx) * 137.821) * 0.5 + 0.5, 1.0);
 
     if (globals.reject_hist > 0) {
         screen[id.x + globals.res.x * id.y] = vec4f(lighting, 1.0);
