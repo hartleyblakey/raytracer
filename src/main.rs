@@ -77,9 +77,9 @@ struct Context {
     primitive_data_ssbo:        Buffer,
 
     env_map_texture:            Texture,
-    env_map_col_cdf:           Texture,
+    env_map_col_cdf:            Texture,
     env_map_pdf:                Texture,
-    env_map_rows_cdf:            Buffer,
+    env_map_rows_cdf:           Buffer,
 
     rt_data_binding:            BindGroup,
 
@@ -240,11 +240,11 @@ impl Context {
         // just make everything 128mb for simplicity
         let max_buffer_size_mb = 128;
 
-        let triangles_ssbo =        gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
+        let triangles_ssbo =        gpu.new_storage_buffer(256 * 1024 * 1024);
         let bvh_ssbo =              gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
-        let triangles_ext_ssbo =    gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
+        let triangles_ext_ssbo =    gpu.new_storage_buffer(512 * 1024 * 1024);
         let texture_data_ssbo =     gpu.new_storage_buffer(1024 * 1024 * 1024);
-        let primitive_data_ssbo =   gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
+        let primitive_data_ssbo =   gpu.new_storage_buffer(32 * 1024 * 1024);
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
         let env_map_rows_cdf = gpu.new_storage_buffer((scene.env_map.height * scene.env_map.width * size_of::<f32>()) as u64);
@@ -395,12 +395,21 @@ impl Context {
 
     fn upload_scene(&mut self, gpu: &Gpu) {
         println!("Uploading scene to the gpu");
+
+        // tack the TLAS onto the back of the BLAS data
+        let mut combined_bvh = self.scene.bvh_node_data.clone();
+        combined_bvh.append(&mut self.scene.tlas_node_data);
+        gpu.queue.write_buffer(&self.bvh_ssbo,               0, bytemuck::cast_slice(combined_bvh.as_slice()));
+        
         gpu.queue.write_buffer(&self.triangles_ssbo,         0, bytemuck::cast_slice(self.scene.tris.as_slice()));
         gpu.queue.write_buffer(&self.triangles_ext_ssbo,     0, bytemuck::cast_slice(self.scene.tri_exts.as_slice()));
-        gpu.queue.write_buffer(&self.bvh_ssbo,               0, bytemuck::cast_slice(self.scene.bvh_node_data.as_slice()));
         gpu.queue.write_buffer(&self.texture_data_ssbo,      0, bytemuck::cast_slice(self.scene.texture_data.as_slice()));
         gpu.queue.write_buffer(&self.primitive_data_ssbo,    0, bytemuck::cast_slice(self.scene.primitives.as_slice()));
         gpu.queue.write_buffer(&self.env_map_rows_cdf,       0, bytemuck::cast_slice(self.scene.env_map.cdf_rows.as_slice()));
+
+
+
+        
 
         gpu.queue.write_texture(
             self.env_map_texture.as_image_copy(), 

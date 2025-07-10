@@ -59,7 +59,7 @@ pub struct GpuSceneUniform {
     pub tri_count: u32,
     pub num_point_lights: u32,
     pub num_directional_lights: u32,
-    pub _pad: u32,
+    pub tlas_node_count: u32,
 }
 
 
@@ -378,6 +378,9 @@ pub struct RenderScene {
     /// flat array of primitives that share a material
     pub primitives:         Vec<GpuPrimitive>,
 
+    /// bvh over RenderScene::primitives
+    pub tlas_node_data: Vec<BvhNode>,
+
     /// global buffer of triangle position data
     pub tris:               Vec<Tri>,
     pub tri_exts:           Vec<GpuTriExt>,
@@ -387,6 +390,8 @@ pub struct RenderScene {
     pub texture_map:        HashMap<usize, GpuTextureRef>,
 
     pub bvh_node_data:      Vec<BvhNode>,
+
+    
 
     /// cameras in scene
     pub cameras:            Vec<Camera>,
@@ -491,7 +496,7 @@ impl RenderScene {
 
         let (document, buffers, _) = match gltf::import_slice(bytes) {
             Ok(r) => r,
-            Err(_) => return false,
+            Err(_) =>{println!("Failed to import gltf bytes"); return false},
         };
 
         let mut ms = MatrixStack::new();
@@ -502,6 +507,8 @@ impl RenderScene {
                 self.add_gltf_node(&buffers, node, &mut ms, &mut cache);
             }
         }
+
+        self.build_tlas();
         
         true
     }   
@@ -654,12 +661,15 @@ impl RenderScene {
                             }
 
                             let texcoords = reader.read_tex_coords(id.clone());
-                            let texcoords: Vec<Vec2> = if texcoords.is_some() {
+                            let texcoords = if texcoords.is_some() {
                                 texcoords.unwrap().into_f32().map(|uv| Vec2::from_slice(&uv)).collect()
                             } else {
                                 Vec::new()
                             };
-                            found_texcoords.insert(id.clone(), texcoords);
+                            if !texcoords.is_empty() {
+                                found_texcoords.insert(id.clone(), texcoords);
+                            }
+                            
                         };
 
                         let mut material = GpuMaterial::default();
@@ -793,7 +803,7 @@ impl RenderScene {
                         // build a bvh around the new triangles
                         let mut bvh = Bvh::new(&self.tris.as_slice(), first_new_tri, self.tris.len() - first_new_tri);
                         // re-arrange the new triangles to match the BVH nodes
-                        bvh.flatten_triangles(self.tris.as_mut_slice(), self.tri_exts.as_mut_slice());
+                        bvh.flatten_leaves(self.tris.as_mut_slice(), Some(self.tri_exts.as_mut_slice()));
                         let bvh_root = self.bvh_node_data.len() as u32;
                         self.bvh_node_data.append(&mut bvh.nodes);
 
@@ -863,6 +873,23 @@ impl RenderScene {
         }
     }
 
+    pub fn build_tlas(&mut self) {
+        let mut primitive_leaves: Vec<PrimitiveLeaf> = self.primitives.iter()
+            .map(|p| PrimitiveLeaf::new(*p, &self.bvh_node_data, &self.tris))
+            .collect();
+        let mut tlas = Bvh::new(primitive_leaves.as_slice(), 0, primitive_leaves.len());
+
+        // this is a little ridiculous since there is no actual data, but _ isn't copy.
+        tlas.flatten_leaves::<_, u32>(&mut primitive_leaves, None);
+        self.primitives.clear();
+        for leaf in primitive_leaves {
+            self.primitives.push(leaf.primitive)
+        }
+        println!("TLAS: {} nodes over {} primitives", tlas.nodes.len(), self.primitives.len());
+
+        self.tlas_node_data = tlas.nodes;
+    }
+
     pub fn to_gpu(&self) -> GpuSceneUniform {
         let mut point_lights = [PointLight::default(); 12];
         let mut directional_lights = [GpuDirectionalLight::default(); 4];
@@ -876,7 +903,7 @@ impl RenderScene {
         }
 
         GpuSceneUniform {
-            _pad: 0,
+            tlas_node_count: self.tlas_node_data.len() as u32,
             camera: self.cameras[0].to_gpu(),
             point_lights,
             directional_lights,
@@ -938,7 +965,10 @@ impl RenderScene {
         println!("building scene");
         let mut scene = RenderScene::default();
     
-        scene.add_gltf_bytes(&Mat4::IDENTITY, mesh_bytes);
+        if !scene.add_gltf_bytes(&Mat4::IDENTITY, mesh_bytes) {
+            
+            return None;
+        }
     
         scene.set_equirectangular_env_map(env_map_path).await;
     
@@ -949,8 +979,8 @@ impl RenderScene {
         }
         
         println!("Tri count: {}", scene.tris.len());
-        println!("Tri size : {} mb", (scene.tris.len() * size_of::<Tri>()) / (1000 * 1000));
-        println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1000 * 1000));
+        println!("Tri size : {} + {} mb", (scene.tris.len() * size_of::<Tri>()) / (1024 * 1024), (scene.tris.len() * size_of::<GpuTriExt>()) / (1024 * 1024));
+        println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1024 * 1024));
 
         println!("Focused camera: {}", scene.focus_camera(0));
         
@@ -961,7 +991,7 @@ impl RenderScene {
 
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable, Default)]
 pub struct Tri {
     vertices: [Vec4; 3],
 }
@@ -1027,6 +1057,12 @@ impl Aabb {
         }
     }
 
+    pub fn min_max(min: Vec3, max: Vec3) -> Self {
+        Self {
+            data: [min.x, min.y, min.z, max.x, max.y, max.z]
+        }
+    }
+
     fn surface(&self) -> f32 {
         let size = self.max() - self.min();
         (size.x * size.y + size.y * size.z + size.z * size.x) * 2.0
@@ -1086,6 +1122,91 @@ impl Aabb {
     }
 }
 
+impl Default for Aabb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub trait BvhLeaf : Default + Copy {
+    fn aabb(&self) -> Aabb;
+    fn closest_hit(&self, ro: Vec3, rd: Vec3) -> Option<f32>;
+    fn centroid(&self) -> Vec3 {
+        let aabb = self.aabb();
+        (aabb.min() + aabb.max()) / 2.0
+    }
+}
+
+impl BvhLeaf for Tri {
+    fn aabb(&self) -> Aabb { self.aabb() }
+    
+    fn closest_hit(&self, ro: Vec3, rd: Vec3) -> Option<f32> {
+        self.closest_hit(ro, rd)
+    }
+
+    fn centroid(&self) -> Vec3 {
+        self.centroid()
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct PrimitiveLeaf {
+    primitive: GpuPrimitive,
+    aabb: Aabb,
+}
+
+fn aabb_over_bvh_node(bvh: &Vec<BvhNode>, tris: &Vec<Tri>, transform: &Mat4, idx: usize) -> Aabb {
+    if bvh[idx].count == 0 {
+        // interior node
+        aabb_over_bvh_node(bvh, tris, transform, bvh[idx].first as usize)
+            .with(aabb_over_bvh_node(bvh, tris, transform, bvh[idx].first as usize + 1))
+    } else {
+        let mut aabb = Aabb::new();
+        for i in 0..bvh[idx].count {
+            let t = bvh[idx].first as usize + i as usize;
+            aabb.expand(Aabb::point(transform.transform_point3(tris[t].vertices[0].xyz())));
+            aabb.expand(Aabb::point(transform.transform_point3(tris[t].vertices[1].xyz())));
+            aabb.expand(Aabb::point(transform.transform_point3(tris[t].vertices[2].xyz())));
+        }
+        aabb
+    }
+}
+
+impl PrimitiveLeaf {
+    pub fn new(primitive: GpuPrimitive, bvh: &Vec<BvhNode>, tris: &Vec<Tri>) -> Self {
+        let local_aabb = bvh[primitive.bvh_idx as usize].aabb;
+        let transform = primitive.transform;
+        let aabb = aabb_over_bvh_node(&bvh, &tris, &transform, primitive.bvh_idx as usize);
+
+        // let mut aabb = Aabb::min_max(
+        //     transform.transform_point3(min),
+        //     transform.transform_point3(max)
+        // );
+        // aabb.expand(Aabb::point(transform.transform_point3(vec3(min.x, min.y, max.z))));
+        // aabb.expand(Aabb::point(transform.transform_point3(vec3(min.x, max.y, min.z))));
+        // aabb.expand(Aabb::point(transform.transform_point3(vec3(min.x, max.y, max.z))));
+        // aabb.expand(Aabb::point(transform.transform_point3(vec3(max.x, min.y, min.z))));
+        // aabb.expand(Aabb::point(transform.transform_point3(vec3(max.x, min.y, max.z))));
+        // aabb.expand(Aabb::point(transform.transform_point3(vec3(max.x, max.y, min.z))));
+
+        Self {
+            primitive,
+            aabb,
+        }
+    }
+}
+
+impl BvhLeaf for PrimitiveLeaf {
+    fn aabb(&self) -> Aabb {
+        self.aabb
+    }
+
+    fn closest_hit(&self, _ro: Vec3, _rd: Vec3) -> Option<f32> {
+        unimplemented!()
+    }
+}
+
+
 // structure from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1109,19 +1230,19 @@ impl BvhNode {
         }
     }
 
-    fn from_tris(first: u32, count: u32, indices: &Vec<u32>, tris: &[Tri], offset: usize) -> Self {
+    fn from_leaves<Leaf: BvhLeaf>(first: u32, count: u32, indices: &Vec<u32>, leaves: &[Leaf], offset: usize) -> Self {
         let mut new = Self::new();
         new.first = first;
         new.count = count;
-        new.update_aabb(indices, tris, offset);
+        new.update_aabb(indices, leaves, offset);
         new
     }
 
-    fn update_aabb(&mut self, indices: &Vec<u32>, tris: &[Tri], offset: usize) {
+    fn update_aabb<Leaf: BvhLeaf>(&mut self, indices: &Vec<u32>, leaves: &[Leaf], offset: usize) {
         if self.count != 0 {
-            self.aabb = tris[indices[self.first as usize - offset] as usize].aabb();
+            self.aabb = leaves[indices[self.first as usize - offset] as usize].aabb();
             for i in self.first..self.first + self.count {
-                self.aabb.expand(tris[indices[i as usize - offset] as usize].aabb());
+                self.aabb.expand(leaves[indices[i as usize - offset] as usize].aabb());
             }
         }
     }
@@ -1135,7 +1256,7 @@ pub struct Bvh {
 }
 
 impl Bvh {
-    pub fn new(tris: &[Tri], offset: usize, size: usize) -> Self {
+    pub fn new<Leaf: BvhLeaf>(leaves: &[Leaf], offset: usize, size: usize) -> Self {
         let mut res = Self {
             nodes: Vec::new(),
             indices: ( (offset  as u32) .. (offset + size) as u32 ).collect(),
@@ -1143,45 +1264,57 @@ impl Bvh {
             size
         };
 
-        res.nodes.push(BvhNode::from_tris(offset as u32, size as u32, &res.indices, &tris, offset));
-        res.subdivide(res.nodes.len() - 1, tris);
+        res.nodes.push(BvhNode::from_leaves(offset as u32, size as u32, &res.indices, &leaves, offset));
+        res.subdivide(res.nodes.len() - 1, leaves);
         return res;
     }
 
     /// remove the layer of indirection used to build the BVH
-    pub fn flatten_triangles(&mut self, tris: &mut [Tri], tri_exts: &mut [GpuTriExt]) {
-        let mut tris_new: Vec<Tri>    = Vec::new();
-        let mut exts_new: Vec<GpuTriExt> = Vec::new();
+    pub fn flatten_leaves<Leaf: BvhLeaf, Ext: Copy + Default>(&mut self, leaves: &mut [Leaf], exts: Option<&mut [Ext]>) {
+        let mut leaves_new: Vec<Leaf>    = Vec::new();
+        leaves_new.resize(self.size, Leaf::default());
+        
 
-        tris_new.resize(self.size, Tri::new(vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0)));
-        exts_new.resize(self.size, GpuTriExt::default());
+        if let Some(exts) = exts {
+            let mut exts_new: Vec<Ext> = Vec::new();
+            exts_new.resize(self.size, Ext::default());
+            for i in 0..self.size {
+                leaves_new[i] = leaves[self.indices[i] as usize];
+                exts_new[i] = exts[self.indices[i] as usize];
+            }
 
-        for i in 0..self.size {
-            tris_new[i] = tris[self.indices[i] as usize];
-            exts_new[i] = tri_exts[self.indices[i] as usize];
+            for i in 0..self.size {
+                leaves[i + self.offset] = leaves_new[i];
+                exts[i + self.offset] = exts_new[i];
+                self.indices[i] = i as u32;
+            }
+        } else {
+            for i in 0..self.size {
+                leaves_new[i] = leaves[self.indices[i] as usize];
+            }
+
+            for i in 0..self.size {
+                leaves[i + self.offset] = leaves_new[i];
+                self.indices[i] = i as u32;
+            }
         }
 
-        for i in 0..self.size {
-            tris[i + self.offset]     = tris_new[i];
-            tri_exts[i + self.offset] = exts_new[i];
-            self.indices[i] = i as u32;
-        }
     }
 
-    fn evaluate_split(&self, tris: &[Tri], node: &BvhNode, axis: usize, split: f32, ) -> f32 {
+    fn evaluate_split<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode, axis: usize, split: f32, ) -> f32 {
         let mut left_aabb = Aabb::new();
         let mut right_aabb = Aabb::new();
         let mut left_count = 0.0;
         let mut right_count = 0.0;
 
         for i in (node.first)..(node.first + node.count) {
-            let tri = tris[self.indices[i as usize - self.offset] as usize];
-            if tri.centroid()[axis] < split {
+            let leaf = leaves[self.indices[i as usize - self.offset] as usize];
+            if leaf.centroid()[axis] < split {
                 left_count += 1.0;
-                left_aabb.expand(tri.aabb());
+                left_aabb.expand(leaf.aabb());
             } else {
                 right_count += 1.0;
-                right_aabb.expand(tri.aabb());
+                right_aabb.expand(leaf.aabb());
             }
 
         }
@@ -1195,16 +1328,16 @@ impl Bvh {
         }
     }
 
-    fn find_best_split(&self, tris: &[Tri], node: &BvhNode) -> (usize, f32) {
+    fn find_best_split<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode) -> (usize, f32) {
         let mut best_axis = 0;
         let mut best_split = 0.0;
         let mut best_cost = f32::MAX;
 
         for axis in 0..3  as usize {
             for idx in (node.first)..(node.first + node.count) {
-                let tri = tris[self.indices[idx as usize - self.offset] as usize];
-                let split = tri.centroid()[axis as usize];
-                let cost = self.evaluate_split(tris, node, axis, split);
+                let leaf = leaves[self.indices[idx as usize - self.offset] as usize];
+                let split = leaf.centroid()[axis as usize];
+                let cost = self.evaluate_split(leaves, node, axis, split);
                 if cost < best_cost {
                     best_axis = axis;
                     best_cost = cost;
@@ -1216,7 +1349,7 @@ impl Bvh {
         (best_axis, best_split)
     }
 
-    fn find_split_approx(&self, tris: &[Tri], node: &BvhNode,  count: usize) -> (usize, f32) {
+    fn find_split_approx<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode,  count: usize) -> (usize, f32) {
         let mut best_axis = 0;
         let mut best_split = 0.0;
         let mut best_cost = f32::MAX;
@@ -1224,7 +1357,7 @@ impl Bvh {
         for axis in 0..3  as usize {
             for i in 0..count {
                 let split = node.aabb.min()[axis] + ((i as f32 + 0.5) / count as f32) * (node.aabb.max()[axis]-node.aabb.min()[axis]);
-                let cost = self.evaluate_split(tris, node, axis, split);
+                let cost = self.evaluate_split(leaves, node, axis, split);
                 if cost < best_cost {
                     best_axis = axis;
                     best_cost = cost;
@@ -1238,7 +1371,7 @@ impl Bvh {
 
 
     // algorithm from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
-    fn subdivide(&mut self, node_idx: usize, tris: &[Tri]) {
+    fn subdivide<Leaf: BvhLeaf>(&mut self, node_idx: usize, leaves: &[Leaf]) {
         let node = self.nodes[node_idx];
      
         if node.count <= 2 {
@@ -1246,9 +1379,9 @@ impl Bvh {
         }
 
         let (axis, split) = if node.count < 64 {
-            self.find_best_split(tris, &node) 
+            self.find_best_split(leaves, &node) 
         } else {
-            self.find_split_approx(tris, &node, 16) 
+            self.find_split_approx(leaves, &node, 16) 
         };
 
         let mut i = node.first as usize;
@@ -1256,7 +1389,7 @@ impl Bvh {
         while i <= j {
             let first_idx = self.indices[i - self.offset] as usize;
             
-            if tris[first_idx].centroid()[axis] < split {
+            if leaves[first_idx].centroid()[axis] < split {
                 i += 1;
             } else {
 
@@ -1274,7 +1407,7 @@ impl Bvh {
         let mut left = BvhNode::new();
         left.first = node.first;
         left.count = i  as u32 - node.first;
-        left.update_aabb(&self.indices, &tris, self.offset);
+        left.update_aabb(&self.indices, &leaves, self.offset);
 
         // dont subdivide empty nodes
         if left.count == 0 || left.count == node.count {
@@ -1284,7 +1417,7 @@ impl Bvh {
         let mut right = BvhNode::new();
         right.first = i as u32;
         right.count = node.count - left.count;
-        right.update_aabb(&self.indices, &tris, self.offset);
+        right.update_aabb(&self.indices, &leaves, self.offset);
 
 
         // we no longer hold any triangles
@@ -1295,12 +1428,12 @@ impl Bvh {
         self.nodes.push(left);
         self.nodes.push(right);
 
-        self.subdivide(children_idx, tris);
-        self.subdivide(children_idx + 1, tris);
+        self.subdivide(children_idx, leaves);
+        self.subdivide(children_idx + 1, leaves);
     }
 
     // preserved for the eventual switch to rendering with indexed triangles on the GPU
-    pub fn _closest_hit(&self, tris: &Vec<Tri>, ro: Vec3, rd: Vec3) -> Option<f32> {
+    pub fn _closest_hit<Leaf: BvhLeaf>(&self, leaves: &Vec<Leaf>, ro: Vec3, rd: Vec3) -> Option<f32> {
         let mut stack: Vec<u32> = Vec::new();
         stack.push(0);
         let mut best_t = f32::MAX;
@@ -1317,7 +1450,7 @@ impl Bvh {
             if node.count > 0 {
                 // leaf node
                 for i in 0..node.count {
-                    if let Some(t) = tris[self.indices[(node.first + i ) as usize - self.offset] as usize].closest_hit(ro, rd) {
+                    if let Some(t) = leaves[self.indices[(node.first + i ) as usize - self.offset] as usize].closest_hit(ro, rd) {
                         if t < best_t {
                             best_t = t;
                             best_i = (node.first + i) as i32;
@@ -1339,7 +1472,7 @@ impl Bvh {
         }
     }
 
-    fn closest_hit_unindexed(nodes: &Vec<BvhNode>, root: u32, tris: &Vec<Tri>, ro: Vec3, rd: Vec3) -> Option<f32> {
+    fn closest_hit_unindexed<Leaf: BvhLeaf>(nodes: &Vec<BvhNode>, root: u32, leaves: &Vec<Leaf>, ro: Vec3, rd: Vec3) -> Option<f32> {
         let mut stack: Vec<u32> = Vec::new();
         stack.push(root);
         let mut best_t = f32::MAX;
@@ -1356,7 +1489,7 @@ impl Bvh {
             if node.count > 0 {
                 // leaf node
                 for i in 0..node.count {
-                    if let Some(t) = tris[(node.first + i ) as usize].closest_hit(ro, rd) {
+                    if let Some(t) = leaves[(node.first + i ) as usize].closest_hit(ro, rd) {
                         if t < best_t {
                             best_t = t;
                             best_i = (node.first + i) as i32;

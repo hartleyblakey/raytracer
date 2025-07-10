@@ -1,9 +1,11 @@
 # WebGPU GLTF Raytracer
 
-![screenshot](/screenshots/helmet_sun.png?raw=true)
+![screenshot](/screenshots/bistro_vespa.png?raw=true)
 ![screenshot](/screenshots/web.png?raw=true)
 
 ### Features
+
+- Basic offline raytracing of static GLTF scenes
 
 - Uses the gltf crate to load opaque static GLTF files into vectors of triangle positions, cameras, texcoords, and textures converted to rgba8
 
@@ -12,7 +14,8 @@
   - Not well tested but worked on Sponza and the tiny blender exports I tried
   - Open a file by dragging it into the window, or by pressing "o" and selecting the file
 
-- Builds a simple BVH around the triangle positions and extra data, based on the first 2.5 articles of "Build A BVH" by Jacco Bikker
+- Builds a simple BVH around the triangle data of each primitive, and another around the primitives themselves.
+  - based on the first 2.5 articles of "Build A BVH" by Jacco Bikker
 
 - Raytraces the bvh in a compute shader
   - Basic MIS path tracing with HDRI environment sampling, GGX specular, and lambertian diffuse.

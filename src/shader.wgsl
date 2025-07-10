@@ -110,6 +110,7 @@ struct Scene {
     tri_count:              u32,
     num_point_lights:       u32,
     num_directional_lights: u32,
+    tlas_node_count:        u32,
 }
 
 struct FrameUniforms {
@@ -439,6 +440,10 @@ fn sign11(x: f32) -> f32 {
     }
 }
 
+fn hit_default() -> Hit {
+    return Hit(0.0, -1, -1, DEFAULT_MATERIAL, vec3f(0.0, 0.0, 1.0), vec3f(0.333, 0.333, 0.333));
+}
+
 // modified version of intersect() to return more info
 //     from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
 fn intersect_full(ray: Ray, idx: i32) -> Hit {
@@ -522,13 +527,12 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
     while (true) {
         // debug = max(debug, f32(stack.size + 1u));
         // visualize bvh steps
-        debug += 1.0;
+        debug += 0.5;
 
 
         if node.count > 0 {
             // intersect triangles of node
             for (var i = node.first; i < node.first + node.count; i++) {
-                
                 let t = intersect(ray, triangles[i]);
                 if t >= 0.0 && t < best_t {
                     if (prim.material.alpha_settings & 3u) != 0u {
@@ -603,6 +607,7 @@ fn trace_bvh_shadow(ray: Ray, root: u32) -> bool {
         return false;
     }
     while (true) {
+        
         if node.count > 0 {
             for (var i = node.first; i < node.first + node.count; i++) {
                 
@@ -664,36 +669,151 @@ fn transform_ray(x: Ray, it: mat4x4f) -> Ray {
     return r;
 }
 
-// just loops over all primitives for now
 fn trace(ray: Ray) -> Hit {
-    var closest_idx = -1;
-    var closest_t   = 99999999.0;
-    var closest_primitive = 0u;
     debug = 0.0;
-    for (var i = 0u; i < globals.prim_count; i++) {
-        let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
-        let t_ray = transform_ray(ray, primitives[i].inv_transform);
+    var stack: Stack;
+    stack.size = 0u;
+    var node = bvh[globals.node_count];
+    var best_t = 99999999.0;
+    var closest_tri: i32 = -1;
+    var closest_primitive: i32 = -1;
+    if intersect_aabb(ray, node.aabb) < -0.5 {
+        return hit_default();
+    }
+    
+    while (true) {
+        // debug = max(debug, f32(stack.size + 1u));
+        // visualize bvh steps
+        debug += 1.0;
 
-        var new_t = closest_t * scale_factor;
-        let new_idx = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
+        if node.count > 0 {
+            // intersect BLAS(s) of node
+            for (var i = node.first; i < node.first + node.count; i++) {
+                let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
+                let t_ray = transform_ray(ray, primitives[i].inv_transform);
+                // debug += 1.0;
+                var new_t = best_t * scale_factor;
+                let new_tri = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
 
-        if new_idx >= 0 {
-            closest_t = new_t / scale_factor;
-            closest_idx = new_idx;
-            closest_primitive = i;
+                if new_tri >= 0 {
+                    best_t = new_t / scale_factor;
+                    closest_tri = new_tri;
+                    closest_primitive = i32(i);
+                }
+            }
+            if stack.size == 0u {
+                break;
+            }
+            node = bvh[pop(&stack)];
+        } else {
+            // avoid pushing nodes onto the stack where possible
+            // order nodes based on distance
+
+            // TLAS is tacked onto end of bvh:
+            let node_first = globals.node_count + node.first;
+
+            // try ordering the nodes
+            let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
+            let right = intersect_aabb(ray, bvh[node_first + 1u].aabb);
+    
+            if (left < -0.5 || left > best_t) && (right < -0.5 || right > best_t) {
+                if stack.size == 0u {
+                    break;
+                }
+                node = bvh[pop(&stack)];
+            } else if (left < -0.5 || left > best_t) {
+                node = bvh[node_first + 1u];
+            } else if (right < -0.5 || right > best_t) {
+                node = bvh[node_first + 0u];
+            } else if left < right {
+                push(&stack, node_first + 1u);
+                node = bvh[node_first + 0u];
+            } else {
+                push(&stack, node_first + 0u);
+                node = bvh[node_first + 1u];
+            }
+
         }
     }
 
     let t_ray_final = transform_ray(ray, primitives[closest_primitive].inv_transform);
-    var hit = intersect_full(t_ray_final, closest_idx);
+    var hit = intersect_full(t_ray_final, closest_tri);
 
     // transform the hit back to world space
-    hit.t = closest_t;
+    hit.t = best_t;
     hit.normal = transform_normal(hit.normal, primitives[closest_primitive].inv_transform);
     hit.prim_idx = i32(closest_primitive);
     hit.material = primitives[closest_primitive].material;
     return hit;
 
+}
+
+fn trace_tlas(ray: Ray) -> i32 {
+    var stack: Stack;
+    stack.size = 0u;
+    var node = bvh[globals.node_count];
+    var best_t = 99999999.0;
+    var closest_tri: i32 = -1;
+    var closest_primitive: i32 = -1;
+    if intersect_aabb(ray, node.aabb) < -0.5 {
+        return closest_tri;
+    }
+    
+    while (true) {
+        // debug = max(debug, f32(stack.size + 1u));
+        // visualize bvh steps
+        debug += 1.0;
+
+        if node.count > 0 {
+            // intersect BLAS(s) of node
+            for (var i = node.first; i < node.first + node.count; i++) {
+                let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
+                let t_ray = transform_ray(ray, primitives[i].inv_transform);
+                debug += 1.0;
+                var new_t = best_t * scale_factor;
+                let new_tri = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
+
+                if new_tri >= 0 {
+                    best_t = new_t / scale_factor;
+                    closest_tri = new_tri;
+                    closest_primitive = i32(i);
+                }
+            }
+            if stack.size == 0u {
+                break;
+            }
+            node = bvh[pop(&stack)];
+        } else {
+            // avoid pushing nodes onto the stack where possible
+            // order nodes based on distance
+
+            // TLAS is tacked onto end of bvh:
+            let node_first = globals.node_count + node.first;
+
+            // try ordering the nodes
+            let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
+            let right = intersect_aabb(ray, bvh[node_first + 1u].aabb);
+    
+            if (left < -0.5 || left > best_t) && (right < -0.5 || right > best_t) {
+                if stack.size == 0u {
+                    break;
+                }
+                node = bvh[pop(&stack)];
+            } else if (left < -0.5 || left > best_t) {
+                node = bvh[node_first + 1u];
+            } else if (right < -0.5 || right > best_t) {
+                node = bvh[node_first + 0u];
+            } else if left < right {
+                push(&stack, node_first + 1u);
+                node = bvh[node_first + 0u];
+            } else {
+                push(&stack, node_first + 0u);
+                node = bvh[node_first + 1u];
+            }
+
+        }
+    }
+    return i32(closest_tri);
 }
 
 // true if hit, false otherwise
@@ -1097,6 +1217,8 @@ fn sample_brdf(wo: vec3f, sample: ExtSample, lighting: ptr<function, vec3f>, pdf
     if globals.debug_mode == 5 {
         debug_color = clamp(vec3f(-sample.t_sign, sample.t_sign, 0.0), vec3f(0), vec3f(1));
     }
+
+
     var wi: vec3f;
 
     let fresnel = evaluate_fresnel_schlick(wo_tangent, h_tangent, f0);
@@ -1253,10 +1375,10 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     // spin the rng to improve the quality of the first samples
     rand(); rand();
 
-    var NEE_PROB = 0.5;
+    var NEE_PROB = 0.2;
 
     // constant, but no way to select() in const expressions apparently
-    var NUM_BOUNCES = 8;
+    var NUM_BOUNCES = 4;
     if DEBUG && globals.debug_mode != 0 {
         NUM_BOUNCES = 1;
         NEE_PROB = 0.0;
@@ -1273,57 +1395,74 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         if (hit.idx == -1) {
             lighting += throughput * evaluate_env_map(ray.dir).rgb;
             break;
-        } else {
-            let sample = sample_hit(hit);
-            ray.origin += ray.dir * hit.t;
-            ray.origin += hit.normal * 0.001;
-            var wi: vec3f;
-            var brdf_pdf: f32;
-            var nee_pdf: f32;
-            var mis_weight: f32;
-            var mis_pdf: f32;
-            let wo = -ray.dir;
-            lighting += sample.emissive * throughput;
-            if rand() < NEE_PROB {
+        }
 
-                wi = normalize(sample_env_map());
-                let brdf = evaluate_brdf(wi, wo, sample);
-                let n_dot_l = max(dot(wi, sample.normal), 0.0);
-                throughput *= brdf * n_dot_l;
-                brdf_pdf = sample_brdf_pdf(wi, wo, sample);
+        let sample = sample_hit(hit);
+        ray.origin += ray.dir * hit.t;
+        ray.origin += hit.normal * 0.001;
+        var wi: vec3f;
+        var brdf_pdf: f32;
+        var nee_pdf: f32;
+        var mis_weight: f32;
+        var mis_pdf: f32;
+        let wo = -ray.dir;
+        lighting += sample.emissive * throughput;
+        if rand() < NEE_PROB {
 
-                nee_pdf = sample_env_map_pdf(wi);
+            wi = normalize(sample_env_map());
+            let brdf = evaluate_brdf(wi, wo, sample);
+            let n_dot_l = max(dot(wi, sample.normal), 0.0);
+            throughput *= brdf * n_dot_l;
+            brdf_pdf = sample_brdf_pdf(wi, wo, sample);
 
-                mis_weight = mis_power_heuristic(nee_pdf, brdf_pdf, NEE_PROB, 1.0 - NEE_PROB);
-                
-                mis_pdf = nee_pdf * NEE_PROB;
-            } else {
+            nee_pdf = sample_env_map_pdf(wi);
 
-                // brdf sampling
-
-                wi = sample_brdf(wo, sample, &lighting, &brdf_pdf);
-
-                let n_dot_l = max(dot(wi, sample.normal), 0.0);
-                let brdf = evaluate_brdf(wi, wo, sample);
-
-                throughput *= n_dot_l * brdf;
-
-                nee_pdf = sample_env_map_pdf(wi);
-
-                mis_weight = mis_power_heuristic(brdf_pdf, nee_pdf, 1.0 - NEE_PROB, NEE_PROB);
-                
-                mis_pdf = brdf_pdf * (1.0 - NEE_PROB);
-            }
-
-            if mis_pdf > 0.0 {
-                throughput /= mis_pdf;
-                throughput *= mis_weight; // sanity check - commenting this works (in conjunction with ^)
-            } else {
-                throughput *= 0.0;
-            }
+            mis_weight = mis_power_heuristic(nee_pdf, brdf_pdf, NEE_PROB, 1.0 - NEE_PROB);
             
-            ray.dir = wi;
-            ray.idir = 1.0 / ray.dir;
+            mis_pdf = nee_pdf * NEE_PROB;
+        } else {
+
+            // brdf sampling
+
+            wi = sample_brdf(wo, sample, &lighting, &brdf_pdf);
+
+            let n_dot_l = max(dot(wi, sample.normal), 0.0);
+            let brdf = evaluate_brdf(wi, wo, sample);
+
+            throughput *= n_dot_l * brdf;
+
+            nee_pdf = sample_env_map_pdf(wi);
+
+            mis_weight = mis_power_heuristic(brdf_pdf, nee_pdf, 1.0 - NEE_PROB, NEE_PROB);
+            
+            mis_pdf = brdf_pdf * (1.0 - NEE_PROB);
+        }
+
+        if mis_pdf > 0.0 {
+            throughput /= mis_pdf;
+            throughput *= mis_weight; // sanity check - commenting this works (in conjunction with ^)
+        } else {
+            throughput *= 0.0;
+        }
+        
+        ray.dir = wi;
+        ray.idir = 1.0 / ray.dir;
+        
+
+        if globals.debug_mode == 6 {
+            let backup = seed;
+            seed = bitcast<u32>(hit.prim_idx) + 777;
+            rand(); rand();
+            lighting = rand_color() * evaluate_lambert(wo, sample.normal) * pi;
+            seed = backup;
+        }
+
+        if globals.debug_mode == 7 {
+            let backup = seed;
+            seed = bitcast<u32>(hit.idx) + 777;
+            rand(); rand();
+            lighting = rand_color() * evaluate_lambert(wo, hit.normal) * pi;
+            seed = backup;
         }
         
     }
