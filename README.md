@@ -18,14 +18,14 @@
   - based on the first 2.5 articles of "Build A BVH" by Jacco Bikker
 
 - Raytraces the bvh in a compute shader
-  - Basic MIS path tracing with HDRI environment sampling, GGX specular, and lambertian diffuse.
+  - Basic MIS path tracing with HDRI environment sampling, GGX specular+transmission, and lambertian diffuse.
   - Khronos PBR Neutral Tone Mapper for easy comparison with other renderers
   - Depth of field
   - No texture samplers, all textures are manually bilinear filtered
   - Two UV sets supported per GLTF primitive
 
 - Simple first person fly cam
-  - Starts out the same as the first camera in the gltf file
+  - Initialized to the first camera in the gltf file
   - WASD movement, scroll wheel zoom, LMB focus
   - Left Alt + Scroll to change aperture size
   - Left Control + Scroll to change focus
