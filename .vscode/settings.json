@@ -1,15 +1,19 @@
 {
     "cSpell.words": [
         "Aabb",
+        "backface",
         "bary",
         "Bikker",
         "bindgen",
         "bmax",
         "bmin",
         "brdf",
+        "bsdf",
+        "BXDF's",
         "cpass",
         "dmat",
         "fovy",
+        "idir",
         "Jacco",
         "Luma",
         "microfacet",
@@ -33,6 +37,7 @@
         "tris",
         "Unorm",
         "uvec",
+        "vndf",
         "workgroups",
         "yfov",
         "Zeroable"

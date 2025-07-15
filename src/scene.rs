@@ -108,28 +108,56 @@ pub struct GpuTriExt {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuVolume {
+    absorption:             Vec3,
+    ior:                    f32,
+}
+
+impl Default for GpuVolume {
+    fn default() -> Self {
+        Self {
+            absorption: Vec3::ZERO,
+            ior: 1.5,
+        }
+    }
+}
+
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuMaterial {
-    albedo:             GpuTextureRef,
-    emissive:           GpuTextureRef,
-    normal:             GpuTextureRef,
-    metallic_roughness: GpuTextureRef,
+    albedo:                 GpuTextureRef,
+    emissive:               GpuTextureRef,
 
-    albedo_factor:      Vec4,
+    normal:                 GpuTextureRef,
+    metallic_roughness:     GpuTextureRef,
 
-    emissive_factor:    Vec3,
+    thickness:              GpuTextureRef,
+    transmission:           GpuTextureRef,
 
-    normal_scale:       f32,
+    albedo_factor:          Vec4,
 
-    albedo_texcoord:    u32,
-    emissive_texcoord:  u32,
-    normal_texcoord:    u32,
-    metal_r_texcoord:   u32,
+    emissive_factor:        Vec3,
+    normal_scale:           f32,
 
-    metallic_factor:    f32,
-    roughness_factor:   f32,
-    id:                 u32,
-    alpha_settings:     u32,
+    albedo_texcoord:        u32,
+    emissive_texcoord:      u32,
+    normal_texcoord:        u32,
+    metal_r_texcoord:       u32,
+
+    thickness_texcoord:     u32,
+    transmission_texcoord:  u32,
+    thickness_factor:       f32,
+    transmission_factor:    f32,
+    
+
+    metallic_factor:        f32,
+    roughness_factor:       f32,
+    id:                     u32,
+    alpha_settings:         u32,
+
+    volume:                 GpuVolume,
+    
 }
 
 
@@ -249,14 +277,26 @@ impl EnvironmentMap {
         Some(Self::new(data, width, height))
     }
 
+    // TODO: replace with analytic integral if this helps
+    fn sin_theta(y: usize, height: usize) -> f64 {
+        let y = y as f64;
+        let h = height as f64;
+        let mut sin_theta = 0.0;
+        const N: usize = 10;
+        for i in 0..N + 1 {
+            sin_theta += ((y + i as f64 / N as f64) / h  * core::f64::consts::PI).sin().max(1e-12);
+        }
+        sin_theta / (N as f64 + 1.0)
+    }
+
+
     pub fn new(data: Vec<[f32; 4]>, width: usize, height: usize) -> Self {
         let mut pdf = Vec::new();
         let mut pdf_total = 0.0;
         for y in 0..height {
-            let theta = ((y as f64 + 0.5) / height as f64) * core::f64::consts::PI;
-            let sin_theta = theta.sin().max(1e-6) as f32;
+            let sin_theta = Self::sin_theta(y, height);
             for x in 0..width {
-                let v = (Self::luminance(data[y * width + x]) * sin_theta);
+                let v = Self::luminance(data[y * width + x]) * sin_theta as f32;
 
                 pdf.push(v);
                 pdf_total += v;
@@ -303,6 +343,23 @@ impl EnvironmentMap {
 
         // ensure a valid cdf in the face of floating point error
         cdf_rows[height - 1] = 1.0;
+
+        // pdf now represents the continuous solid angle PDF of a direction within that pixel
+        let mut total_luminance = 0.0;
+        pdf.clear();
+        for y in 0..height {
+            let sin_theta = Self::sin_theta(y, height);
+            let solid_angle = (2.0 * core::f64::consts::PI * core::f64::consts::PI / (width * height) as f64) * sin_theta;
+            for x in 0..width {
+                let v = Self::luminance(data[y * width + x]) as f64;
+                pdf.push(v as f32);
+                total_luminance += v * solid_angle;
+            }
+        }
+        for v in &mut pdf {
+            *v /= total_luminance as f32;
+        }
+
 
 
         EnvironmentMap {
@@ -716,6 +773,35 @@ impl RenderScene {
                             material.normal_texcoord = normal_tex.tex_coord();
 
                             try_load_texcoords(&material.normal_texcoord);
+                        }
+
+                        material.volume.ior = primitive.material().ior().unwrap_or(1.5);
+
+                        if let Some(volume) = primitive.material().volume() {
+                            material.thickness_factor = volume.thickness_factor();
+                            
+                            material.volume.absorption = -Vec3::from_array(volume.attenuation_color().map(|v| v.ln()))
+                                 / volume.attenuation_distance();
+                            
+                            if let Some(thickness_tex) = volume.thickness_texture() {
+                                println!("Found thickness_texture");
+                                material.thickness = self.add_gltf_texture(&thickness_tex.texture(), buffers);
+                                material.thickness_texcoord = thickness_tex.tex_coord();
+                                
+                                try_load_texcoords(&material.thickness_texcoord);
+                            }
+
+                        }
+
+                        if let Some(transmission) = primitive.material().transmission() {
+                            material.transmission_factor = transmission.transmission_factor();
+                            
+                            if let Some(transmission_tex) = transmission.transmission_texture() {
+                                println!("Found transmission_texture");
+                                material.transmission = self.add_gltf_texture(&transmission_tex.texture(), buffers);
+                                material.transmission_texcoord = transmission_tex.tex_coord();
+                                try_load_texcoords(&material.transmission_texcoord);
+                            }
                         }
 
                         // collect vertex attributes into vectors so we can index them

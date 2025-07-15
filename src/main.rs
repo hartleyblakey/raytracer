@@ -163,7 +163,7 @@ impl Context {
         (screen_pipeline, raytrace_pipeline)
     }
 
-    const DEBOUNCE_TIME: std::time::Duration = std::time::Duration::from_millis(1600);
+    const DEBOUNCE_TIME: std::time::Duration = std::time::Duration::from_millis(125);
 
     fn check_recompile_shader(&mut self, gpu: &Gpu) -> bool {
     #[cfg(not(target_arch = "wasm32"))] 
@@ -171,9 +171,14 @@ impl Context {
         let metadata = std::fs::metadata(SHADER_PATH).unwrap();
         let last_write_time = metadata.modified().unwrap();
 
-        if last_write_time <= self.shader_compiled_timestamp + Self::DEBOUNCE_TIME {
+        if last_write_time <= self.shader_compiled_timestamp {
             return false;
         }
+
+        if std::time::SystemTime::now().duration_since(last_write_time).unwrap_or_default() < Self::DEBOUNCE_TIME {
+            return false;
+        }
+
         self.shader_compiled_timestamp = std::time::SystemTime::now();
 
         let shader_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
