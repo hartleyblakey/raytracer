@@ -271,7 +271,7 @@ fn dummy_texture(uv: vec2f) -> vec4f {
     return vec4f(col, 1.0);
 }
 
-// MARK: sample interpolation
+// MARK: interpolation
 
 /// barycentric interpolation of vertex attributes
 fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
@@ -338,6 +338,7 @@ fn sample_hit(hit: Hit) -> ExtSample {
     }
 
     sample.albedo = hit.material.albedo_factor;
+    if (ext.vertices[0].color != 0) { sample.albedo *= sample.color;}
     if hit.material.albedo.size != 0 {
         sample.albedo *= to_linear_4(sample_texture(hit.material.albedo, sample.texcoords[hit.material.albedo_texcoord]));
     }
@@ -548,9 +549,9 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
     let bmin = aabb_min(aabb);
     let bmax = aabb_max(aabb);
 
-    if all(ray.origin >= bmin) && all(ray.origin < bmax) {
-        return 0.0;
-    }
+    // if all(ray.origin >= bmin) && all(ray.origin < bmax) {
+    //     return 0.0;
+    // }
 
     let rmin = (bmin - ray.origin) * ray.idir;
     let rmax = (bmax - ray.origin) * ray.idir;
@@ -561,11 +562,11 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
     let t0 = max(tmin.x, max(tmin.y, tmin.z));
     let t1 = min(tmax.x, min(tmax.y, tmax.z));
 
-    if (t0 > t1 || t0 < 0.0) {
-        return -1.0;
+    if (t0 > t1 || t1 < 0.0) {
+        return 1e30;
     }
 
-    return t0;
+    return max(t0, 0.0);
 }
 
 // MARK: trace_bvh
@@ -578,7 +579,7 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
     var node = bvh[root];
     var best_t = *t_max;
     var best_i: i32 = -1;
-    if intersect_aabb(ray, node.aabb) < -0.5 {
+    if intersect_aabb(ray, node.aabb) >= best_t {
         return best_i;
     }
     
@@ -617,7 +618,7 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
                             }
                         } else {
                             // BLEND
-                            if rand() > alpha {
+                            if rand() > alpha * alpha {
                                 continue;
                             }
                         }
@@ -635,25 +636,31 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
             // order nodes based on distance
 
             // try ordering the nodes
-            let left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
-            let right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
+            var left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
+            var right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
     
-            if (left < -0.5 || left > best_t) && (right < -0.5 || right > best_t) {
+            if (left > best_t) && (right > best_t) {
                 if stack.size == 0u {
                     break;
                 }
                 node = bvh[pop(&stack)];
-            } else if (left < -0.5 || left > best_t) {
+            } else if (left > best_t) {
                 node = bvh[node.first + 1u];
-            } else if (right < -0.5 || right > best_t) {
+            } else if (right > best_t) {
                 node = bvh[node.first + 0u];
-            } else if left < right {
+            } else if right > left {
+                // push(&stack, node.first + 0u);
+                // node = bvh[node.first + 1u];
+
                 push(&stack, node.first + 1u);
                 node = bvh[node.first + 0u];
             } else {
+                // push(&stack, node.first + 1u);
+                // node = bvh[node.first + 0u];
+
                 push(&stack, node.first + 0u);
                 node = bvh[node.first + 1u];
-            }
+            } 
 
         }
     }
@@ -690,7 +697,7 @@ fn trace(ray: Ray) -> Hit {
     var best_t = 99999999.0;
     var closest_tri: i32 = -1;
     var closest_primitive: i32 = -1;
-    if intersect_aabb(ray, node.aabb) < -0.5 {
+    if intersect_aabb(ray, node.aabb) > best_t {
         return hit_default();
     }
     var tlas_steps = 0.0;
@@ -737,21 +744,29 @@ fn trace(ray: Ray) -> Hit {
             let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
             let right = intersect_aabb(ray, bvh[node_first + 1u].aabb);
     
-            if (left < -0.5 || left > best_t) && (right < -0.5 || right > best_t) {
+            if (left > best_t) && (right > best_t) {
                 if stack.size == 0u {
                     break;
                 }
                 node = bvh[pop(&stack)];
-            } else if (left < -0.5 || left > best_t) {
+            } else if (left > best_t) {
                 node = bvh[node_first + 1u];
-            } else if (right < -0.5 || right > best_t) {
+            } else if (right > best_t) {
                 node = bvh[node_first + 0u];
-            } else if left < right {
-                push(&stack, node_first + 1u);
-                node = bvh[node_first + 0u];
-            } else {
+            } else if right < left {
+                // push(&stack, node_first + 1u);
+                // node = bvh[node_first + 0u];
+
                 push(&stack, node_first + 0u);
                 node = bvh[node_first + 1u];
+
+            } else {
+                // push(&stack, node_first + 0u);
+                // node = bvh[node_first + 1u];
+
+                
+                push(&stack, node_first + 1u);
+                node = bvh[node_first + 0u];
             }
 
         }
@@ -908,6 +923,9 @@ fn sample_env_map_pdf(dir: vec3f) -> f32 {
 }
 
 fn evaluate_env_map(dir: vec3f) -> vec4f {
+    if globals.debug_mode == 0 {
+        // return vec4f(0, 0, 0, 1);
+    }
     if globals.debug_mode == 9 {
         return vec4f(0.5, 0.5, 0.5, 1.0);
     }
@@ -1483,10 +1501,12 @@ fn evaluate_bsdf(wi: vec3f, wo: vec3f, ior_i: f32, ior_o: f32, sample: ExtSample
 fn mis_power_heuristic(a: f32, b: f32, a_prob: f32, b_prob: f32) -> f32 {
     let ap = a * a_prob;
     let bp = b * b_prob;
-    if !(ap * bp> 0.0) {
+    if (ap <= 0.0) {
         return 0.0;
+    } else if (bp <= 0.0) {
+        return 1.0;
     }
-
+    
     // return a_prob;
     return ap  / (ap + bp);
     //return (ap * ap) / (ap * ap + bp * bp);
@@ -1523,7 +1543,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     right = false;
 
     if right {
-        NEE_PROB = 0.0;
+        NEE_PROB = 0.5;
     } else {
         NEE_PROB = 0.5;
     }
@@ -1531,11 +1551,13 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
 
     var ray = camera_ray(id.xy);
 
+    var bsdf_pdf = 1.0;
+    var bsdf_mis_weight = 1.0;
     for (var i = 0; i < NUM_BOUNCES; i++) {
         let hit = trace(ray);
 
-        if (hit.idx == -1) {
-            lighting += throughput * evaluate_env_map(ray.dir).rgb;
+        if hit.idx == -1 {
+            lighting += throughput * bsdf_mis_weight * evaluate_env_map(ray.dir).rgb;
             break;
         }
 
@@ -1550,76 +1572,60 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             hit_ior = 1.6 * ray_volume.ior;
         }
 
-        var wi = vec3f(0.0, 0.0, 1.0);
-        var bsdf_pdf = 1.0;
-        var nee_pdf = 1.0;
-        var mis_weight = 1.0;
-        var mis_pdf = 1.0;
-        let wo = -ray.dir;
+        
 
         if globals.debug_mode != 9 {
             throughput *= exp(-ray_volume.absorption * hit.t);
         }
+
         lighting += sample.emissive * throughput;
 
-        RR_PROB = clamp(1.0 - max(throughput.x, max(throughput.y, throughput.z)), 0.0, 1.0);
+        RR_PROB = clamp(1.0 - max(throughput.x, max(throughput.y, throughput.z)), 0.0, 0.95);
         if rand() < RR_PROB {
             break;
         } else {
             throughput /= (1.0 - RR_PROB);
         }
 
-        if rand() < NEE_PROB {
+        let wo = -ray.dir;
 
-            wi = normalize(sample_env_map());
-            let bsdf = evaluate_bsdf(wi, wo, hit_ior, ray_volume.ior, sample);
-            throughput *= bsdf * abs(dot(wi, sample.normal));
-            bsdf_pdf = sample_bsdf_pdf(wi, wo, hit_ior, ray_volume.ior, sample);
-
-            nee_pdf = sample_env_map_pdf(wi);
-
-            mis_weight = mis_power_heuristic(nee_pdf, bsdf_pdf, NEE_PROB, 1.0 - NEE_PROB);
-            
-
-            mis_pdf = nee_pdf * NEE_PROB;
-
-            if globals.debug_mode == 8 {
-                if mis_pdf > 0.0 {
-                    lighting = vec3f(mis_weight / mis_pdf, 0.0, 0.0) * 0.1;
-                }
-            }
-        } else {
-
-            // bsdf sampling
-            var bsdf: vec3f;
-            wi = sample_bsdf(wo, ray_volume.ior, hit_ior, sample, &lighting, &bsdf_pdf, &bsdf);
-            throughput *= bsdf * abs(dot(wi, sample.normal));
-
-            nee_pdf = sample_env_map_pdf(wi);
-
-            mis_weight = mis_power_heuristic(bsdf_pdf, nee_pdf, 1.0 - NEE_PROB, NEE_PROB);
-
-            mis_pdf = bsdf_pdf * (1.0 - NEE_PROB);
-            if globals.debug_mode == 8 {
-                if mis_pdf > 0.0 {
-                    lighting = vec3f(0.0, mis_weight / mis_pdf, 0.0) * 0.1;
-                }
-            }
-        }
-        if right {
-            if mis_pdf > 0.0 {
-                throughput /= mis_pdf;
-            }
-        } else {
-            if mis_pdf > 0.0 {
-                throughput /= mis_pdf;
-                throughput *= mis_weight; // sanity check - commenting this works (in conjunction with ^)
+        // sample NEE shadow ray
+        {
+            let nee_wi = normalize(sample_env_map());
+            var nee_ray = ray;
+            nee_ray.origin += nee_ray.dir * hit.t;
+            nee_ray.dir = nee_wi;
+            nee_ray.idir = 1.0 / nee_ray.dir;
+            if dot(nee_wi, sample.normal) > 0.0 {
+                nee_ray.origin += hit.normal * 0.001;
             } else {
-                throughput *= 0.0;
+                nee_ray.origin -= hit.normal * 0.001;
+            }
+            if trace(nee_ray).idx == -1 {
+                let nee_bsdf = evaluate_bsdf(nee_wi, wo, hit_ior, ray_volume.ior, sample);
+                let nee_ray_bsdf_pdf = sample_bsdf_pdf(nee_wi, wo, hit_ior, ray_volume.ior, sample);
+                let nee_pdf = max(sample_env_map_pdf(nee_wi), 1e-8);
+                let nee_mis_weight = mis_power_heuristic(nee_pdf, nee_ray_bsdf_pdf, 1.0, 1.0);
+                lighting += nee_mis_weight * throughput * nee_bsdf * abs(dot(nee_wi, sample.normal)) * evaluate_env_map(nee_wi).rgb / nee_pdf;
             }
         }
 
 
+        // sample BSDF continuation
+        var bsdf: vec3f;
+        let wi = sample_bsdf(wo, ray_volume.ior, hit_ior, sample, &lighting, &bsdf_pdf, &bsdf);
+        let bsdf_ray_nee_pdf = sample_env_map_pdf(wi);
+        bsdf_mis_weight = mis_power_heuristic(bsdf_pdf, bsdf_ray_nee_pdf, 1.0, 1.0);
+
+        if bsdf_pdf > 0.0 {
+            throughput /= bsdf_pdf;
+            // throughput *= mis_weight; // sanity check - commenting this works (in conjunction with ^)
+        } else {
+            throughput *= 0.0;
+        }
+
+        throughput *= bsdf * abs(dot(wi, sample.normal));
+        
         ray.origin += ray.dir * hit.t;
         ray.dir = wi;
         ray.idir = 1.0 / ray.dir;
@@ -1633,41 +1639,38 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             } else {
                 ray_volume = hit.material.volume;
             }
-
         }
-
-        if globals.debug_mode == 6 {
-            let backup = seed;
-            seed = bitcast<u32>(hit.prim_idx) + 777;
-            rand(); rand();
-            lighting = rand_color() * evaluate_lambert(wo, sample.normal) * pi;
-            seed = backup;
-        }
-
-        if globals.debug_mode == 7 {
-            let backup = seed;
-            seed = bitcast<u32>(hit.idx) + 777;
-            rand(); rand();
-            lighting = rand_color() * evaluate_lambert(wo, hit.normal) * pi;
-            seed = backup;
-        }
-
-        if globals.debug_mode == 8 {
-            if hit.backface {
-                lighting = vec3f(1.0, 0.0, 0.0);
-            } else {
-                lighting = vec3f(0.0, 1.0, 0.0);
-            }
-        }
-
-        
-        
     }
+        // if globals.debug_mode == 6 {
+        //     let backup = seed;
+        //     seed = bitcast<u32>(hit.prim_idx) + 777;
+        //     rand(); rand();
+        //     lighting = rand_color() * evaluate_lambert(wo, sample.normal) * pi;
+        //     seed = backup;
+        // }
 
+        // if globals.debug_mode == 7 {
+        //     let backup = seed;
+        //     seed = bitcast<u32>(hit.idx) + 777;
+        //     rand(); rand();
+        //     lighting = rand_color() * evaluate_lambert(wo, hit.normal) * pi;
+        //     seed = backup;
+        // }
+
+        // if globals.debug_mode == 8 {
+        //     if hit.backface {
+        //         lighting = vec3f(1.0, 0.0, 0.0);
+        //     } else {
+        //         lighting = vec3f(0.0, 1.0, 0.0);
+        //     }
+        // }
     if DEBUG {
         if globals.debug_mode == 3 {
-            lighting = magma_quintic(debug / 128.0);
+            lighting = magma_quintic(debug / 256.0);
+        } else if globals.debug_mode != 0 && globals.debug_mode != 9 {
+            lighting *= 2.0;
         }
+        
     }
 
     if (debug < 0.0) {

@@ -243,12 +243,12 @@ impl Context {
             .finish(&mut resources);
 
         // just make everything 128mb for simplicity
-        let max_buffer_size_mb = 128;
+        let initial_buffer_size_mb = 128;
 
-        let triangles_ssbo =        gpu.new_storage_buffer(256 * 1024 * 1024);
-        let bvh_ssbo =              gpu.new_storage_buffer(max_buffer_size_mb * 1024 * 1024);
-        let triangles_ext_ssbo =    gpu.new_storage_buffer(512 * 1024 * 1024);
-        let texture_data_ssbo =     gpu.new_storage_buffer(1024 * 1024 * 1024);
+        let triangles_ssbo =        gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
+        let bvh_ssbo =              gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
+        let triangles_ext_ssbo =    gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
+        let texture_data_ssbo =     gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
         let primitive_data_ssbo =   gpu.new_storage_buffer(32 * 1024 * 1024);
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
 
@@ -348,7 +348,7 @@ impl Context {
 
             self.should_reupload = true;
         } else {
-            println!("Scene change failed!");
+            println!("Scene change failed! RenderScene::from_path returned None");
         }
     }
 
@@ -379,7 +379,7 @@ impl Context {
         if is_env {
             println!("Trying to add env map");
             self.scene.set_equirectangular_env_map(path).await;
-            
+            self.frame_uniforms.reject_hist = 1;
             self.should_reupload = true;
         } else if is_mesh {
             let old_env = self.scene.env_map_path.clone();
@@ -411,19 +411,23 @@ impl Context {
 
         // tack the TLAS onto the back of the BLAS data
         let mut combined_bvh = self.scene.bvh_node_data.clone();
-        combined_bvh.append(&mut self.scene.tlas_node_data);
-        gpu.queue.write_buffer(&self.bvh_ssbo,               0, bytemuck::cast_slice(combined_bvh.as_slice()));
+        combined_bvh.append(&mut self.scene.tlas_node_data.clone());
         
+        self.bvh_ssbo = gpu.new_storage_buffer(combined_bvh.len().max(1) as u64 * size_of::<BvhNode>() as u64);
+        self.triangles_ssbo = gpu.new_storage_buffer(self.scene.tris.len().max(1) as u64 * size_of::<Tri>() as u64);
+        self.triangles_ext_ssbo = gpu.new_storage_buffer(self.scene.tri_exts.len().max(1) as u64 * size_of::<GpuTriExt>() as u64);
+        self.texture_data_ssbo = gpu.new_storage_buffer(self.scene.texture_data.len().max(1) as u64 * size_of::<u32>() as u64);
+        self.primitive_data_ssbo = gpu.new_storage_buffer(self.scene.primitives.len().max(1) as u64 * size_of::<GpuPrimitive>() as u64);
+        self.env_map_rows_cdf = gpu.new_storage_buffer(self.scene.env_map.cdf_rows.len().max(1) as u64 * size_of::<f32>() as u64);
+        self.update_rt_binding(gpu);
+
+        gpu.queue.write_buffer(&self.bvh_ssbo,               0, bytemuck::cast_slice(combined_bvh.as_slice()));
         gpu.queue.write_buffer(&self.triangles_ssbo,         0, bytemuck::cast_slice(self.scene.tris.as_slice()));
         gpu.queue.write_buffer(&self.triangles_ext_ssbo,     0, bytemuck::cast_slice(self.scene.tri_exts.as_slice()));
         gpu.queue.write_buffer(&self.texture_data_ssbo,      0, bytemuck::cast_slice(self.scene.texture_data.as_slice()));
         gpu.queue.write_buffer(&self.primitive_data_ssbo,    0, bytemuck::cast_slice(self.scene.primitives.as_slice()));
         gpu.queue.write_buffer(&self.env_map_rows_cdf,       0, bytemuck::cast_slice(self.scene.env_map.cdf_rows.as_slice()));
-
-
-
         
-
         gpu.queue.write_texture(
             self.env_map_texture.as_image_copy(), 
             bytemuck::cast_slice(&self.scene.env_map.data.as_slice()), 
@@ -468,7 +472,7 @@ impl Context {
                 depth_or_array_layers: 1,
             },
         );
-
+        
         self.should_reupload = false;
 
     }
@@ -841,7 +845,15 @@ async fn run() -> Result<(), AppError> {
                                             }
                                         });
                                             
-                                    };
+                                    } else if code == KeyCode::KeyP {
+                                        if let Ok(ctx_guard) = ctx.lock() {
+                                            let img = ctx_guard.scene.trace_cpu_image(ctx_guard.frame_uniforms.scene.camera);
+                                            match img.save("screenshots/cpu.png") {
+                                                Ok(_) => (),
+                                                Err(e) => println!("Failed to save screenshot: \n{e}"),
+                                            }
+                                        }
+                                    }
                                 } else {
                                     input.keys.remove(&PhysicalKey::Code(code));
                                 }

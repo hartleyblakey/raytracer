@@ -211,6 +211,19 @@ impl Camera {
         self.lmb_last = input.lmb;
     }
 
+    pub fn from_to(from: Vec3, to: Vec3) -> Camera {
+        let mut c = Camera::default();
+        c.position = from;
+        
+        let dir = (to - from).normalize();
+        let q = glam::Quat::from_rotation_arc(FORWARD, dir);
+        let (yaw, pitch, roll) = q.to_euler(YAW_PITCH_ROLL);
+        c.yaw = yaw;
+        c.pitch = -pitch;
+        c.roll = 0.0;
+        c
+    }
+
     pub fn default() -> Camera {
         let c = Camera {
             pitch: f32::to_radians(0.0),
@@ -219,7 +232,7 @@ impl Camera {
             position: vec3(0.0, 0.0, 0.0) - FORWARD * 5.0 + UP * 5.0,
             focus: 1.0,
             speed: 10.0,
-            fovy: f32::to_radians(90.0),
+            fovy: f32::to_radians(45.0),
             aspect: None,
             moved: false,
             lmb_last: true,

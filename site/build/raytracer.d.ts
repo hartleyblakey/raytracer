@@ -18,11 +18,11 @@ export interface InitOutput {
   readonly closure11_externref_shim: (a: number, b: number, c: any) => void;
   readonly closure14_externref_shim: (a: number, b: number, c: any, d: any) => void;
   readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__h7f400c6b4324938f: (a: number, b: number) => void;
-  readonly closure632_externref_shim: (a: number, b: number, c: any) => void;
-  readonly closure1268_externref_shim: (a: number, b: number, c: any) => void;
+  readonly closure633_externref_shim: (a: number, b: number, c: any) => void;
+  readonly closure1269_externref_shim: (a: number, b: number, c: any) => void;
   readonly _dyn_core__ops__function__FnMut_____Output___R_as_wasm_bindgen__closure__WasmClosure___describe__invoke__h90cdc4bdb19978b7: (a: number, b: number) => void;
-  readonly closure1361_externref_shim: (a: number, b: number, c: any) => void;
-  readonly closure1382_externref_shim: (a: number, b: number, c: any, d: any) => void;
+  readonly closure1362_externref_shim: (a: number, b: number, c: any) => void;
+  readonly closure1383_externref_shim: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_start: () => void;
 }
 

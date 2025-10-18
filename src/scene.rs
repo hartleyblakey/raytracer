@@ -356,9 +356,16 @@ impl EnvironmentMap {
                 total_luminance += v * solid_angle;
             }
         }
-        for v in &mut pdf {
-            *v /= total_luminance as f32;
+        if total_luminance > 0.0 {
+            for v in &mut pdf {
+                *v /= total_luminance as f32;
+            }
+        } else {
+            for v in &mut pdf {
+                *v = 1.0 / (width * height) as f32;
+            }
         }
+
 
 
 
@@ -547,6 +554,37 @@ impl<'a> mikktspace::Geometry for PrimitiveGeometry<'a> {
 }
 
 
+struct Clock {
+    epoch: std::time::Instant,
+    running: Vec<(std::time::Instant, &'static str)>,
+}
+
+impl Clock {
+    fn new() -> Clock {
+        Clock { epoch: std::time::Instant::now(), running: Vec::new() }
+    }
+
+    fn start(&mut self, label: &'static str) {
+        self.running.push((std::time::Instant::now(), label))
+    }
+
+    fn stop(&mut self) {
+        let (start, label) = self.running.pop().unwrap();
+        let stop = std::time::Instant::now();
+        for i in 0..self.running.len() {
+            print!("-");
+        }
+        println!("{label}: {:4}", stop.duration_since(start).as_secs_f32());
+    }
+
+    fn stop_all(&mut self) {
+        for i in 0..self.running.len() {
+            self.stop();
+        }
+    }
+}
+
+
 type LoadedMeshCache = HashMap<usize, HashMap<usize, usize>>;
 
 impl RenderScene {
@@ -668,7 +706,7 @@ impl RenderScene {
             for pixel in rgba8_image.pixels() {
                 self.texture_data.push(Self::rgba8_to_u32(&pixel.0))
             }
-            println!("Found texture with offset {}, size {} by {}", tex_ref.offset, tex_ref.size().x, tex_ref.size().y);
+            // println!("Found texture with offset {}, size {} by {}", tex_ref.offset, tex_ref.size().x, tex_ref.size().y);
 
             // record that we loaded the image
             self.texture_map.insert(tex.index(), tex_ref);
@@ -715,12 +753,16 @@ impl RenderScene {
         }
         
         if let Some(mesh) = node.mesh() {
-
+            
             if let Some(loaded_primitives) = cache.get(&mesh.index()) {
+                let mut count = 0;
+                let mut total = 0;
                 for primitive in mesh.primitives() {
-
+                    total += 1;
                     // if the primitive was already loaded, copy it and change the transforms
                     if let Some(&prim_idx) = loaded_primitives.get(&primitive.index()) {
+                        count += 1;
+                        
                         let mut new_primitive = self.primitives[prim_idx];
                         new_primitive.transform = node_transform_mine;
                         new_primitive.inv_transform = node_transform_mine.as_dmat4().inverse().as_mat4();
@@ -728,14 +770,15 @@ impl RenderScene {
                         continue;
                     }
                 }
+                println!("Instanced mesh with {count}/{total} primitives");
             } else {
+                
                 let mut loaded_primitives: HashMap<usize, usize> = HashMap::new();
 
                 for primitive in mesh.primitives() {
 
                     // if the primitive was already loaded, copy it and change the transforms
                     if let Some(&prim_idx) = loaded_primitives.get(&primitive.index()) {
-                        println!("Instanced a primitive!");
                         let mut new_primitive = self.primitives[prim_idx];
                         new_primitive.transform = node_transform_mine;
                         new_primitive.inv_transform = node_transform_mine.as_dmat4().inverse().as_mat4();
@@ -743,7 +786,6 @@ impl RenderScene {
                         self.primitives.push(new_primitive);
                         continue;
                     }
-
                     if primitive.mode() == gltf::mesh::Mode::Triangles {
 
                         // tell the reader where to find the buffer data
@@ -786,7 +828,6 @@ impl RenderScene {
 
                         material.albedo_factor = primitive.material().pbr_metallic_roughness().base_color_factor().into();
                         if let Some(albedo_tex) = primitive.material().pbr_metallic_roughness().base_color_texture() {
-                            println!("Found base_color_texture");
                             material.albedo = self.add_gltf_texture(&albedo_tex.texture(), buffers);
                             material.albedo_texcoord = albedo_tex.tex_coord();
 
@@ -796,7 +837,6 @@ impl RenderScene {
                         material.metallic_factor = primitive.material().pbr_metallic_roughness().metallic_factor();
                         material.roughness_factor = primitive.material().pbr_metallic_roughness().roughness_factor();
                         if let Some(metal_r_tex) = primitive.material().pbr_metallic_roughness().metallic_roughness_texture() {
-                            println!("Found metallic_roughness_texture");
                             material.metallic_roughness = self.add_gltf_texture(&metal_r_tex.texture(), buffers);
                             material.metal_r_texcoord = metal_r_tex.tex_coord();
 
@@ -807,7 +847,6 @@ impl RenderScene {
                         material.emissive_factor = primitive.material().emissive_factor().into();
                         material.emissive_factor *= primitive.material().emissive_strength().unwrap_or(1.0);
                         if let Some(emissive_tex) = primitive.material().emissive_texture() {
-                            println!("Found emissive_texture with factor {}, {}, {}", material.emissive_factor.x, material.emissive_factor.y, material.emissive_factor.z);
                             material.emissive = self.add_gltf_texture(&emissive_tex.texture(), buffers);
                             material.emissive_texcoord = emissive_tex.tex_coord();
                             
@@ -816,7 +855,6 @@ impl RenderScene {
                         
                         material.normal_scale = primitive.material().normal_texture().map(|t| t.scale()).unwrap_or(1.0);
                         if let Some(normal_tex) = primitive.material().normal_texture() {
-                            println!("Found normal_texture");
                             material.normal = self.add_gltf_texture(&normal_tex.texture(), buffers);
                             material.normal_texcoord = normal_tex.tex_coord();
 
@@ -832,7 +870,6 @@ impl RenderScene {
                                  / volume.attenuation_distance();
                             
                             if let Some(thickness_tex) = volume.thickness_texture() {
-                                println!("Found thickness_texture");
                                 material.thickness = self.add_gltf_texture(&thickness_tex.texture(), buffers);
                                 material.thickness_texcoord = thickness_tex.tex_coord();
                                 
@@ -847,7 +884,6 @@ impl RenderScene {
                             material.transmission_factor = transmission.transmission_factor();
                             
                             if let Some(transmission_tex) = transmission.transmission_texture() {
-                                println!("Found transmission_texture");
                                 material.transmission = self.add_gltf_texture(&transmission_tex.texture(), buffers);
                                 material.transmission_texcoord = transmission_tex.tex_coord();
                                 try_load_texcoords(&material.transmission_texcoord);
@@ -887,58 +923,68 @@ impl RenderScene {
                         let has_tangents = !tangents.is_empty();
 
                         let first_new_tri = self.tris.len();
+
+                        let mut add_tri = |idx_0: u32, idx_1: u32, idx_2: u32| {
+                            let mut ext = GpuTriExt::default();
+
+                            if !colors.is_empty() {
+                                ext.vertices[0].color = colors[idx_0 as usize];
+                                ext.vertices[1].color = colors[idx_1 as usize];
+                                ext.vertices[2].color = colors[idx_2 as usize];
+                            }
+
+                            if !normals.is_empty() {
+                                ext.vertices[0].normal = normals[idx_0 as usize];
+                                ext.vertices[1].normal = normals[idx_1 as usize];
+                                ext.vertices[2].normal = normals[idx_2 as usize];
+                            }
+
+                            if !tangents.is_empty() {
+                                ext.vertices[0].tangent = tangents[idx_0 as usize].0;
+                                ext.vertices[1].tangent = tangents[idx_1 as usize].0;
+                                ext.vertices[2].tangent = tangents[idx_2 as usize].0;
+
+                                ext.vertices[0].tangent_sign = tangents[idx_0 as usize].1;
+                                ext.vertices[1].tangent_sign = tangents[idx_1 as usize].1;
+                                ext.vertices[2].tangent_sign = tangents[idx_2 as usize].1;
+                            }
+
+                            for i in 0..GPU_TEXCOORD_COUNT {
+                                if let Some(tc) = found_texcoords.get(&(i as u32)) {
+                                    ext.vertices[0].texcoords[i] = tc[idx_0 as usize];
+                                    ext.vertices[1].texcoords[i] = tc[idx_1 as usize];
+                                    ext.vertices[2].texcoords[i] = tc[idx_2 as usize];
+                                }
+                            }
+
+                            if found_texcoords.get(&(GPU_TEXCOORD_COUNT as u32)).is_some() {
+                                eprintln!("Model has more texcoords than supported by GPU renderer ({GPU_TEXCOORD_COUNT})");
+                            }
+
+                            self.tris.push(Tri::new(positions[idx_0 as usize], positions[idx_1 as usize], positions[idx_2 as usize]));
+                            self.tri_exts.push(ext);
+                        };
+
                         if let Some(indices) = reader.read_indices() {
                             // indexed mesh
                             let mut indices = indices.into_u32();
                             while let (Some(idx_0), Some(idx_1), Some(idx_2)) = (indices.next(), indices.next(), indices.next()) {
-                                let mut ext = GpuTriExt::default();
-
-                                if !colors.is_empty() {
-                                    ext.vertices[0].color = colors[idx_0 as usize];
-                                    ext.vertices[1].color = colors[idx_1 as usize];
-                                    ext.vertices[2].color = colors[idx_2 as usize];
-                                }
-
-                                if !normals.is_empty() {
-                                    ext.vertices[0].normal = normals[idx_0 as usize];
-                                    ext.vertices[1].normal = normals[idx_1 as usize];
-                                    ext.vertices[2].normal = normals[idx_2 as usize];
-                                }
-
-                                if !tangents.is_empty() {
-                                    ext.vertices[0].tangent = tangents[idx_0 as usize].0;
-                                    ext.vertices[1].tangent = tangents[idx_1 as usize].0;
-                                    ext.vertices[2].tangent = tangents[idx_2 as usize].0;
-
-                                    ext.vertices[0].tangent_sign = tangents[idx_0 as usize].1;
-                                    ext.vertices[1].tangent_sign = tangents[idx_1 as usize].1;
-                                    ext.vertices[2].tangent_sign = tangents[idx_2 as usize].1;
-                                }
-
-                                for i in 0..GPU_TEXCOORD_COUNT {
-                                    if let Some(tc) = found_texcoords.get(&(i as u32)) {
-                                        ext.vertices[0].texcoords[i] = tc[idx_0 as usize];
-                                        ext.vertices[1].texcoords[i] = tc[idx_1 as usize];
-                                        ext.vertices[2].texcoords[i] = tc[idx_2 as usize];
-                                    }
-                                }
-
-                                if found_texcoords.get(&(GPU_TEXCOORD_COUNT as u32)).is_some() {
-                                    eprintln!("Model has more texcoords than supported by GPU renderer ({GPU_TEXCOORD_COUNT})");
-                                }
-
-                                self.tris.push(Tri::new(positions[idx_0 as usize], positions[idx_1 as usize], positions[idx_2 as usize]));
-                                self.tri_exts.push(ext);
+                                add_tri(idx_0, idx_1, idx_2);
                             }
                         }
                         else {
-                            panic!("Only supporting indexed meshes for now");
+                            let num_exts = colors.len().max(tangents.len()).max(normals.len()).max(positions.len()) as u32;
+
+                            for i in 0..num_exts / 3 {
+                                add_tri(i * 3, i * 3 + 1, i * 3 + 2);
+                            }
+
+
                         }
                         if node_transform_mine.to_scale_rotation_translation().2.length() > 100.0 {
                             println!("Warning: distant geometry is poorly supported ({} units from origin)", node_transform_mine.to_scale_rotation_translation().2.length());
                         }
-
-                        // build a bvh around the new triangles
+                                                // build a bvh around the new triangles
                         let mut bvh = Bvh::new(&self.tris.as_slice(), first_new_tri, self.tris.len() - first_new_tri);
                         // re-arrange the new triangles to match the BVH nodes
                         bvh.flatten_leaves(self.tris.as_mut_slice(), Some(self.tri_exts.as_mut_slice()));
@@ -951,7 +997,7 @@ impl RenderScene {
                                 node.first += bvh_root;
                             }
                         }
-
+                        
                         let gpu_primitive = GpuPrimitive::new(
                             &node_transform_mine, 
                             material, 
@@ -963,12 +1009,12 @@ impl RenderScene {
 
                         // add this primitive to the scene
                         self.primitives.push(gpu_primitive);
-
+                       
                         if !has_tangents {
                             mikktspace::generate_tangents(&mut PrimitiveGeometry::new(self, self.primitives.len() - 1));
                         }
                         
-                        println!("Adding primitive with {} triangles, bvh root at index {}", self.tris.len() - first_new_tri, bvh_root);
+                        // println!("Adding primitive with {} triangles, bvh root at index {}", self.tris.len() - first_new_tri, bvh_root);
 
                         // mark this primitive as already loaded
                         loaded_primitives.insert(
@@ -1059,16 +1105,57 @@ impl RenderScene {
                 primitive.bvh_idx, 
                 &self.tris, 
                 primitive.inv_transform.transform_point3(ro), 
-                primitive.inv_transform.transform_vector3(rd).normalize(),
+                primitive.inv_transform.transform_vector3(rd),
             ) {
-                closest_t = Some(closest_t.unwrap_or(f32::MAX).min(t / primitive.inv_transform.transform_vector3(rd).length()));
+                closest_t = Some(closest_t.unwrap_or(f32::MAX).min(t));
             }
             
         }
-        if closest_t.is_none() {
-            println!("Ray Miss!");
-        }
+
         closest_t
+    }
+
+    fn camera_ray(pixel: UVec2, res: UVec2, cam: GpuCamera) -> (Vec3, Vec3) {
+
+        let origin  = cam.origin;
+        let forward = cam.dir;
+        let fov_factor = ((cam.fovy / 2.0).sin() / (cam.fovy / 2.0).cos()) * 2.0;
+
+        let unreachable = vec3(0.0, 0.0, 1.0);
+        let right = forward.cross(unreachable).normalize();
+        let up    = right.cross(forward).normalize();
+        let mut pixel_pos = origin + forward;
+
+
+        let aa_pixel = pixel.as_vec2() + Vec2::new(0.5, 0.5);
+        let aspect = res.x as f32 / res.y as f32;
+
+        pixel_pos += right * (aa_pixel.x / res.x as f32 - 0.5) * fov_factor * aspect;
+        pixel_pos += up    * (0.5 - aa_pixel.y / res.y as f32) * fov_factor;
+
+        let dir  = (pixel_pos - origin).normalize();
+
+        return (origin, dir);
+    }
+
+    pub fn trace_cpu_image(&self, cam: GpuCamera) -> image::ImageBuffer<image::Rgb<u8>, Vec<u8>> {
+        let mut image = image::ImageBuffer::new(512, 512);
+        
+        for x in 0..512 {
+            for y in 0..512 {
+                let (ro, rd) = Self::camera_ray(uvec2(x, y), uvec2(512, 512), cam);
+                let t = self.closest_hit(ro, rd);
+                let c = if let Some(t) = t {
+                    let it = (t.fract() * 255.0) as u8;
+                    image::Rgb([it, it, it])
+                } else {
+                    image::Rgb([(x / 2) as u8, (y / 2) as u8, 0])
+                };
+                image.put_pixel(x, y, c);
+            }
+        }
+
+        image
     }
 
     /// Raycast the scene from the camera's center to update its focal length
@@ -1086,6 +1173,7 @@ impl RenderScene {
             self.cameras[camera_id].focus(focus);
             true
         } else {
+            println!("Ray Miss!");
             false
         }
     }
@@ -1103,8 +1191,12 @@ impl RenderScene {
     
         if scene.cameras.is_empty() {
             println!("No camera in scene, falling back to default");
-            // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
-            scene.cameras.push(Camera::default());
+            let scene_aabb = scene.tlas_node_data[0].aabb;
+            let center = (scene_aabb.max() + scene_aabb.min()) / 2.0;
+            let size = (scene_aabb.max() - scene_aabb.min()).max_element();
+            let dir = (FORWARD + RIGHT - UP).normalize();
+            
+            scene.cameras.push(Camera::from_to(scene_aabb.max() - dir * size, center));
         }
         
         println!("Tri count: {}", scene.tris.len());
@@ -1178,7 +1270,8 @@ impl Tri {
         let edge2 = self.vertices[2].xyz() - self.vertices[0].xyz();
         let h = Vec3::cross( rd, edge2 );
         let a = Vec3::dot( edge1, h );
-        if a > -0.000002 && a < 0.000002 {
+        const TRI_EPS: f32 = 1e-8;
+        if a > -TRI_EPS && a < TRI_EPS {
             return None;
         }// ray parallel to triangle
         let f = 1.0 / a;
@@ -1193,7 +1286,7 @@ impl Tri {
             return None;
         }
         let t = f * Vec3::dot( edge2, q );
-        if t > 0.000002 {
+        if t > TRI_EPS {
             return Some(t);
         } else {
             return None;
@@ -1280,6 +1373,8 @@ impl Aabb {
     
         Some(t0)
     }
+
+
 }
 
 impl Default for Aabb {
@@ -1541,7 +1636,7 @@ impl Bvh {
         let (axis, split) = if node.count < 64 {
             self.find_best_split(leaves, &node) 
         } else {
-            self.find_split_approx(leaves, &node, 16) 
+            self.find_split_approx(leaves, &node, 64) 
         };
 
         let mut i = node.first as usize;

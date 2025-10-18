@@ -406,7 +406,6 @@ impl<'a> Gpu<'a> {
         });
         layout
     }
-    
 
     pub fn new_texture(&self, size: UVec2, format: wgpu::TextureFormat, renderable: bool) -> Texture {
         let usage = if renderable {
@@ -552,9 +551,9 @@ impl<'a> Gpu<'a> {
         let mut limits = wgpu::Limits::default();
         limits = limits.using_resolution(adapter.limits());
         
-        // request 1024 mb buffers
-        limits.max_buffer_size = 1024 * 1024 * 1024;
-        limits.max_storage_buffer_binding_size = 1024 * 1024 * 1024;
+        // request max size buffers
+        limits.max_buffer_size = adapter.limits().max_buffer_size;
+        limits.max_storage_buffer_binding_size = adapter.limits().max_storage_buffer_binding_size;
 
         let device_desc = wgpu::DeviceDescriptor {
             label: None,
