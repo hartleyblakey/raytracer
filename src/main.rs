@@ -220,7 +220,7 @@ impl Context {
     }
 
     async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
-        let scene = RenderScene::from_path(DEFAULT_MODEL_PATH, DEFAULT_ENV_PATH).await.unwrap();
+        let scene = RenderScene::from_path(std::path::Path::new(DEFAULT_MODEL_PATH), std::path::Path::new(DEFAULT_ENV_PATH) ).await.unwrap();
 
         println!("Bvh size : {} mb", (scene.bvh_node_data.len() * size_of::<BvhNode>()) / (1000 * 1000));
         let mut resources = ResourceManager::new();
@@ -334,9 +334,21 @@ impl Context {
         }
     }
 
-    async fn try_change_scene(&mut self, mesh_path: &str, env_map_path: &str) {
-        if let Some(mesh_bytes) = fetch_bytes(mesh_path).await {
-            self.try_change_scene_bytes(&mesh_bytes, env_map_path).await
+    async fn try_change_scene(&mut self, mesh_path: &std::path::Path, env_map_path: &std::path::Path) {
+        println!("Attempting to change scene");
+        if let Some(scene) = RenderScene::from_path(mesh_path, env_map_path).await {
+            self.scene = scene;
+            self.frame_uniforms.scene = self.scene.to_gpu();
+            self.frame_uniforms.reject_hist = 1;
+            self.frame_uniforms.node_count = self.scene.bvh_node_data.len() as u32;
+            self.frame_uniforms.prim_count = self.scene.primitives.len() as u32;
+
+            // self.scene.focus_camera(0);
+            // self.scene.cameras[0].update(&mut InputState::default(), 1.0 / 60.0);
+
+            self.should_reupload = true;
+        } else {
+            println!("Scene change failed!");
         }
     }
 
@@ -354,10 +366,6 @@ impl Context {
 
         };
 
-        let Some(path_str) = path.as_os_str().to_str() else {
-            return;
-        };
-
         // TODO: Test other HDR image formats
         let is_env = match path.extension() {
             None => false,
@@ -370,16 +378,16 @@ impl Context {
 
         if is_env {
             println!("Trying to add env map");
-            self.scene.set_equirectangular_env_map(path_str).await;
+            self.scene.set_equirectangular_env_map(path).await;
             
             self.should_reupload = true;
         } else if is_mesh {
             let old_env = self.scene.env_map_path.clone();
-            self.try_change_scene(path_str, &old_env).await
+            self.try_change_scene(path, &old_env).await
         }
     }
 
-    async fn try_change_scene_bytes(&mut self, mesh_bytes: &[u8], env_map_path: &str) {
+    async fn try_change_scene_bytes(&mut self, mesh_bytes: &[u8], env_map_path: &std::path::Path) {
         println!("Attempting to change scene");
         if let Some(scene) = RenderScene::from_bytes(mesh_bytes, env_map_path).await {
             self.scene = scene;

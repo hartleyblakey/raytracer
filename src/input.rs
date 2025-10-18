@@ -187,7 +187,8 @@ impl Camera {
         }
 
         if input.rmb && (input.mouse_x != 0.0 || input.mouse_y != 0.0) {
-            self.rotate(-input.mouse_y as f32 * 0.003, -input.mouse_x as f32 * 0.003);
+            let rotate_speed = 0.0015 * self.fovy;
+            self.rotate(-input.mouse_y as f32 * rotate_speed, -input.mouse_x as f32 * rotate_speed);
             
             input.mouse_x = 0.0;
             input.mouse_y = 0.0;
@@ -199,7 +200,8 @@ impl Camera {
             } else if alt {
                 self.aperture_delta(input.scroll as f32 / 100.0);
             } else {
-                self.zoom((input.scroll * 0.1) as f32);
+                self.zoom(self.fovy * (input.scroll * 0.1).clamp(-0.2, 0.2) as f32);
+                
             }
 
         }

@@ -258,10 +258,10 @@ pub struct EnvironmentMap {
 }
 
 impl EnvironmentMap {
-    pub async fn from_hdr_path(path: &str) -> Option<Self> {
-        let buffer = fetch_bytes(path).await?;
+    pub async fn from_hdr_path(path: &std::path::Path) -> Option<Self> {
+        let buffer = fetch_bytes(path.as_os_str().to_str()?).await?;
         let mut data = Vec::new();
-        let image = image::load_from_memory(buffer.as_slice()).expect(format!("Expected valid image at path {path}").as_str());
+        let image = image::load_from_memory(buffer.as_slice()).expect(format!("Expected valid image at path {:?}", path).as_str());
         let image = image.into_rgba32f();
         for pixel in image.pixels() {
             data.push(pixel.0);
@@ -430,7 +430,10 @@ impl Default for EnvironmentMap {
 #[derive(Default)]
 pub struct RenderScene {
     // path to the environment map texture
-    pub env_map_path:       String,
+    pub env_map_path:       std::path::PathBuf,
+
+    // path to the GLTF file
+    pub gltf_path:          Option<std::path::PathBuf>,
 
     /// flat array of primitives that share a material
     pub primitives:         Vec<GpuPrimitive>,
@@ -548,6 +551,34 @@ type LoadedMeshCache = HashMap<usize, HashMap<usize, usize>>;
 
 impl RenderScene {
 
+    pub fn add_gltf(&mut self, transform: &Mat4, path: &std::path::Path) -> bool {
+        let mut cache = LoadedMeshCache::new();
+        
+        let (document, buffers, _) = match gltf::import(path) {
+            Ok(r) => r,
+            Err(_) =>{println!("Failed to import gltf"); return false},
+        };
+
+        self.gltf_path = Some(path.to_path_buf());
+
+        let mut ms = MatrixStack::new();
+        ms.push();
+        ms.apply(&transform);
+        if let Some(scene) = document.default_scene() {
+            for node in scene.nodes() {
+                self.add_gltf_node(&buffers, node, &mut ms, &mut cache);
+            }
+        } else if let Some(scene) = document.scenes().next() {
+            for node in scene.nodes() {
+                self.add_gltf_node(&buffers, node, &mut ms, &mut cache);
+            }
+        }
+
+        self.build_tlas();
+        
+        true
+    }  
+
     pub fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) -> bool {
         let mut cache = LoadedMeshCache::new();
 
@@ -555,6 +586,8 @@ impl RenderScene {
             Ok(r) => r,
             Err(_) =>{println!("Failed to import gltf bytes"); return false},
         };
+
+
 
         let mut ms = MatrixStack::new();
         ms.push();
@@ -590,6 +623,16 @@ impl RenderScene {
 
     fn add_gltf_texture(&mut self, tex: &gltf::texture::Texture, buffers: &Vec<gltf::buffer::Data>) -> GpuTextureRef {
 
+        let gltf_dir = self.gltf_path
+            .clone()
+            .map(|x| 
+                x.parent()
+                .map(|x| 
+                    x.to_path_buf()
+                )
+            )
+            .flatten();
+
         // if we have not already loaded the image
         if !self.texture_map.contains_key(&tex.index()) {
             // load the image
@@ -607,7 +650,11 @@ impl RenderScene {
                 },
                 // untested
                 gltf::image::Source::Uri { uri, .. } => {
-                    image::ImageReader::open(uri).unwrap().decode().unwrap()
+                    let path = gltf_dir.map(|x| x.join(uri)).unwrap_or(std::path::Path::new(uri).to_path_buf());
+
+                    image::ImageReader::open(path).unwrap().decode().unwrap()
+                    
+                    
                 },
             };
 
@@ -676,7 +723,7 @@ impl RenderScene {
                     if let Some(&prim_idx) = loaded_primitives.get(&primitive.index()) {
                         let mut new_primitive = self.primitives[prim_idx];
                         new_primitive.transform = node_transform_mine;
-                        new_primitive.inv_transform = node_transform_mine.inverse();
+                        new_primitive.inv_transform = node_transform_mine.as_dmat4().inverse().as_mat4();
                         self.primitives.push(new_primitive);
                         continue;
                     }
@@ -691,7 +738,8 @@ impl RenderScene {
                         println!("Instanced a primitive!");
                         let mut new_primitive = self.primitives[prim_idx];
                         new_primitive.transform = node_transform_mine;
-                        new_primitive.inv_transform = node_transform_mine.inverse();
+                        new_primitive.inv_transform = node_transform_mine.as_dmat4().inverse().as_mat4();
+
                         self.primitives.push(new_primitive);
                         continue;
                     }
@@ -793,6 +841,8 @@ impl RenderScene {
 
                         }
 
+
+
                         if let Some(transmission) = primitive.material().transmission() {
                             material.transmission_factor = transmission.transmission_factor();
                             
@@ -884,7 +934,9 @@ impl RenderScene {
                         else {
                             panic!("Only supporting indexed meshes for now");
                         }
-
+                        if node_transform_mine.to_scale_rotation_translation().2.length() > 100.0 {
+                            println!("Warning: distant geometry is poorly supported ({} units from origin)", node_transform_mine.to_scale_rotation_translation().2.length());
+                        }
 
                         // build a bvh around the new triangles
                         let mut bvh = Bvh::new(&self.tris.as_slice(), first_new_tri, self.tris.len() - first_new_tri);
@@ -895,7 +947,7 @@ impl RenderScene {
 
                         for node in &mut self.bvh_node_data[bvh_root as usize .. ] {
                             if node.count == 0 {
-                                // leaf node
+                                // inner node
                                 node.first += bvh_root;
                             }
                         }
@@ -925,7 +977,7 @@ impl RenderScene {
                         );
 
                     } else {
-                        panic!("Non-triangle primitives not supported");
+                        println!("Warning: Non-triangle primitives not supported");
                     }
                 }
 
@@ -948,13 +1000,13 @@ impl RenderScene {
     /// returns true if the file was found, false otherwise
     /// 
     /// panics if the file path is valid but not an image
-    pub async fn set_equirectangular_env_map(&mut self, path: &str) -> bool {
+    pub async fn set_equirectangular_env_map(&mut self, path: &std::path::Path) -> bool {
         if let Some(e) = EnvironmentMap::from_hdr_path(path).await {
             self.env_map = e;
             self.env_map_path = path.to_owned();
             true
         } else {
-            println!("Failed to make an EnvironmentMap from path \"{path}\"");
+            println!("Failed to make an EnvironmentMap from path \"{:?}\"", path);
             false
         }
     }
@@ -1038,16 +1090,33 @@ impl RenderScene {
         }
     }
 
-    pub async fn from_path(mesh_path: &str, env_map_path: &str) -> Option<RenderScene> {
-        if let Some(mesh_bytes) = fetch_bytes(mesh_path).await {
-            Self::from_bytes(&mesh_bytes, env_map_path).await
-        } else {
-            None
+    pub async fn from_path(mesh_path: &std::path::Path, env_map_path: &std::path::Path) -> Option<RenderScene> {
+        println!("building scene");
+        let mut scene = RenderScene::default();
+    
+        if !scene.add_gltf(&Mat4::IDENTITY, mesh_path) {
+            
+            return None;
+        }
+    
+        scene.set_equirectangular_env_map(env_map_path).await;
+    
+        if scene.cameras.is_empty() {
+            println!("No camera in scene, falling back to default");
+            // vec3f(-3.5, -0.5, 0.5), vec3f(1.0, 0.0, 0.0)
+            scene.cameras.push(Camera::default());
         }
         
+        println!("Tri count: {}", scene.tris.len());
+        println!("Tri size : {} + {} mb", (scene.tris.len() * size_of::<Tri>()) / (1024 * 1024), (scene.tris.len() * size_of::<GpuTriExt>()) / (1024 * 1024));
+        println!("Texture data size : {} mb", (scene.texture_data.len() * size_of::<u32>()) / (1024 * 1024));
+
+        println!("Focused camera: {}", scene.focus_camera(0));
+        
+        Some(scene)
     }
     
-    pub async fn from_bytes(mesh_bytes: &[u8], env_map_path: &str) -> Option<RenderScene> {
+    pub async fn from_bytes(mesh_bytes: &[u8], env_map_path: &std::path::Path) -> Option<RenderScene> {
         println!("building scene");
         let mut scene = RenderScene::default();
     
@@ -1072,6 +1141,9 @@ impl RenderScene {
         
         Some(scene)
     }
+
+
+
     
 }
 
@@ -1170,8 +1242,10 @@ impl Aabb {
     }
 
     pub fn point(point: Vec3) -> Self {
+        const EPS: f32 = 0.000001;//0.00001;
+
         Self {
-            data: [point.x - 0.00001, point.y - 0.00001, point.z - 0.00001, point.x + 0.00001, point.y + 0.00001, point.z + 0.00001]
+            data: [point.x - EPS, point.y - EPS, point.z - EPS, point.x + EPS, point.y + EPS, point.z + EPS]
         }
     }
 

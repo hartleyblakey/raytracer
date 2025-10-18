@@ -456,6 +456,7 @@ struct Ray {
     idir: vec3f,
 }
 
+const TRI_EPS: f32 = 0.00000001;
 
 // https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
 // epsilon stolen from https://www.shadertoy.com/view/wlsfRs
@@ -464,7 +465,7 @@ fn intersect (ray: Ray, tri: Tri) -> f32 {
     let edge2 = tri.d2.xyz - tri.d0.xyz;
     let h = cross( ray.dir, edge2 );
     let a = dot( edge1, h );
-    if (a > -0.000002 && a < 0.000002) {
+    if (a > -TRI_EPS && a < TRI_EPS) {
         return -1.0;
     }// ray parallel to triangle
     let f = 1.0 / a;
@@ -479,7 +480,7 @@ fn intersect (ray: Ray, tri: Tri) -> f32 {
         return -1.0;
     }
     let t = f * dot( edge2, q );
-    if (t > 0.000002) {
+    if (t > TRI_EPS) {
         return t;
     } else {
         return -1.0;
@@ -515,7 +516,7 @@ fn intersect_full(ray: Ray, idx: i32) -> Hit {
 
     let h = cross( ray.dir, edge2 );
     let a = dot( edge1, h );
-    if (a > -0.000002 && a < 0.000002) {
+    if (a > -TRI_EPS && a < TRI_EPS) {
         return hit;
     }// ray parallel to triangle
     let f = 1.0 / a;
@@ -530,7 +531,7 @@ fn intersect_full(ray: Ray, idx: i32) -> Hit {
         return hit;
     }   // miss?
     let t = f * dot( edge2, q );
-    if (t <= 0.000002) {
+    if (t <= TRI_EPS) {
         return hit;
     }   // miss?
 
@@ -588,6 +589,11 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
 
 
         if node.count > 0 {
+
+            // if debug > 0.0 {
+            //     return i32(node.first);
+            // }
+
             // intersect triangles of node
             for (var i = node.first; i < node.first + node.count; i++) {
                 let t = intersect(ray, triangles[i]);
@@ -655,56 +661,6 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
     return i32(best_i);
 }
 
-// true if hit, false otherwise
-fn trace_bvh_shadow(ray: Ray, root: u32) -> bool {
-    var stack: Stack;
-    stack.size = 0u;
-    var node = bvh[root];
-    if intersect_aabb(ray, node.aabb) < -0.5 {
-        return false;
-    }
-    while (true) {
-        
-        if node.count > 0 {
-            for (var i = node.first; i < node.first + node.count; i++) {
-                
-                let t = intersect(ray, triangles[i]);
-                if t >= 0.0 {
-                    return true;
-                }
-            }
-            if stack.size == 0u {
-                break;
-            }
-            node = bvh[pop(&stack)];
-        } else {
-            // avoid pushing nodes onto the stack where possible
-            // order nodes based on distance
-
-            let left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
-            let right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
-    
-            if left < -0.5 && right < -0.5 {
-                if stack.size == 0u {
-                    break;
-                }
-                node = bvh[pop(&stack)];
-            } else if left < -0.5 {
-                node = bvh[node.first + 1u];
-            } else if right < -0.5 {
-                node = bvh[node.first + 0u];
-            } else if left < right {
-                push(&stack, node.first + 1u);
-                node = bvh[node.first + 0u];
-            } else {
-                push(&stack, node.first + 0u);
-                node = bvh[node.first + 1u];
-            }
-
-        }
-    }
-    return false;
-}
 
 fn transform_dir(x: vec3f, t: mat4x4f) -> vec3f {
     return (t * vec4f(x.x, x.y, x.z, 0.0)).xyz;
@@ -737,13 +693,14 @@ fn trace(ray: Ray) -> Hit {
     if intersect_aabb(ray, node.aabb) < -0.5 {
         return hit_default();
     }
-    
+    var tlas_steps = 0.0;
     while (true) {
         // debug = max(debug, f32(stack.size + 1u));
         // visualize bvh steps
         debug += 1.0;
 
         if node.count > 0 {
+            tlas_steps += 1.0;
             // intersect BLAS(s) of node
             for (var i = node.first; i < node.first + node.count; i++) {
                 let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
@@ -751,11 +708,18 @@ fn trace(ray: Ray) -> Hit {
                 // debug += 1.0;
                 var new_t = best_t * scale_factor;
                 let new_tri = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
+                
 
                 if new_tri >= 0 {
                     best_t = new_t / scale_factor;
                     closest_tri = new_tri;
                     closest_primitive = i32(i);
+
+                    // var hit = hit_default();
+                    // hit.prim_idx = i32(i);
+                    // hit.idx = i32(new_tri);
+                    // hit.normal = -ray.dir;
+                    // return hit;
                 }
             }
             if stack.size == 0u {
@@ -803,85 +767,6 @@ fn trace(ray: Ray) -> Hit {
     hit.material = primitives[closest_primitive].material;
     return hit;
 
-}
-
-fn trace_tlas(ray: Ray) -> i32 {
-    var stack: Stack;
-    stack.size = 0u;
-    var node = bvh[globals.node_count];
-    var best_t = 99999999.0;
-    var closest_tri: i32 = -1;
-    var closest_primitive: i32 = -1;
-    if intersect_aabb(ray, node.aabb) < -0.5 {
-        return closest_tri;
-    }
-    
-    while (true) {
-        // debug = max(debug, f32(stack.size + 1u));
-        // visualize bvh steps
-        debug += 1.0;
-
-        if node.count > 0 {
-            // intersect BLAS(s) of node
-            for (var i = node.first; i < node.first + node.count; i++) {
-                let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
-                let t_ray = transform_ray(ray, primitives[i].inv_transform);
-                debug += 1.0;
-                var new_t = best_t * scale_factor;
-                let new_tri = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
-
-                if new_tri >= 0 {
-                    best_t = new_t / scale_factor;
-                    closest_tri = new_tri;
-                    closest_primitive = i32(i);
-                }
-            }
-            if stack.size == 0u {
-                break;
-            }
-            node = bvh[pop(&stack)];
-        } else {
-            // avoid pushing nodes onto the stack where possible
-            // order nodes based on distance
-
-            // TLAS is tacked onto end of bvh:
-            let node_first = globals.node_count + node.first;
-
-            // try ordering the nodes
-            let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
-            let right = intersect_aabb(ray, bvh[node_first + 1u].aabb);
-    
-            if (left < -0.5 || left > best_t) && (right < -0.5 || right > best_t) {
-                if stack.size == 0u {
-                    break;
-                }
-                node = bvh[pop(&stack)];
-            } else if (left < -0.5 || left > best_t) {
-                node = bvh[node_first + 1u];
-            } else if (right < -0.5 || right > best_t) {
-                node = bvh[node_first + 0u];
-            } else if left < right {
-                push(&stack, node_first + 1u);
-                node = bvh[node_first + 0u];
-            } else {
-                push(&stack, node_first + 0u);
-                node = bvh[node_first + 1u];
-            }
-
-        }
-    }
-    return i32(closest_tri);
-}
-
-// true if hit, false otherwise
-fn trace_shadow(ray: Ray) -> bool {
-    for (var i = 0u; i < globals.prim_count; i++) {
-        let t_ray = transform_ray(ray, primitives[i].inv_transform);
-        if trace_bvh_shadow(t_ray, primitives[i].bvh_idx) {
-            return true;
-        }
-    }
-    return false;
 }
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
@@ -1001,7 +886,7 @@ fn sample_env_map() -> vec3f {
     }
     let res = vec2f(textureDimensions(env_map));
 
-    let uv = vec2f(f32(col), f32(row)) / res;
+    let uv = vec2f(f32(col) + rand(), f32(row) + rand()) / res;
     
     return env_map_to_dir(uv);
 }
@@ -1444,7 +1329,7 @@ fn sample_dielectric_bsdf_pdf(wi_tangent: vec3f, wo_tangent: vec3f, ior_i: f32, 
     } else {
         transmission_pdf = 0.0;
     }
-    debug = (fresnel - 0.04) * 128.0;
+
 
     let pdf = mix(mix(diffuse_pdf, transmission_pdf, sample.transmission), specular_pdf, fresnel);
 
@@ -1489,8 +1374,6 @@ fn sample_bsdf(wo: vec3f, ior_o: f32, ior_i: f32, sample: ExtSample, lighting: p
     }
      
     var wi = tbn * wi_tangent;
-    
-    debug = 0.0;
 
     *pdf = sample_bsdf_pdf(wi, wo, ior_i, ior_o, sample);
     *bsdf = evaluate_bsdf(wi, wo, ior_i, ior_o, sample);
@@ -1570,7 +1453,7 @@ fn evaluate_dielectric(wi_tangent: vec3f, wo_tangent: vec3f, ior_i: f32, ior_o: 
 
     var specular = evaluate_ggx(wo_tangent, wi_tangent, vec3f(fresnel), a2);
     var diffuse = sample.albedo.rgb / pi * (1.0 - fresnel);
-    var transmission = evaluate_ggx_transmission(wi_tangent, wo_tangent, vec3f(0.0, 0.0, 1.0), a2, ior_i, ior_o, fresnel);
+    var transmission = sample.albedo.rgb * evaluate_ggx_transmission(wi_tangent, wo_tangent, vec3f(0.0, 0.0, 1.0), a2, ior_i, ior_o, fresnel);
 
     if transmitted {
         specular = vec3f(0);
@@ -1622,6 +1505,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     rand(); rand();
 
     var NEE_PROB = 0.2;
+    var RR_PROB = 0.6;
 
     var ray_volume = background_volume();
     ray_volume.ior = 1.0;
@@ -1649,7 +1533,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
 
     for (var i = 0; i < NUM_BOUNCES; i++) {
         let hit = trace(ray);
-        debug = 0.0;
+
         if (hit.idx == -1) {
             lighting += throughput * evaluate_env_map(ray.dir).rgb;
             break;
@@ -1676,8 +1560,15 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         if globals.debug_mode != 9 {
             throughput *= exp(-ray_volume.absorption * hit.t);
         }
-        
         lighting += sample.emissive * throughput;
+
+        RR_PROB = clamp(1.0 - max(throughput.x, max(throughput.y, throughput.z)), 0.0, 1.0);
+        if rand() < RR_PROB {
+            break;
+        } else {
+            throughput /= (1.0 - RR_PROB);
+        }
+
         if rand() < NEE_PROB {
 
             wi = normalize(sample_env_map());
