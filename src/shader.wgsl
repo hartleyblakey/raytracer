@@ -7,9 +7,10 @@
 @group(1) @binding(4) var<storage, read_write> texture_data :   array<u32>;
 @group(1) @binding(5) var<storage, read_write> primitives :     array<Primitive>;
 @group(1) @binding(6) var<storage, read_write> env_map_rows_cdf:array<f32>;
-@group(1) @binding(7) var                      env_map:         texture_2d<f32>;
-@group(1) @binding(8) var                      env_map_col_cdf: texture_2d<f32>;
-@group(1) @binding(9) var                      env_map_pdf:     texture_2d<f32>;
+@group(1) @binding(7) var<storage, read_write> mesh_lights:     array<MeshLight>;
+@group(1) @binding(8) var                      env_map:         texture_2d<f32>;
+@group(1) @binding(9) var                      env_map_col_cdf: texture_2d<f32>;
+@group(1) @binding(10) var                      env_map_pdf:     texture_2d<f32>;
 
 const pi = 3.141592654;
 
@@ -19,9 +20,16 @@ const RIGHT = vec3f(0.0, -1.0, 0.0);
 
 const NUM_TEXCOORDS = 2;
 
-const EXPOSURE = 1.000;
+const EXPOSURE = 10.000;
 
 var<private> debug: f32;
+
+struct MeshLight {
+    prim: i32,
+    tri: i32,
+    cdf: f32,
+    power: f32,
+}
 
 struct Camera {
     dir:        vec3f,
@@ -129,7 +137,9 @@ struct Primitive {
     inv_transform:  mat4x4f,
     material:       Material,
     bvh_idx:        u32,
-    _pad:           u32,
+    tri_start:      u32,
+    tri_count:      u32,
+    flags:           u32,
 }
 
 struct Scene {
@@ -140,6 +150,10 @@ struct Scene {
     num_point_lights:       u32,
     num_directional_lights: u32,
     tlas_node_count:        u32,
+    mesh_light_count:       u32,
+    pad1:                   u32,
+    pad2:                   u32,
+    pad3:                   u32,
 }
 
 struct FrameUniforms {
@@ -835,8 +849,89 @@ fn rand_color() -> vec3f {
     // return 1.0 - pow(vec3f(0.25), normalize(vec3f(rand(), rand(), rand())) + 0.1);
 }
 
+fn trace_to_target(ray: Ray, prim: i32, tri: i32) -> bool {
+    let hit = trace(ray);
+    return hit.idx == tri && hit.prim_idx == prim;
+}
 
+/// uniform sample a point on a triangle - *returns area pdf*
+fn sample_triangle_area(prim: i32, tri: i32, pdf: ptr<function, f32>) -> vec3f {
+    let e1 = sqrt(rand());
+    let e2 = rand();
 
+    let u = 1.0 - e1;
+    let v = e2 * e1;
+
+    let transform = primitives[prim].transform;
+    let lt = triangles[tri];
+
+    let v0 = transform_pos(lt.d0.xyz, transform);
+    let v1 = transform_pos(lt.d1.xyz, transform);
+    let v2 = transform_pos(lt.d2.xyz, transform);
+
+    let a = (v1 - v0);
+    let b = (v2 - v0);
+
+    *pdf = 0.5 * length(cross(a, b));
+
+    return v0 + a * u + b * v;
+}
+
+fn sample_triangle_area_pdf(prim: i32, tri: i32) -> f32 {
+    let transform = primitives[prim].transform;
+    let lt = triangles[tri];
+
+    let v0 = transform_pos(lt.d0.xyz, transform);
+    let v1 = transform_pos(lt.d1.xyz, transform);
+    let v2 = transform_pos(lt.d2.xyz, transform);
+
+    let a = (v1 - v0);
+    let b = (v2 - v0);
+
+    return 0.5 * length(cross(a, b));
+}
+
+// MARK: - Mesh Lights
+
+fn sample_mesh_light_area(pdf: ptr<function, f32>) -> vec3f {
+
+    let dim = globals.scene.mesh_light_count;
+    var c = 0u;
+    {
+        var low = 0u;
+        var high = dim - 1u;
+        var mid = (low + high) / 2;
+        var cdf = 0.0;
+        var cdf_target = rand();
+
+        while high >= low {
+            
+            cdf = mesh_lights[mid].cdf;
+            if cdf < cdf_target {
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+                c = mid;
+            }
+            mid = (low + high) / 2;
+        }
+    }
+    var tri_pdf: f32;
+    let p = sample_triangle_area(mesh_lights[c].prim, mesh_lights[c].tri, &tri_pdf);
+    *pdf = mesh_lights[c].power * tri_pdf;
+    return p;
+}
+
+// 
+fn sample_mesh_light_area_pdf(prim: i32, tri: i32) -> f32 {
+    let triangle_point_pdf = sample_triangle_area_pdf(prim, tri);
+    let base = primitives[prim].flags >> 8u;
+
+    let triangle_pdf = mesh_lights[i32(base) + (tri - i32(primitives[prim].tri_start))].power;
+
+    return triangle_pdf * triangle_point_pdf;
+
+}
 
 
 // MARK: Environment map

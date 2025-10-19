@@ -75,6 +75,7 @@ struct Context {
     triangles_ext_ssbo:         Buffer,
     texture_data_ssbo:          Buffer,
     primitive_data_ssbo:        Buffer,
+    mesh_light_ssbo:            Buffer,
 
     env_map_texture:            Texture,
     env_map_col_cdf:            Texture,
@@ -104,9 +105,10 @@ impl Context {
             .with_buffer(&self.screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.primitive_data_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.env_map_rows_cdf.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.env_map_rows_cdf.view_all(),      wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.mesh_light_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&self.env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_texture(&self.env_map_col_cdf,                wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_texture(&self.env_map_col_cdf,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&self.env_map_pdf,                     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut self.resources);
     }
@@ -242,15 +244,16 @@ impl Context {
             .with_buffer(&u_frame_buffer.view_all(), wgpu::ShaderStages::all())
             .finish(&mut resources);
 
-        // just make everything 128mb for simplicity
-        let initial_buffer_size_mb = 128;
+        // just make everything 1mb for simplicity
+        let initial_buffer_size_mb = 1;
 
         let triangles_ssbo =        gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
         let bvh_ssbo =              gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
         let triangles_ext_ssbo =    gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
         let texture_data_ssbo =     gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
-        let primitive_data_ssbo =   gpu.new_storage_buffer(32 * 1024 * 1024);
+        let primitive_data_ssbo =   gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
+        let mesh_light_ssbo =       gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
 
         let env_map_rows_cdf = gpu.new_storage_buffer((scene.env_map.height * scene.env_map.width * size_of::<f32>()) as u64);
 
@@ -266,6 +269,7 @@ impl Context {
             .with_buffer(&texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&primitive_data_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&env_map_rows_cdf.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&mesh_light_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&env_map_col_cdf,                wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&env_map_pdf,                     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
@@ -319,6 +323,7 @@ impl Context {
             triangles_ext_ssbo,
             texture_data_ssbo,
             primitive_data_ssbo,
+            mesh_light_ssbo,
 
             env_map_col_cdf,
             env_map_texture,
@@ -419,6 +424,7 @@ impl Context {
         self.texture_data_ssbo = gpu.new_storage_buffer(self.scene.texture_data.len().max(1) as u64 * size_of::<u32>() as u64);
         self.primitive_data_ssbo = gpu.new_storage_buffer(self.scene.primitives.len().max(1) as u64 * size_of::<GpuPrimitive>() as u64);
         self.env_map_rows_cdf = gpu.new_storage_buffer(self.scene.env_map.cdf_rows.len().max(1) as u64 * size_of::<f32>() as u64);
+        self.mesh_light_ssbo = gpu.new_storage_buffer(self.scene.mesh_lights.len().max(1) as u64 * size_of::<MeshLight>() as u64);
         self.update_rt_binding(gpu);
 
         gpu.queue.write_buffer(&self.bvh_ssbo,               0, bytemuck::cast_slice(combined_bvh.as_slice()));
@@ -427,6 +433,7 @@ impl Context {
         gpu.queue.write_buffer(&self.texture_data_ssbo,      0, bytemuck::cast_slice(self.scene.texture_data.as_slice()));
         gpu.queue.write_buffer(&self.primitive_data_ssbo,    0, bytemuck::cast_slice(self.scene.primitives.as_slice()));
         gpu.queue.write_buffer(&self.env_map_rows_cdf,       0, bytemuck::cast_slice(self.scene.env_map.cdf_rows.as_slice()));
+        gpu.queue.write_buffer(&self.mesh_light_ssbo,        0, bytemuck::cast_slice(self.scene.mesh_lights.as_slice()));
         
         gpu.queue.write_texture(
             self.env_map_texture.as_image_copy(), 

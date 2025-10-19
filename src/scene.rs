@@ -60,6 +60,8 @@ pub struct GpuSceneUniform {
     pub num_point_lights: u32,
     pub num_directional_lights: u32,
     pub tlas_node_count: u32,
+    pub mesh_light_count: u32,
+    _pad: [u32; 3],
 }
 
 
@@ -183,7 +185,7 @@ pub struct GpuPrimitive {
     bvh_idx:        u32,
     tri_start:      u32,
     tri_count:      u32,
-    /// [ 31x unused | has_tangents ]
+    /// [ 24x mesh light index | 7x unused | has_tangents ]
     flags:          u32,
 }
 
@@ -201,6 +203,10 @@ impl GpuPrimitive {
             flags: if has_tangents {Self::TANGENT_FLAG} else {0},
 
         }
+    }
+
+    fn set_mesh_light(&mut self, idx: u32) {
+        self.flags = self.flags & 0xFF | (idx << 8);
     }
 }
 
@@ -432,7 +438,22 @@ impl Default for EnvironmentMap {
     }
 }
 
+struct PrimitiveLight {
+    idx: u32,
+    power: f32,
+}
 
+#[derive(Default)]
+struct MeshLights {
+    primitives: Vec<PrimitiveLight>,
+    primitives_cdf: Vec<f32>,
+}
+
+impl MeshLights {
+    pub fn add_primitive(&mut self, primitive: GpuPrimitive) {
+        
+    } 
+}
 
 #[derive(Default)]
 pub struct RenderScene {
@@ -447,6 +468,12 @@ pub struct RenderScene {
 
     /// bvh over RenderScene::primitives
     pub tlas_node_data: Vec<BvhNode>,
+
+    /// list of mesh lights
+    pub mesh_lights: Vec<MeshLight>,
+
+    /// CDF of mesh lights
+    pub mesh_lights_cdf: Vec<f32>,
 
     /// global buffer of triangle position data
     pub tris:               Vec<Tri>,
@@ -584,10 +611,95 @@ impl Clock {
     }
 }
 
+fn unpack_rgba8(x: u32) -> Vec4 {
+    return vec4(
+        ((x >> 24) & 255) as f32 / 255.0,
+        ((x >> 16) & 255) as f32 / 255.0,
+        ((x >> 8)  & 255) as f32 / 255.0,
+        ((x >> 0)  & 255) as f32 / 255.0
+    );
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+pub struct MeshLight {
+    prim: i32,
+    tri: i32,
+    cdf: f32,
+    power: f32,
+}
 
 type LoadedMeshCache = HashMap<usize, HashMap<usize, usize>>;
 
 impl RenderScene {
+
+    fn build_mesh_lights(&mut self) {
+        
+        for (prim_id, prim) in self.primitives.iter_mut().enumerate() {
+            if prim.material.emissive_factor == Vec3::ZERO {
+                continue;
+            }
+        
+            for i in prim.tri_start..prim.tri_start + prim.tri_count {
+                let tri = self.tris[i as usize];
+                let ext = self.tri_exts[i as usize];
+
+                let area = 0.5 * 
+                (tri.vertices[1].xyz() - tri.vertices[0].xyz())
+                    .cross(tri.vertices[2].xyz() - tri.vertices[0].xyz())
+                    .length();
+
+                let mut power = area * prim.material.emissive_factor.length();
+                if prim.material.emissive.size != 0 {
+                    // textured triangle with emissive map.
+                    let tc: Vec2 = ext.vertices.iter()
+                    .map(|x| x.texcoords[prim.material.emissive_texcoord as usize])
+                    .sum::<Vec2>() / 3.0;
+                    let tc = (tc.fract() * prim.material.emissive.size().as_vec2()).as_uvec2();
+                    let ti = prim.material.emissive.offset + tc.y * prim.material.emissive.size().x + tc.x;
+                    let c = unpack_rgba8(self.texture_data[ti as usize]);
+                    let avg = c.xyz().length() * c.w;
+                    power *= avg.max(0.05);
+                }
+                prim.set_mesh_light(self.mesh_lights.len() as u32);
+                self.mesh_lights.push(
+                    MeshLight { 
+                        tri: i as i32, 
+                        cdf: 0.0,
+                        prim: prim_id as i32,
+                        power, 
+                    }
+                )
+            }
+            let mut total = 0.0;
+            let mut cdf = Vec::new();
+            for i in 0..self.mesh_lights.len() {
+                total += self.mesh_lights[i].power as f64;
+                cdf.push(total);
+            }
+
+            if total <= 0.0 {
+                cdf.clear();
+                for _ in 0..self.mesh_lights.len() {
+                    total += 1.0;
+                    cdf.push(total);
+                }
+            }
+            
+            for i in 0..self.mesh_lights.len() {
+                self.mesh_lights[i].cdf = (cdf[i] / total) as f32;
+                self.mesh_lights[i].power = (self.mesh_lights[i].power as f64 / total) as f32;
+            }
+
+            self.mesh_lights.last_mut().map(|x| x.cdf = 1.0);
+        }
+            
+    }
+
+    fn on_geometry_changed(&mut self) {
+        self.build_tlas();
+        self.build_mesh_lights();
+    }
 
     pub fn add_gltf(&mut self, transform: &Mat4, path: &std::path::Path) -> bool {
         let mut cache = LoadedMeshCache::new();
@@ -612,7 +724,7 @@ impl RenderScene {
             }
         }
 
-        self.build_tlas();
+        self.on_geometry_changed();
         
         true
     }  
@@ -636,7 +748,7 @@ impl RenderScene {
             }
         }
 
-        self.build_tlas();
+        self.on_geometry_changed();
         
         true
     }   
@@ -1094,6 +1206,8 @@ impl RenderScene {
             num_directional_lights: self.directional_lights.len() as u32,
             num_point_lights: self.point_lights.len() as u32,
             tri_count: self.tris.len() as u32,
+            _pad: [0; 3],
+            mesh_light_count: self.mesh_lights.len() as u32,
         }
     }
 
