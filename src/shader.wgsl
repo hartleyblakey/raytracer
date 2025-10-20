@@ -20,7 +20,7 @@ const RIGHT = vec3f(0.0, -1.0, 0.0);
 
 const NUM_TEXCOORDS = 2;
 
-const EXPOSURE = 10.000;
+const EXPOSURE = 50.000;
 
 var<private> debug: f32;
 
@@ -319,6 +319,37 @@ fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     return res;
 }
 
+fn trace_transformed_tri(ray: Ray, prim: i32, tri: i32) -> Hit {
+    var hit = intersect_full(transform_ray(ray, primitives[prim].inv_transform), tri);
+    if hit.idx == -1 {
+        return hit;
+    }
+    hit.t /= length(transform_dir(ray.dir, primitives[prim].inv_transform));
+    hit.normal = transform_normal(hit.normal, primitives[prim].inv_transform);
+    hit.prim_idx = prim;
+    hit.material = primitives[prim].material;
+    return hit;
+}
+
+fn sample_emission(hit: Hit) -> vec3f {
+    var res = zeroed_ext_sample();
+    let prim = primitives[hit.prim_idx];
+    let ext = tri_exts[hit.idx];
+    let tci = prim.material.emissive_texcoord;
+    
+    var tc = vec2f(0);
+    tc += hit.bary.x * ext.vertices[0].texcoords[tci];
+    tc += hit.bary.y * ext.vertices[1].texcoords[tci];
+    tc += hit.bary.z * ext.vertices[2].texcoords[tci];
+
+    var emissive = hit.material.emissive_factor;
+    if hit.material.emissive.size != 0 {
+        emissive *= to_linear(sample_texture(hit.material.emissive, tc).rgb);
+    }
+    return emissive;
+}
+
+
 /// gather material parameters for a hit
 fn sample_hit(hit: Hit) -> ExtSample {
     var ext = tri_exts[hit.idx];
@@ -563,10 +594,6 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
     let bmin = aabb_min(aabb);
     let bmax = aabb_max(aabb);
 
-    // if all(ray.origin >= bmin) && all(ray.origin < bmax) {
-    //     return 0.0;
-    // }
-
     let rmin = (bmin - ray.origin) * ray.idir;
     let rmax = (bmax - ray.origin) * ray.idir;
 
@@ -798,6 +825,73 @@ fn trace(ray: Ray) -> Hit {
 
 }
 
+fn trace_shadow(ray: Ray, t: f32) -> bool {
+    debug = 0.0;
+    var stack: Stack;
+    stack.size = 0u;
+    var node = bvh[globals.node_count];
+    var best_t = t;
+    if intersect_aabb(ray, node.aabb) > best_t {
+        return false;
+    }
+    while (true) {
+        // debug = max(debug, f32(stack.size + 1u));
+        // visualize bvh steps
+
+        if node.count > 0 {
+            // intersect BLAS(s) of node
+            for (var i = node.first; i < node.first + node.count; i++) {
+                let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
+                let t_ray = transform_ray(ray, primitives[i].inv_transform);
+                var new_t = best_t * scale_factor;
+                let new_tri = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
+                
+                if new_tri >= 0 {
+                    return true;
+                }
+            }
+            if stack.size == 0u {
+                break;
+            }
+            node = bvh[pop(&stack)];
+        } else {
+            // TLAS is tacked onto end of bvh:
+            let node_first = globals.node_count + node.first;
+
+            // try ordering the nodes
+            let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
+            let right = intersect_aabb(ray, bvh[node_first + 1u].aabb);
+    
+            if (left > best_t) && (right > best_t) {
+                if stack.size == 0u {
+                    break;
+                }
+                node = bvh[pop(&stack)];
+            } else if (left > best_t) {
+                node = bvh[node_first + 1u];
+            } else if (right > best_t) {
+                node = bvh[node_first + 0u];
+            } else if right < left {
+                // push(&stack, node_first + 1u);
+                // node = bvh[node_first + 0u];
+
+                push(&stack, node_first + 0u);
+                node = bvh[node_first + 1u];
+
+            } else {
+                // push(&stack, node_first + 0u);
+                // node = bvh[node_first + 1u];
+
+                
+                push(&stack, node_first + 1u);
+                node = bvh[node_first + 0u];
+            }
+
+        }
+    }
+    return false;
+}
+
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
 fn hash21(in: vec2u) -> u32 {
     var p = in;
@@ -849,13 +943,87 @@ fn rand_color() -> vec3f {
     // return 1.0 - pow(vec3f(0.25), normalize(vec3f(rand(), rand(), rand())) + 0.1);
 }
 
-fn trace_to_target(ray: Ray, prim: i32, tri: i32) -> bool {
-    let hit = trace(ray);
-    return hit.idx == tri && hit.prim_idx == prim;
+fn trace_to_target(ray: Ray, prim: i32, tri: i32) -> Hit {
+    var stack: Stack;
+    stack.size = 0u;
+    var node = bvh[globals.node_count];
+
+    var hit = trace_transformed_tri(ray, prim, tri);
+    if hit.idx == -1 {
+        return hit;
+    }
+
+
+    if intersect_aabb(ray, node.aabb) > hit.t {
+        return hit_default();
+    }
+    while (true) {
+        if node.count > 0 {
+            // intersect BLAS(s) of node
+            for (var i = node.first; i < node.first + node.count; i++) {
+                let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
+                let t_ray = transform_ray(ray, primitives[i].inv_transform);
+                var new_t = hit.t * scale_factor;
+                let new_tri = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
+                
+                if new_tri >= 0 {
+                    // hit something before target
+                    return hit_default();
+                }
+            }
+            if stack.size == 0u {
+                break;
+            }
+            node = bvh[pop(&stack)];
+        } else {
+            // avoid pushing nodes onto the stack where possible
+            // order nodes based on distance
+
+            // TLAS is tacked onto end of bvh:
+            let node_first = globals.node_count + node.first;
+
+            // try ordering the nodes
+            let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
+            let right = intersect_aabb(ray, bvh[node_first + 1u].aabb);
+    
+            if (left > hit.t) && (right > hit.t) {
+                if stack.size == 0u {
+                    break;
+                }
+                node = bvh[pop(&stack)];
+            } else if (left > hit.t) {
+                node = bvh[node_first + 1u];
+            } else if (right > hit.t) {
+                node = bvh[node_first + 0u];
+            } else if right < left {
+                // push(&stack, node_first + 1u);
+                // node = bvh[node_first + 0u];
+
+                push(&stack, node_first + 0u);
+                node = bvh[node_first + 1u];
+
+            } else {
+                // push(&stack, node_first + 0u);
+                // node = bvh[node_first + 1u];
+
+                
+                push(&stack, node_first + 1u);
+                node = bvh[node_first + 0u];
+            }
+
+        }
+    }
+
+    return hit;
+}
+
+fn area_to_sa(area: f32, normal: vec3f, p: vec3f, reference: vec3f) -> f32 {
+    let d = (p - reference);
+    return area * dot(d, d) / abs(dot(normalize(-d), normal));
 }
 
 /// uniform sample a point on a triangle - *returns area pdf*
-fn sample_triangle_area(prim: i32, tri: i32, pdf: ptr<function, f32>) -> vec3f {
+fn sample_triangle_area(prim: i32, tri: i32, pdf: ptr<function, f32>, normal: ptr<function, vec3f>) -> vec3f {
     let e1 = sqrt(rand());
     let e2 = rand();
 
@@ -872,12 +1040,14 @@ fn sample_triangle_area(prim: i32, tri: i32, pdf: ptr<function, f32>) -> vec3f {
     let a = (v1 - v0);
     let b = (v2 - v0);
 
-    *pdf = 0.5 * length(cross(a, b));
+    *normal = normalize(cross(a, b));
+
+    *pdf = 1.0 / (0.5 * length(cross(a, b)));
 
     return v0 + a * u + b * v;
 }
 
-fn sample_triangle_area_pdf(prim: i32, tri: i32) -> f32 {
+fn sample_triangle_pdf(prim: i32, tri: i32, point: vec3f, normal: vec3f, reference: vec3f) -> f32 {
     let transform = primitives[prim].transform;
     let lt = triangles[tri];
 
@@ -887,25 +1057,27 @@ fn sample_triangle_area_pdf(prim: i32, tri: i32) -> f32 {
 
     let a = (v1 - v0);
     let b = (v2 - v0);
-
-    return 0.5 * length(cross(a, b));
+    let area = 0.5 * length(cross(a, b));
+    if area == 0.0 {
+        return 0.0;
+    }
+    return area_to_sa(1.0 / area, normal, point, reference);
 }
 
 // MARK: - Mesh Lights
 
-fn sample_mesh_light_area(pdf: ptr<function, f32>) -> vec3f {
+fn sample_mesh_light(reference: vec3f, pdf: ptr<function, f32>, prim_idx: ptr<function, i32>, tri_idx: ptr<function, i32>) -> vec3f {
 
     let dim = globals.scene.mesh_light_count;
-    var c = 0u;
+    var c = 0;
     {
-        var low = 0u;
-        var high = dim - 1u;
-        var mid = (low + high) / 2;
+        var low = 0;
+        var high = i32(dim) - 1;
         var cdf = 0.0;
         var cdf_target = rand();
 
         while high >= low {
-            
+            let mid = (low + high) / 2;
             cdf = mesh_lights[mid].cdf;
             if cdf < cdf_target {
                 low = mid + 1;
@@ -913,24 +1085,40 @@ fn sample_mesh_light_area(pdf: ptr<function, f32>) -> vec3f {
                 high = mid - 1;
                 c = mid;
             }
-            mid = (low + high) / 2;
+            
         }
     }
     var tri_pdf: f32;
-    let p = sample_triangle_area(mesh_lights[c].prim, mesh_lights[c].tri, &tri_pdf);
+    var normal: vec3f;
+    let p = sample_triangle_area(mesh_lights[c].prim, mesh_lights[c].tri, &tri_pdf, &normal);
+    normal *= sign11(dot(normal, reference - p));
+    tri_pdf = area_to_sa(tri_pdf, normal, p, reference);
     *pdf = mesh_lights[c].power * tri_pdf;
+    *prim_idx = mesh_lights[c].prim;
+    *tri_idx = mesh_lights[c].tri;
     return p;
 }
 
 // 
-fn sample_mesh_light_area_pdf(prim: i32, tri: i32) -> f32 {
-    let triangle_point_pdf = sample_triangle_area_pdf(prim, tri);
+fn sample_mesh_light_pdf(prim: i32, tri: i32, point: vec3f, normal: vec3f, reference: vec3f) -> f32 {
+    if globals.scene.mesh_light_count == 0 {
+        return 0.0;
+    }
     let base = primitives[prim].flags >> 8u;
+    if (primitives[prim].flags & (1u << 1u)) == 0 {
+        // not am emissive primitive
+        return 0.0;
+    }
+
+    var tri_pdf: f32;
+    var m_normal: vec3f;
+    let p = sample_triangle_area(prim, tri, &tri_pdf, &m_normal);
+    m_normal *= sign11(dot(m_normal, reference - p));
+    tri_pdf = area_to_sa(tri_pdf, m_normal, p, reference);
 
     let triangle_pdf = mesh_lights[i32(base) + (tri - i32(primitives[prim].tri_start))].power;
 
-    return triangle_pdf * triangle_point_pdf;
-
+    return triangle_pdf * tri_pdf;
 }
 
 
@@ -1455,7 +1643,7 @@ fn sample_dielectric_bsdf_pdf(wi_tangent: vec3f, wo_tangent: vec3f, ior_i: f32, 
 fn sample_bsdf(wo: vec3f, ior_o: f32, ior_i: f32, sample: ExtSample, lighting: ptr<function, vec3f>, pdf: ptr<function, f32>, bsdf: ptr<function, vec3f>) -> vec3f {
     
     var debug_color = vec3f(0);
-    *pdf= 0.0;
+    *pdf = 0.0;
     *bsdf = vec3f(0.0);
 
     let tbn = orthonormal_basis(sample.normal); //* sign(ior_i - ior_o)
@@ -1495,6 +1683,8 @@ fn sample_bsdf(wo: vec3f, ior_o: f32, ior_i: f32, sample: ExtSample, lighting: p
     if DEBUG && globals.debug_mode != 0 {
         *lighting = debug_color;
     }
+
+
 
     return wi;
 }
@@ -1607,6 +1797,23 @@ fn mis_power_heuristic(a: f32, b: f32, a_prob: f32, b_prob: f32) -> f32 {
     //return (ap * ap) / (ap * ap + bp * bp);
 }
 
+fn mis_power_heuristic_3(a: f32, b: f32, c: f32, a_prob: f32, b_prob: f32, c_prob: f32) -> f32 {
+    let ap = a * a_prob;
+    let bp = b * b_prob;
+    let cp = c * c_prob;
+    if ap <= 0.0 {
+        return 0.0;
+    } else if bp <= 0.0 && cp <= 0.0 {
+        return 1.0;
+    }
+    
+    // return a_prob;
+    return ap  / (ap + bp + cp);
+    //return (ap * ap) / (ap * ap + bp * bp + cp * cp);
+}
+
+
+
 @compute
 @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
@@ -1631,6 +1838,9 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         if globals.debug_mode != 9 {
             NUM_BOUNCES = 1;
         }
+        if globals.debug_mode == 8 {
+            NUM_BOUNCES = 3;
+        }
     }
 
     // debug variable
@@ -1643,6 +1853,8 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         NEE_PROB = 0.5;
     }
 
+    var last_prim = -1;
+    var last_tri = -1;
 
     var ray = camera_ray(id.xy);
 
@@ -1652,7 +1864,13 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         let hit = trace(ray);
 
         if hit.idx == -1 {
-            lighting += throughput * bsdf_mis_weight * evaluate_env_map(ray.dir).rgb;
+            let bsdf_ray_nee_pdf = sample_env_map_pdf(ray.dir);
+            let bsdf_ray_mesh_pdf = 0.0;
+            bsdf_mis_weight = mis_power_heuristic_3(bsdf_pdf, bsdf_ray_nee_pdf, bsdf_ray_mesh_pdf, 1.0, 1.0, 1.0);
+            if globals.debug_mode != 8 {
+                lighting += throughput * bsdf_mis_weight * evaluate_env_map(ray.dir).rgb;
+            }
+            
             break;
         }
 
@@ -1667,21 +1885,20 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             hit_ior = 1.6 * ray_volume.ior;
         }
 
-        
-
         if globals.debug_mode != 9 {
             throughput *= exp(-ray_volume.absorption * hit.t);
         }
 
-        lighting += sample.emissive * throughput;
-
-        RR_PROB = clamp(1.0 - max(throughput.x, max(throughput.y, throughput.z)), 0.0, 0.95);
-        if rand() < RR_PROB {
-            break;
-        } else {
-            throughput /= (1.0 - RR_PROB);
+        let bsdf_ray_nee_pdf = 0.0;
+        var bsdf_ray_mesh_pdf = sample_mesh_light_pdf(hit.prim_idx, hit.idx, ray.origin + ray.dir * hit.t, hit.normal, ray.origin);
+        if i != 0 {
+            bsdf_mis_weight = mis_power_heuristic_3(bsdf_pdf, bsdf_ray_nee_pdf, bsdf_ray_mesh_pdf, 1.0, 1.0, 1.0);
         }
-
+            
+        if bsdf_ray_mesh_pdf != 0.0 {
+            lighting += sample.emissive * bsdf_mis_weight * throughput;
+        }
+        
         let wo = -ray.dir;
 
         // sample NEE shadow ray
@@ -1692,26 +1909,85 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             nee_ray.dir = nee_wi;
             nee_ray.idir = 1.0 / nee_ray.dir;
             if dot(nee_wi, sample.normal) > 0.0 {
-                nee_ray.origin += hit.normal * 0.001;
+                nee_ray.origin += nee_ray.dir * 0.001;
             } else {
-                nee_ray.origin -= hit.normal * 0.001;
+                nee_ray.origin += nee_ray.dir * 0.001;
             }
-            if trace(nee_ray).idx == -1 {
+            if !trace_shadow(nee_ray, 9999999999.0) {
                 let nee_bsdf = evaluate_bsdf(nee_wi, wo, hit_ior, ray_volume.ior, sample);
                 let nee_ray_bsdf_pdf = sample_bsdf_pdf(nee_wi, wo, hit_ior, ray_volume.ior, sample);
+                let nee_ray_mesh_pdf = 0.0;
                 let nee_pdf = max(sample_env_map_pdf(nee_wi), 1e-8);
-                let nee_mis_weight = mis_power_heuristic(nee_pdf, nee_ray_bsdf_pdf, 1.0, 1.0);
+                let nee_mis_weight = mis_power_heuristic_3(nee_pdf, nee_ray_bsdf_pdf, nee_ray_mesh_pdf, 1.0, 1.0, 1.0);
                 lighting += nee_mis_weight * throughput * nee_bsdf * abs(dot(nee_wi, sample.normal)) * evaluate_env_map(nee_wi).rgb / nee_pdf;
             }
         }
+        
+        // sample mesh shadow ray
+        if globals.scene.mesh_light_count > 0 {
+            var mesh_pdf: f32;
+            var prim_idx: i32;
+            var tri_idx: i32;
+            let reference = ray.origin + ray.dir * hit.t;
+            let mesh_point = sample_mesh_light(reference, &mesh_pdf, &prim_idx, &tri_idx);
+            
+            let mesh_wi = normalize(mesh_point - reference);
 
+            var mesh_ray = ray;
+            mesh_ray.origin += mesh_ray.dir * hit.t;
+            mesh_ray.dir = mesh_wi;
+            mesh_ray.idir = 1.0 / mesh_ray.dir;
+            if dot(mesh_wi, sample.normal) > 0.0 {
+                mesh_ray.origin += mesh_ray.dir * 0.001;
+            } else {
+                mesh_ray.origin += mesh_ray.dir * 0.001;
+            }
 
+            let mesh_sample = trace_transformed_tri(mesh_ray, prim_idx, tri_idx);
+            if !trace_shadow(mesh_ray, mesh_sample.t - 0.001) && hit.prim_idx != prim_idx && hit.idx != tri_idx {
+                let mesh_bsdf = evaluate_bsdf(mesh_wi, wo, hit_ior, ray_volume.ior, sample);
+                let mesh_ray_bsdf_pdf = sample_bsdf_pdf(mesh_wi, wo, hit_ior, ray_volume.ior, sample);
+                let mesh_ray_nee_pdf = 0.0;
+                let mesh_mis_weight = mis_power_heuristic_3(mesh_pdf, mesh_ray_bsdf_pdf, mesh_ray_nee_pdf, 1.0, 1.0, 1.0);
+                lighting += mesh_mis_weight * throughput * mesh_bsdf * max(dot(mesh_wi, sample.normal), 1e-8) * sample_emission(mesh_sample) / mesh_pdf;
+                // lighting += mesh_mis_weight * throughput * max(dot(mesh_wi, sample.normal), 1e-8) * vec3f(10) / mesh_pdf;
+                // lighting += max(dot(mesh_wi, sample.normal), 0.0) * throughput * mesh_sample.emissive / max(mesh_pdf, 1.0) / 10.0;
+            }
+        }
+
+        RR_PROB = clamp(1.0 - max(throughput.x, max(throughput.y, throughput.z)), 0.0, 0.95);
+        if i < 3 {
+            RR_PROB = 0.0;
+        }
+        if rand() < RR_PROB {
+            break;
+        } else {
+            throughput /= (1.0 - RR_PROB);
+        }
+
+        if globals.debug_mode == 8 {
+            if (i == 2) {
+                // lighting = vec3f(sample.emissive * bsdf_mis_weight);
+                // lighting = vec3f(bsdf_ray_mesh_pdf) / 10.0;
+                lighting = vec3f(bsdf_pdf) * 0.0;
+                if (bsdf_ray_mesh_pdf > 0.0) {
+                    lighting *= 0.0;
+                    lighting = sample.emissive * vec3f(bsdf_mis_weight);
+                }
+                // lighting = vec3f(bsdf_mis_weight);
+                break;
+            } else {
+                // lighting *= 0.0;
+            }
+           
+            
+        }
         // sample BSDF continuation
         var bsdf: vec3f;
-        let wi = sample_bsdf(wo, ray_volume.ior, hit_ior, sample, &lighting, &bsdf_pdf, &bsdf);
-        let bsdf_ray_nee_pdf = sample_env_map_pdf(wi);
-        bsdf_mis_weight = mis_power_heuristic(bsdf_pdf, bsdf_ray_nee_pdf, 1.0, 1.0);
-
+        var wi = sample_bsdf(wo, ray_volume.ior, hit_ior, sample, &lighting, &bsdf_pdf, &bsdf);
+        if dot(wi, hit.normal) <= 0.0 {
+            throughput *= 0.0;
+        }
         if bsdf_pdf > 0.0 {
             throughput /= bsdf_pdf;
             // throughput *= mis_weight; // sanity check - commenting this works (in conjunction with ^)
@@ -1726,39 +2002,35 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         ray.idir = 1.0 / ray.dir;
 
         if dot(wi, sample.normal) > 0.0 {
-            ray.origin += hit.normal * 0.001;
+            ray.origin += ray.dir * 0.001;
         } else {
-            ray.origin -= hit.normal * 0.001;
+            ray.origin += ray.dir * 0.001;
             if hit.backface {
                 ray_volume = background_volume();
             } else {
                 ray_volume = hit.material.volume;
             }
         }
+        if globals.debug_mode == 6 {
+            let backup = seed;
+            seed = bitcast<u32>(hit.prim_idx) + 777;
+            rand(); rand();
+            lighting = rand_color() * evaluate_lambert(wo, sample.normal) * pi;
+            seed = backup;
+        }
+
+        if globals.debug_mode == 7 {
+            let backup = seed;
+            seed = bitcast<u32>(hit.idx) + 777;
+            rand(); rand();
+            lighting = rand_color() * evaluate_lambert(wo, hit.normal) * pi;
+            seed = backup;
+        }
+
+        last_prim = hit.prim_idx;
+        last_tri = hit.idx;
     }
-        // if globals.debug_mode == 6 {
-        //     let backup = seed;
-        //     seed = bitcast<u32>(hit.prim_idx) + 777;
-        //     rand(); rand();
-        //     lighting = rand_color() * evaluate_lambert(wo, sample.normal) * pi;
-        //     seed = backup;
-        // }
 
-        // if globals.debug_mode == 7 {
-        //     let backup = seed;
-        //     seed = bitcast<u32>(hit.idx) + 777;
-        //     rand(); rand();
-        //     lighting = rand_color() * evaluate_lambert(wo, hit.normal) * pi;
-        //     seed = backup;
-        // }
-
-        // if globals.debug_mode == 8 {
-        //     if hit.backface {
-        //         lighting = vec3f(1.0, 0.0, 0.0);
-        //     } else {
-        //         lighting = vec3f(0.0, 1.0, 0.0);
-        //     }
-        // }
     if DEBUG {
         if globals.debug_mode == 3 {
             lighting = magma_quintic(debug / 256.0);

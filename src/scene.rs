@@ -185,7 +185,7 @@ pub struct GpuPrimitive {
     bvh_idx:        u32,
     tri_start:      u32,
     tri_count:      u32,
-    /// [ 24x mesh light index | 7x unused | has_tangents ]
+    /// [ 24x mesh light index | 6x unused | is_emissive | has_tangents ]
     flags:          u32,
 }
 
@@ -207,6 +207,7 @@ impl GpuPrimitive {
 
     fn set_mesh_light(&mut self, idx: u32) {
         self.flags = self.flags & 0xFF | (idx << 8);
+        self.flags |= 1 << 1;
     }
 }
 
@@ -639,11 +640,17 @@ impl RenderScene {
             if prim.material.emissive_factor == Vec3::ZERO {
                 continue;
             }
-        
+            prim.set_mesh_light(self.mesh_lights.len() as u32);
             for i in prim.tri_start..prim.tri_start + prim.tri_count {
                 let tri = self.tris[i as usize];
+                let tri = Tri {
+                    vertices: tri.vertices.map(|x| {
+                        let t = prim.transform.transform_point3(x.xyz()); 
+                        vec4(t.x, t.y, t.z, x.w)
+                    })
+                };
                 let ext = self.tri_exts[i as usize];
-
+                
                 let area = 0.5 * 
                 (tri.vertices[1].xyz() - tri.vertices[0].xyz())
                     .cross(tri.vertices[2].xyz() - tri.vertices[0].xyz())
@@ -661,7 +668,7 @@ impl RenderScene {
                     let avg = c.xyz().length() * c.w;
                     power *= avg.max(0.05);
                 }
-                prim.set_mesh_light(self.mesh_lights.len() as u32);
+                
                 self.mesh_lights.push(
                     MeshLight { 
                         tri: i as i32, 
@@ -671,28 +678,30 @@ impl RenderScene {
                     }
                 )
             }
-            let mut total = 0.0;
-            let mut cdf = Vec::new();
-            for i in 0..self.mesh_lights.len() {
-                total += self.mesh_lights[i].power as f64;
+
+        }
+
+        let mut total = 0.0;
+        let mut cdf = Vec::new();
+        for i in 0..self.mesh_lights.len() {
+            total += self.mesh_lights[i].power as f64;
+            cdf.push(total);
+        }
+
+        if total <= 0.0 {
+            cdf.clear();
+            for _ in 0..self.mesh_lights.len() {
+                total += 1.0;
                 cdf.push(total);
             }
-
-            if total <= 0.0 {
-                cdf.clear();
-                for _ in 0..self.mesh_lights.len() {
-                    total += 1.0;
-                    cdf.push(total);
-                }
-            }
-            
-            for i in 0..self.mesh_lights.len() {
-                self.mesh_lights[i].cdf = (cdf[i] / total) as f32;
-                self.mesh_lights[i].power = (self.mesh_lights[i].power as f64 / total) as f32;
-            }
-
-            self.mesh_lights.last_mut().map(|x| x.cdf = 1.0);
         }
+        
+        for i in 0..self.mesh_lights.len() {
+            self.mesh_lights[i].cdf = (cdf[i] / total) as f32;
+            self.mesh_lights[i].power = (self.mesh_lights[i].power as f64 / total) as f32;
+        }
+
+        self.mesh_lights.last_mut().map(|x| x.cdf = 1.0);
             
     }
 
@@ -1211,22 +1220,60 @@ impl RenderScene {
         }
     }
 
-    pub fn closest_hit(&self, ro: Vec3, rd: Vec3) -> Option<f32> {
-        let mut closest_t = None;
-        for primitive in &self.primitives {
-            if let Some(t) = Bvh::closest_hit_unindexed(
-                &self.bvh_node_data, 
-                primitive.bvh_idx, 
-                &self.tris, 
-                primitive.inv_transform.transform_point3(ro), 
-                primitive.inv_transform.transform_vector3(rd),
-            ) {
-                closest_t = Some(closest_t.unwrap_or(f32::MAX).min(t));
-            }
-            
-        }
+    
 
-        closest_t
+    pub fn closest_hit(&self, ro: Vec3, rd: Vec3) -> Option<f32> {
+        
+        let mut stack: Vec<u32> = Vec::new();
+        stack.push(0);
+
+        let mut best_t = None;
+
+        let rd = rd.normalize();
+
+        while !stack.is_empty() {
+            let node = self.tlas_node_data[stack.pop().unwrap() as usize];
+
+            let Some(aabb_t) = node.aabb.closest_hit(ro, rd) else {
+                continue;
+            };
+
+            if best_t.is_some_and(|t| t < aabb_t) {
+                continue;
+            }
+
+            
+
+            if node.count > 0 {
+                // leaf node
+                for i in 0..node.count {
+                    let primitive = self.primitives[(i + node.first) as usize];
+                    let rd_t = primitive.inv_transform.transform_vector3(rd);
+                    let length_scale = rd_t.length();
+                    let rd_t = rd_t / length_scale;
+                    if let Some(t) = Bvh::closest_hit_unindexed(
+                        &self.bvh_node_data, 
+                        primitive.bvh_idx, 
+                        &self.tris, 
+                        primitive.inv_transform.transform_point3(ro), 
+                        rd_t,
+                        best_t.map(|x| x * length_scale)
+                    ) {
+                        if best_t.is_none() {
+                            best_t = Some(t / length_scale);
+                        } else {
+                            best_t = best_t.map(|x| x.min(t / length_scale));
+                        }
+                    }
+                }
+            } else {
+                // no triangles, internal node - push children onto stack
+                stack.push(node.first + 0);
+                stack.push(node.first + 1);
+            }
+        }
+        
+        best_t
     }
 
     fn camera_ray(pixel: UVec2, res: UVec2, cam: GpuCamera) -> (Vec3, Vec3) {
@@ -1254,21 +1301,33 @@ impl RenderScene {
 
     pub fn trace_cpu_image(&self, cam: GpuCamera) -> image::ImageBuffer<image::Rgb<u8>, Vec<u8>> {
         let mut image = image::ImageBuffer::new(512, 512);
-        
+        let mut depth = Vec::with_capacity(512 * 512);
+        let mut min = f32::MAX;
+        let mut max = f32::MIN;
         for x in 0..512 {
             for y in 0..512 {
                 let (ro, rd) = Self::camera_ray(uvec2(x, y), uvec2(512, 512), cam);
                 let t = self.closest_hit(ro, rd);
+                if let Some(d) = t {
+                    min = min.min(d);
+                    max = max.max(d);
+                }
+                depth.push(t);
+            }
+        }
+
+        for x in 0..512 {
+            for y in 0..512 {
+                let t = depth[x * 512 + y];
                 let c = if let Some(t) = t {
-                    let it = (t.fract() * 255.0) as u8;
+                    let it = ((t - min) / (max - min) * 255.0) as u8;
                     image::Rgb([it, it, it])
                 } else {
                     image::Rgb([(x / 2) as u8, (y / 2) as u8, 0])
                 };
-                image.put_pixel(x, y, c);
+                image.put_pixel(x as u32, y as u32, c);
             }
         }
-
         image
     }
 
@@ -1468,10 +1527,6 @@ impl Aabb {
         let bmin = self.min();
         let bmax = self.max();
     
-        if (ro.x > bmin.x && ro.y > bmin.y && ro.z > bmin.z) && (ro.x < bmax.x && ro.y < bmax.y && ro.z < bmax.z) {
-            return Some(0.0);
-        }
-    
         let rmin = (bmin - ro) / rd;
         let rmax = (bmax - ro) / rd;
     
@@ -1481,11 +1536,11 @@ impl Aabb {
         let t0 = f32::max(tmin.x, f32::max(tmin.y, tmin.z));
         let t1 = f32::min(tmax.x, f32::min(tmax.y, tmax.z));
     
-        if t0 >= t1 || t0 < 0.0 {
+        if t0 > t1 || t1 < 0.0 {
             return None;
         }
     
-        Some(t0)
+        Some(t0.max(0.0))
     }
 
 
@@ -1747,10 +1802,10 @@ impl Bvh {
             return;
         }
 
-        let (axis, split) = if node.count < 64 {
+        let (axis, split) = if node.count < 128 {
             self.find_best_split(leaves, &node) 
         } else {
-            self.find_split_approx(leaves, &node, 64) 
+            self.find_split_approx(leaves, &node, 8) 
         };
 
         let mut i = node.first as usize;
@@ -1841,19 +1896,21 @@ impl Bvh {
         }
     }
 
-    fn closest_hit_unindexed<Leaf: BvhLeaf>(nodes: &Vec<BvhNode>, root: u32, leaves: &Vec<Leaf>, ro: Vec3, rd: Vec3) -> Option<f32> {
+    fn closest_hit_unindexed<Leaf: BvhLeaf>(nodes: &Vec<BvhNode>, root: u32, leaves: &Vec<Leaf>, ro: Vec3, rd: Vec3, best_t: Option<f32>) -> Option<f32> {
         let mut stack: Vec<u32> = Vec::new();
         stack.push(root);
-        let mut best_t = f32::MAX;
+        let mut best_t = best_t.unwrap_or(1e30);
         let mut best_i = -1;
         while !stack.is_empty() {
             let node = nodes[stack.pop().unwrap() as usize];
 
-            let aabb_t = node.aabb.closest_hit(ro, rd);
-            if aabb_t.is_none() {
+            let Some(aabb_t) = node.aabb.closest_hit(ro, rd) else {
+                continue;
+            };
+
+            if aabb_t > best_t {
                 continue;
             }
-
 
             if node.count > 0 {
                 // leaf node
