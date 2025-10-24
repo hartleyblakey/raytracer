@@ -1174,7 +1174,7 @@ fn sample_mesh_light(reference: vec3f, pdf: ptr<function, f32>, prim_idx: ptr<fu
 }
 
 // 
-fn sample_mesh_light_pdf(prim: i32, tri: i32, point: vec3f, normal: vec3f, reference: vec3f) -> f32 {
+fn sample_mesh_light_pdf(prim: i32, tri: i32, point: vec3f, reference: vec3f) -> f32 {
     if globals.scene.mesh_light_count == 0 {
         return 0.0;
     }
@@ -1895,7 +1895,7 @@ struct LightSample {
     pdf: f32,
 }
 
-fn sample_light(hit: Hit, sample: ExtSample, ray: Ray, hit_ior: f32, ray_volume: GpuVolume) -> LightSample {
+fn sample_light(reference: vec3f) -> LightSample {
     
     let r = rand();
     var prob = 0.0;
@@ -1907,23 +1907,15 @@ fn sample_light(hit: Hit, sample: ExtSample, ray: Ray, hit_ior: f32, ray_volume:
     // sample NEE shadow ray
     if r < MESH_CHANCE {
         prob = MESH_CHANCE;
-        wi = normalize(sample_env_map());
-        t_max = 99999999999.0;
-        contrib = evaluate_env_map(wi).rgb;
-        pdf = sample_env_map_pdf(wi);
-        contrib /= prob;
-    } else if globals.scene.mesh_light_count > 0 {
-        prob = 1.0 - MESH_CHANCE;
 
         var prim_idx: i32;
         var tri_idx: i32;
         
-        let reference = ray.origin + ray.dir * hit.t;
         let mesh_point = sample_mesh_light(reference, &pdf, &prim_idx, &tri_idx);
         
         wi = normalize(mesh_point - reference);
 
-        var mesh_ray = ray;
+        var mesh_ray: Ray;
         mesh_ray.origin = reference;
         mesh_ray.dir = wi;
         mesh_ray.idir = 1.0 / mesh_ray.dir;
@@ -1933,9 +1925,26 @@ fn sample_light(hit: Hit, sample: ExtSample, ray: Ray, hit_ior: f32, ray_volume:
         t_max = distance(reference, mesh_point) - 0.003;
         contrib = sample_emission(mesh_hit);
 
+    } else if globals.scene.mesh_light_count > 0 {
+        prob = 1.0 - MESH_CHANCE;
+
+        wi = normalize(sample_env_map());
+        t_max = 99999999999.0;
+        contrib = evaluate_env_map(wi).rgb;
+        pdf = sample_env_map_pdf(wi);
     }
 
     return LightSample(wi, t_max, contrib, pdf * prob);
+}
+
+fn sample_light_pdf(reference: vec3f, point: vec3f, prim: i32, tri: i32) -> f32 {
+    if (tri > 0) {
+        // a physical light, can't have been the env sampler
+        return sample_mesh_light_pdf(prim, tri, point, reference) * MESH_CHANCE;
+    } else {
+        // a ray miss light, can't have been the mesh sampler
+        return sample_env_map_pdf(normalize(point - reference)) * (1.0 - MESH_CHANCE);
+    }
 }
 
 
@@ -1987,14 +1996,12 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
     var bsdf_mis_weight = 1.0;
     for (var i = 0; i < NUM_BOUNCES; i++) {
         let hit = trace(ray);
-
+        let point = ray.origin + ray.dir * hit.t;
         if hit.idx == -1 {
-            let bsdf_ray_nee_pdf = sample_env_map_pdf(ray.dir);
-            let bsdf_ray_mesh_pdf = 0.0;
-            bsdf_mis_weight = mis_power_heuristic_3(bsdf_pdf, bsdf_ray_nee_pdf, bsdf_ray_mesh_pdf, 1.0, 1.0, 1.0);
+            let nee_pdf = sample_light_pdf(ray.origin, point, hit.prim_idx, hit.idx);
 
-            if i == 0 {
-                bsdf_mis_weight = 1.0;
+            if i > 0 {
+                bsdf_mis_weight = mis_power_heuristic(bsdf_pdf, nee_pdf, 1.0, 1.0);
             }
 
             if globals.debug_mode != 8 {
@@ -2019,69 +2026,32 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             throughput *= exp(-ray_volume.absorption * hit.t);
         }
 
-        let bsdf_ray_nee_pdf = 0.0;
-        var bsdf_ray_mesh_pdf = sample_mesh_light_pdf(hit.prim_idx, hit.idx, ray.origin + ray.dir * hit.t, hit.normal, ray.origin);
+        let nee_pdf = sample_light_pdf(ray.origin, point, hit.prim_idx, hit.idx);
         if i != 0 {
-            bsdf_mis_weight = mis_power_heuristic_3(bsdf_pdf, bsdf_ray_nee_pdf, bsdf_ray_mesh_pdf, 1.0, 1.0, 1.0);
+            bsdf_mis_weight = mis_power_heuristic(bsdf_pdf, nee_pdf, 1.0, 1.0);
         }
             
-        if bsdf_ray_mesh_pdf != 0.0 {
-            lighting += sample.emissive * bsdf_mis_weight * throughput;
+        if nee_pdf != 0.0 {
+            lighting += throughput * sample.emissive * bsdf_mis_weight;
         }
         
         let wo = -ray.dir;
 
         // sample NEE shadow ray
-        {
-            let nee_wi = normalize(sample_env_map());
-            var nee_ray = ray;
-            nee_ray.origin += nee_ray.dir * hit.t;
-            nee_ray.dir = nee_wi;
-            nee_ray.idir = 1.0 / nee_ray.dir;
-            if dot(nee_wi, sample.normal) > 0.0 {
-                nee_ray.origin += nee_ray.dir * 0.001;
-            } else {
-                nee_ray.origin += nee_ray.dir * 0.001;
-            }
-            if !trace_shadow(nee_ray, 9999999999.0) {
-                let nee_bsdf = evaluate_bsdf(nee_wi, wo, hit_ior, ray_volume.ior, sample);
-                let nee_ray_bsdf_pdf = sample_bsdf_pdf(nee_wi, wo, hit_ior, ray_volume.ior, sample);
-                let nee_ray_mesh_pdf = 0.0;
-                let nee_pdf = max(sample_env_map_pdf(nee_wi), 1e-8);
-                let nee_mis_weight = mis_power_heuristic_3(nee_pdf, nee_ray_bsdf_pdf, nee_ray_mesh_pdf, 1.0, 1.0, 1.0);
-                lighting += nee_mis_weight * throughput * nee_bsdf * abs(dot(nee_wi, sample.normal)) * evaluate_env_map(nee_wi).rgb / nee_pdf;
-            }
-        }
         
-        // sample mesh shadow ray
-        if globals.scene.mesh_light_count > 0 {
-            var mesh_pdf: f32;
-            var prim_idx: i32;
-            var tri_idx: i32;
-            let reference = ray.origin + ray.dir * hit.t;
-            let mesh_point = sample_mesh_light(reference, &mesh_pdf, &prim_idx, &tri_idx);
-            
-            let mesh_wi = normalize(mesh_point - reference);
+        {
+            let light = sample_light(ray.origin + ray.dir * hit.t);
+            var nee_ray: Ray;
+            nee_ray.origin = ray.origin + ray.dir * hit.t;
+            nee_ray.origin += light.wi * 0.001;
+            nee_ray.dir = light.wi;
+            nee_ray.idir = vec3f(1) / nee_ray.dir;
 
-            var mesh_ray = ray;
-            mesh_ray.origin += mesh_ray.dir * hit.t;
-            mesh_ray.dir = mesh_wi;
-            mesh_ray.idir = 1.0 / mesh_ray.dir;
-            if dot(mesh_wi, sample.normal) > 0.0 {
-                mesh_ray.origin += mesh_ray.dir * 0.001;
-            } else {
-                mesh_ray.origin += mesh_ray.dir * 0.001;
-            }
-
-            let mesh_hit = trace_transformed_tri(mesh_ray, prim_idx, tri_idx);
-            if !trace_shadow(mesh_ray, mesh_hit.t - 0.001) && hit.prim_idx != prim_idx && hit.idx != tri_idx {
-                let mesh_bsdf = evaluate_bsdf(mesh_wi, wo, hit_ior, ray_volume.ior, sample);
-                let mesh_ray_bsdf_pdf = sample_bsdf_pdf(mesh_wi, wo, hit_ior, ray_volume.ior, sample);
-                let mesh_ray_nee_pdf = 0.0;
-                let mesh_mis_weight = mis_power_heuristic_3(mesh_pdf, mesh_ray_bsdf_pdf, mesh_ray_nee_pdf, 1.0, 1.0, 1.0);
-                if mesh_pdf > 0.0 {
-                    lighting += mesh_mis_weight * throughput * mesh_bsdf * max(dot(mesh_wi, sample.normal), 0.0) * sample_emission(mesh_hit) / mesh_pdf;
-                }
+            let nee_ray_bsdf_pdf = sample_bsdf_pdf(light.wi, wo, hit_ior, ray_volume.ior, sample);
+            let nee_mis_weight = mis_power_heuristic(light.pdf, nee_ray_bsdf_pdf, 1.0, 1.0);
+            let nee_bsdf = evaluate_bsdf(light.wi, wo, hit_ior, ray_volume.ior, sample);
+            if !trace_shadow(nee_ray, light.t_max) {
+                lighting += throughput * nee_bsdf * max(dot(light.wi, sample.normal), 0.0) * light.contrib * nee_mis_weight / light.pdf;
             }
         }
 
@@ -2098,7 +2068,7 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         if globals.debug_mode == 8 {
             if (i == 2) {
                 lighting = vec3f(0);
-                if (bsdf_ray_mesh_pdf > 0.0) {
+                if (nee_pdf > 0.0) {
                     lighting = sample.emissive * vec3f(bsdf_mis_weight);
                 }
                 break;
