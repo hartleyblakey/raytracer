@@ -845,7 +845,7 @@ impl ApplicationHandler for AppShell {
             WindowEvent::MouseWheel { device_id: _, delta, phase: _ } => {
                 let Ok(mut app_guard) = self.app.lock() else { return; };
                 let Some(app) = &mut *app_guard else { return; };
-                let (gpu, ctx, input) = (&mut app.gpu, &mut app.ctx, &mut app.input);
+                let (gpu, _, input) = (&mut app.gpu, &mut app.ctx, &mut app.input);
 
                 // hack: I have no idea how to keep a consistent sensitivity between these
                 //       two units. This works well enough for the devices I tested it on
@@ -865,7 +865,7 @@ impl ApplicationHandler for AppShell {
 
                     let Ok(mut app_guard) = self.app.lock() else { return; };
                     let Some(app) = &mut *app_guard else { return; };
-                    let (gpu, ctx, input) = (&mut app.gpu, &mut app.ctx, &mut app.input);
+                    let (gpu, _, _) = (&mut app.gpu, &mut app.ctx, &mut app.input);
 
                     // Im not sure why, but the window sometimes needs to be manually redrawn here
                     gpu.window.request_redraw();
@@ -914,8 +914,8 @@ impl ApplicationHandler for AppShell {
 
     fn device_event(
             &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
-            device_id: winit::event::DeviceId,
+            _event_loop: &winit::event_loop::ActiveEventLoop,
+            _device_id: winit::event::DeviceId,
             event: DeviceEvent,
         ) {
 
