@@ -395,6 +395,7 @@ impl EnvironmentMap {
 
     
     /// Returns the index of the chosen pixel alongside its pdf
+    #[allow(unused)]
     pub fn sample(&self, u: (f32, f32)) -> (UVec2, f32) {
 
         let row = self.cdf_rows
@@ -410,6 +411,7 @@ impl EnvironmentMap {
         (uvec2(col as u32, row as u32), self.pdf[row * self.width + col])
     }
 
+    #[allow(unused)]
     pub fn test_distribution(&self) -> Vec<[f32; 4]> {
 
         let mut samples = Vec::with_capacity(self.width * self.height);
@@ -438,29 +440,6 @@ impl Default for EnvironmentMap {
         let data = vec![[1.0, 0.7, 0.3, 1.0], [0.4, 0.4, 0.1, 1.0]];
         Self::new(data, 2, 1)
     }
-}
-
-struct PrimitiveLight {
-    idx: u32,
-    power: f32,
-}
-
-#[derive(Default)]
-struct MeshLights {
-    primitives: Vec<PrimitiveLight>,
-    primitives_cdf: Vec<f32>,
-}
-
-impl MeshLights {
-    pub fn add_primitive(&mut self, primitive: GpuPrimitive) {
-        
-    } 
-}
-
-pub struct Mesh {
-    primitives: Vec<u32>,
-    transform: Mat4,
-    path: String,
 }
 
 
@@ -527,8 +506,6 @@ pub struct PrimitiveGeometry<'a> {
 
 impl<'a> PrimitiveGeometry<'a> {
     pub fn new(scene: &'a mut RenderScene, primitive_idx: usize) -> Self {
-        let prim = scene.primitives[primitive_idx];
-
         Self {
             scene,
             primitive_idx,
@@ -547,7 +524,7 @@ impl<'a> mikktspace::Geometry for PrimitiveGeometry<'a> {
         self.scene.primitives[self.primitive_idx].tri_count as usize
     }
 
-    fn num_vertices_of_face(&self, face: usize) -> usize {
+    fn num_vertices_of_face(&self, _: usize) -> usize {
         3
     }
 
@@ -581,37 +558,6 @@ impl<'a> mikktspace::Geometry for PrimitiveGeometry<'a> {
             self.scene.tri_exts[idx].vertices[vert].tangent_sign = tangent[3];
         }
         // self.scene.primitives[self.primitive_idx].flags |= GpuPrimitive::TANGENT_FLAG;
-    }
-}
-
-
-struct Clock {
-    epoch: std::time::Instant,
-    running: Vec<(std::time::Instant, &'static str)>,
-}
-
-impl Clock {
-    fn new() -> Clock {
-        Clock { epoch: std::time::Instant::now(), running: Vec::new() }
-    }
-
-    fn start(&mut self, label: &'static str) {
-        self.running.push((std::time::Instant::now(), label))
-    }
-
-    fn stop(&mut self) {
-        let (start, label) = self.running.pop().unwrap();
-        let stop = std::time::Instant::now();
-        for i in 0..self.running.len() {
-            print!("-");
-        }
-        println!("{label}: {:4}", stop.duration_since(start).as_secs_f32());
-    }
-
-    fn stop_all(&mut self) {
-        for i in 0..self.running.len() {
-            self.stop();
-        }
     }
 }
 
@@ -741,6 +687,7 @@ impl RenderScene {
         true
     }  
 
+    #[cfg(target_arch = "wasm32")] 
     pub fn add_gltf_bytes(&mut self, transform: &Mat4, bytes: &[u8]) -> bool {
         let mut cache = LoadedMeshCache::new();
 
@@ -748,8 +695,6 @@ impl RenderScene {
             Ok(r) => r,
             Err(_) =>{println!("Failed to import gltf bytes"); return false},
         };
-
-
 
         let mut ms = MatrixStack::new();
         ms.push();
@@ -1386,6 +1331,7 @@ impl RenderScene {
         Some(scene)
     }
     
+    #[cfg(target_arch = "wasm32")]
     pub async fn from_bytes(mesh_bytes: &[u8], env_map_path: &std::path::Path) -> Option<RenderScene> {
         println!("building scene");
         let mut scene = RenderScene::default();
@@ -1483,12 +1429,6 @@ impl Aabb {
     pub fn new() -> Self {
         Self {
             data: [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN]
-        }
-    }
-
-    pub fn min_max(min: Vec3, max: Vec3) -> Self {
-        Self {
-            data: [min.x, min.y, min.z, max.x, max.y, max.z]
         }
     }
 
@@ -1603,20 +1543,8 @@ fn aabb_over_bvh_node(bvh: &Vec<BvhNode>, tris: &Vec<Tri>, transform: &Mat4, idx
 
 impl PrimitiveLeaf {
     pub fn new(primitive: GpuPrimitive, bvh: &Vec<BvhNode>, tris: &Vec<Tri>) -> Self {
-        let local_aabb = bvh[primitive.bvh_idx as usize].aabb;
         let transform = primitive.transform;
         let aabb = aabb_over_bvh_node(&bvh, &tris, &transform, primitive.bvh_idx as usize);
-
-        // let mut aabb = Aabb::min_max(
-        //     transform.transform_point3(min),
-        //     transform.transform_point3(max)
-        // );
-        // aabb.expand(Aabb::point(transform.transform_point3(vec3(min.x, min.y, max.z))));
-        // aabb.expand(Aabb::point(transform.transform_point3(vec3(min.x, max.y, min.z))));
-        // aabb.expand(Aabb::point(transform.transform_point3(vec3(min.x, max.y, max.z))));
-        // aabb.expand(Aabb::point(transform.transform_point3(vec3(max.x, min.y, min.z))));
-        // aabb.expand(Aabb::point(transform.transform_point3(vec3(max.x, min.y, max.z))));
-        // aabb.expand(Aabb::point(transform.transform_point3(vec3(max.x, max.y, min.z))));
 
         Self {
             primitive,

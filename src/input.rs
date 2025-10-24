@@ -227,7 +227,7 @@ impl Camera {
         
         let dir = (to - from).normalize();
         let q = glam::Quat::from_rotation_arc(FORWARD, dir);
-        let (yaw, pitch, roll) = q.to_euler(YAW_PITCH_ROLL);
+        let (yaw, pitch, _) = q.to_euler(YAW_PITCH_ROLL);
         c.yaw = yaw;
         c.pitch = -pitch;
         c.roll = 0.0;

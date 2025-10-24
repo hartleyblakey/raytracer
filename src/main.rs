@@ -387,7 +387,8 @@ impl Context {
             self.try_change_scene(path, &old_env).await
         }
     }
-
+    
+    #[cfg(target_arch = "wasm32")] 
     async fn try_change_scene_bytes(&mut self, mesh_bytes: &[u8], env_map_path: &std::path::Path) {
         println!("Attempting to change scene");
         if let Some(scene) = RenderScene::from_bytes(mesh_bytes, env_map_path).await {
@@ -598,7 +599,6 @@ enum AppError {
     PlatformError(JsValue),
 
     EventLoopError(winit::error::EventLoopError),
-    Text(String)
 
 
 }
@@ -608,7 +608,6 @@ impl std::fmt::Display for AppError {
         match self {
             AppError::PlatformError(err) => write!(f, "Platform error: {:?}", err),
             AppError::EventLoopError(err) => write!(f, "Winit event loop error: {}", err),
-            AppError::Text(t) => write!(f, "Text error message: {}", t),
         }
     }
 }
@@ -741,17 +740,14 @@ impl ApplicationHandler for AppShell {
     fn window_event(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
-        window_id: winit::window::WindowId,
+        _: winit::window::WindowId,
         event: WindowEvent,
     ) {
-
-
-
         match event {
             WindowEvent::Resized(new_size) => {
                 let Ok(mut app_guard) = self.app.lock() else { return; };
                 let Some(app) = &mut *app_guard else { return; };
-                let (gpu, ctx, input) = (&mut app.gpu, &mut app.ctx, &mut app.input);
+                let (gpu, ctx, _) = (&mut app.gpu, &mut app.ctx, &mut app.input);
                 
                 // Reconfigure the surface with the new size
                 gpu.surface_config.width  = new_size.width.clamp(1, 4096);
@@ -943,12 +939,11 @@ impl ApplicationHandler for AppShell {
     }
 }
 
-
 async fn run() -> Result<(), AppError> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     let mut app = AppShell::default();
-    event_loop.run_app(&mut app);
+    event_loop.run_app(&mut app)?;
     Ok(())
 }
 
@@ -956,7 +951,9 @@ pub fn main() {
         #[cfg(not(target_arch = "wasm32"))]
         {
             env_logger::init();
-            pollster::block_on(run())
+            match pollster::block_on(run()) {
+                Ok(_) => (),
+                Err(e) => panic!("Error running app: {:?}", e)
+            }
         };
-        
 }
