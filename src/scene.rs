@@ -4,7 +4,7 @@ use crate::glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles
 use image::GenericImageView;
 use rand::random;
 
-use crate::{fetch_bytes, input::*, DEFAULT_ENV_PATH};
+use crate::{fetch_bytes, input::*};
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]

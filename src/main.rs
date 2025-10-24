@@ -2,14 +2,13 @@
 
 
 
-use std::{borrow::Cow, collections::HashSet, default, f32::consts::E, sync::{Arc, Mutex}};
+use std::{borrow::Cow, sync::{Arc, Mutex}};
 
 use pollster::FutureExt;
 
 #[cfg(target_arch = "wasm32")]
 use js_sys::ArrayBuffer;
 
-use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsError};
 
@@ -22,7 +21,7 @@ use web_sys::Response;
 
 
 use winit::{
-    dpi::PhysicalPosition, event::{DeviceEvent, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode
+    dpi::PhysicalPosition, event::{DeviceEvent, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode
 };
 
 use hb_gpu::{new_window, prelude::{winit::{application::ApplicationHandler, window::Window}, *}};
