@@ -10,7 +10,7 @@
 @group(1) @binding(7) var<storage, read_write> mesh_lights:     array<MeshLight>;
 @group(1) @binding(8) var                      env_map:         texture_2d<f32>;
 @group(1) @binding(9) var                      env_map_col_cdf: texture_2d<f32>;
-@group(1) @binding(10) var                      env_map_pdf:     texture_2d<f32>;
+@group(1) @binding(10) var                     env_map_pdf:     texture_2d<f32>;
 
 const pi = 3.141592654;
 
@@ -20,7 +20,7 @@ const RIGHT = vec3f(0.0, -1.0, 0.0);
 
 const NUM_TEXCOORDS = 2;
 
-const EXPOSURE = 50.000;
+const EXPOSURE = 1.000;
 
 var<private> debug: f32;
 
@@ -167,6 +167,40 @@ struct FrameUniforms {
     debug_mode:     u32,
 }
 
+
+struct GpuVertexExt {
+    texcoords: array<vec2f, NUM_TEXCOORDS>,
+    normal: u32,
+    tangent: u32,
+    color: u32,
+    t_sign: f32,
+}
+
+struct ExtSample {
+    color: vec4f,
+
+    albedo: vec4f,
+
+    normal: vec3f,
+    thickness: f32,
+
+    emissive: vec3f,
+    transmission: f32,
+
+    metallic_roughness: vec3f,
+    t_sign: f32,
+
+    texcoords: array<vec2f, NUM_TEXCOORDS>,
+
+    vertex_normal: vec3f,
+
+    tangent: vec3f,
+}
+
+struct TriExt {
+    vertices: array<GpuVertexExt, 3>
+}
+
 fn tc_size(tc: GpuTextureRef) -> vec2u {
     return vec2u(tc.size >> 16u, tc.size & 0xFFFFu);
 }
@@ -197,34 +231,6 @@ fn sample_texture(tex: GpuTextureRef, tc: vec2f) -> vec4f {
     return mix(l, u, sub_pos.y);
 }
 
-struct GpuVertexExt {
-    texcoords: array<vec2f, NUM_TEXCOORDS>,
-    normal: u32,
-    tangent: u32,
-    color: u32,
-    t_sign: f32,
-}
-
-struct ExtSample {
-    color: vec4f,
-
-    albedo: vec4f,
-
-    normal: vec3f,
-    thickness: f32,
-
-    emissive: vec3f,
-    transmission: f32,
-
-    metallic_roughness: vec3f,
-    t_sign: f32,
-
-    texcoords: array<vec2f, NUM_TEXCOORDS>,
-
-    vertex_normal: vec3f,
-
-    tangent: vec3f,
-}
 
 fn unpack_rgba8(x: u32) -> vec4f {
     return vec4f(
@@ -256,9 +262,7 @@ fn unpack_unit_oct32(u_in: u32) -> vec3f {
 }
 
 
-struct TriExt {
-    vertices: array<GpuVertexExt, 3>
-}
+
 
 fn zeroed_ext_sample() -> ExtSample {
     var s: ExtSample;
@@ -709,7 +713,81 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
     return i32(best_i);
 }
 
+fn trace_bvh_shadow(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) -> bool {
+    var stack: Stack;
+    stack.size = 0u;
+    var node = bvh[root];
+    var best_t = *t_max;
 
+    if intersect_aabb(ray, node.aabb) >= best_t {
+        return false;
+    }
+    
+    while (true) {
+        if node.count > 0 {
+            for (var i = node.first; i < node.first + node.count; i++) {
+                let t = intersect(ray, triangles[i]);
+                if t >= 0.0 && t < best_t {
+                    if (prim.material.alpha_settings & 3u) != 0u {
+                        let hit = intersect_full(ray, i32(i));
+                        let ext = tri_exts[i];
+
+                        var texcoord = vec2f(0.0);
+
+                        texcoord += hit.bary.x * ext.vertices[0].texcoords[prim.material.albedo_texcoord];
+                        texcoord += hit.bary.y * ext.vertices[1].texcoords[prim.material.albedo_texcoord];
+                        texcoord += hit.bary.z * ext.vertices[2].texcoords[prim.material.albedo_texcoord];
+
+                        let alpha = sample_texture(prim.material.albedo, texcoord).a;
+
+                        if (prim.material.alpha_settings & 3u) == 1u {
+                            // MASK
+                            if alpha < f32(prim.material.alpha_settings >> 16u) / f32(1u << 16u) {
+                                continue;
+                            }
+                        } else {
+                            // BLEND
+                            if rand() > alpha * alpha {
+                                continue;
+                            }
+                        }
+                    }
+                    return true;
+                }
+            }
+            if stack.size == 0u {
+                break;
+            }
+            node = bvh[pop(&stack)];
+        } else {
+            // avoid pushing nodes onto the stack where possible
+            // order nodes based on distance
+
+            // try ordering the nodes
+            var left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
+            var right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
+    
+            if (left > best_t) && (right > best_t) {
+                if stack.size == 0u {
+                    break;
+                }
+                node = bvh[pop(&stack)];
+            } else if (left > best_t) {
+                node = bvh[node.first + 1u];
+            } else if (right > best_t) {
+                node = bvh[node.first + 0u];
+            } else if right > left {
+                push(&stack, node.first + 1u);
+                node = bvh[node.first + 0u];
+            } else {
+                push(&stack, node.first + 0u);
+                node = bvh[node.first + 1u];
+            } 
+
+        }
+    }
+    return false;
+}
 fn transform_dir(x: vec3f, t: mat4x4f) -> vec3f {
     return (t * vec4f(x.x, x.y, x.z, 0.0)).xyz;
 }
@@ -826,7 +904,6 @@ fn trace(ray: Ray) -> Hit {
 }
 
 fn trace_shadow(ray: Ray, t: f32) -> bool {
-    debug = 0.0;
     var stack: Stack;
     stack.size = 0u;
     var node = bvh[globals.node_count];
@@ -835,8 +912,6 @@ fn trace_shadow(ray: Ray, t: f32) -> bool {
         return false;
     }
     while (true) {
-        // debug = max(debug, f32(stack.size + 1u));
-        // visualize bvh steps
 
         if node.count > 0 {
             // intersect BLAS(s) of node
@@ -844,9 +919,8 @@ fn trace_shadow(ray: Ray, t: f32) -> bool {
                 let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
                 let t_ray = transform_ray(ray, primitives[i].inv_transform);
                 var new_t = best_t * scale_factor;
-                let new_tri = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
                 
-                if new_tri >= 0 {
+                if trace_bvh_shadow(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]) {
                     return true;
                 }
             }
@@ -1812,6 +1886,57 @@ fn mis_power_heuristic_3(a: f32, b: f32, c: f32, a_prob: f32, b_prob: f32, c_pro
     //return (ap * ap) / (ap * ap + bp * bp + cp * cp);
 }
 
+const MESH_CHANCE: f32 = 0.5;
+
+struct LightSample {
+    wi: vec3f,
+    t_max: f32,
+    contrib: vec3f,
+    pdf: f32,
+}
+
+fn sample_light(hit: Hit, sample: ExtSample, ray: Ray, hit_ior: f32, ray_volume: GpuVolume) -> LightSample {
+    
+    let r = rand();
+    var prob = 0.0;
+    var pdf = 0.0;
+    var wi = vec3f(0,0,1);
+    var t_max = 0.0;
+    var contrib = vec3f(0);
+
+    // sample NEE shadow ray
+    if r < MESH_CHANCE {
+        prob = MESH_CHANCE;
+        wi = normalize(sample_env_map());
+        t_max = 99999999999.0;
+        contrib = evaluate_env_map(wi).rgb;
+        pdf = sample_env_map_pdf(wi);
+        contrib /= prob;
+    } else if globals.scene.mesh_light_count > 0 {
+        prob = 1.0 - MESH_CHANCE;
+
+        var prim_idx: i32;
+        var tri_idx: i32;
+        
+        let reference = ray.origin + ray.dir * hit.t;
+        let mesh_point = sample_mesh_light(reference, &pdf, &prim_idx, &tri_idx);
+        
+        wi = normalize(mesh_point - reference);
+
+        var mesh_ray = ray;
+        mesh_ray.origin = reference;
+        mesh_ray.dir = wi;
+        mesh_ray.idir = 1.0 / mesh_ray.dir;
+
+        let mesh_hit = trace_transformed_tri(mesh_ray, prim_idx, tri_idx);
+
+        t_max = distance(reference, mesh_point) - 0.003;
+        contrib = sample_emission(mesh_hit);
+
+    }
+
+    return LightSample(wi, t_max, contrib, pdf * prob);
+}
 
 
 @compute
@@ -1867,6 +1992,11 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             let bsdf_ray_nee_pdf = sample_env_map_pdf(ray.dir);
             let bsdf_ray_mesh_pdf = 0.0;
             bsdf_mis_weight = mis_power_heuristic_3(bsdf_pdf, bsdf_ray_nee_pdf, bsdf_ray_mesh_pdf, 1.0, 1.0, 1.0);
+
+            if i == 0 {
+                bsdf_mis_weight = 1.0;
+            }
+
             if globals.debug_mode != 8 {
                 lighting += throughput * bsdf_mis_weight * evaluate_env_map(ray.dir).rgb;
             }
@@ -1943,15 +2073,15 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
                 mesh_ray.origin += mesh_ray.dir * 0.001;
             }
 
-            let mesh_sample = trace_transformed_tri(mesh_ray, prim_idx, tri_idx);
-            if !trace_shadow(mesh_ray, mesh_sample.t - 0.001) && hit.prim_idx != prim_idx && hit.idx != tri_idx {
+            let mesh_hit = trace_transformed_tri(mesh_ray, prim_idx, tri_idx);
+            if !trace_shadow(mesh_ray, mesh_hit.t - 0.001) && hit.prim_idx != prim_idx && hit.idx != tri_idx {
                 let mesh_bsdf = evaluate_bsdf(mesh_wi, wo, hit_ior, ray_volume.ior, sample);
                 let mesh_ray_bsdf_pdf = sample_bsdf_pdf(mesh_wi, wo, hit_ior, ray_volume.ior, sample);
                 let mesh_ray_nee_pdf = 0.0;
                 let mesh_mis_weight = mis_power_heuristic_3(mesh_pdf, mesh_ray_bsdf_pdf, mesh_ray_nee_pdf, 1.0, 1.0, 1.0);
-                lighting += mesh_mis_weight * throughput * mesh_bsdf * max(dot(mesh_wi, sample.normal), 1e-8) * sample_emission(mesh_sample) / mesh_pdf;
-                // lighting += mesh_mis_weight * throughput * max(dot(mesh_wi, sample.normal), 1e-8) * vec3f(10) / mesh_pdf;
-                // lighting += max(dot(mesh_wi, sample.normal), 0.0) * throughput * mesh_sample.emissive / max(mesh_pdf, 1.0) / 10.0;
+                if mesh_pdf > 0.0 {
+                    lighting += mesh_mis_weight * throughput * mesh_bsdf * max(dot(mesh_wi, sample.normal), 0.0) * sample_emission(mesh_hit) / mesh_pdf;
+                }
             }
         }
 
@@ -1967,30 +2097,20 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
 
         if globals.debug_mode == 8 {
             if (i == 2) {
-                // lighting = vec3f(sample.emissive * bsdf_mis_weight);
-                // lighting = vec3f(bsdf_ray_mesh_pdf) / 10.0;
-                lighting = vec3f(bsdf_pdf) * 0.0;
+                lighting = vec3f(0);
                 if (bsdf_ray_mesh_pdf > 0.0) {
-                    lighting *= 0.0;
                     lighting = sample.emissive * vec3f(bsdf_mis_weight);
                 }
-                // lighting = vec3f(bsdf_mis_weight);
                 break;
-            } else {
-                // lighting *= 0.0;
             }
-           
-            
         }
+
         // sample BSDF continuation
         var bsdf: vec3f;
         var wi = sample_bsdf(wo, ray_volume.ior, hit_ior, sample, &lighting, &bsdf_pdf, &bsdf);
-        if dot(wi, hit.normal) <= 0.0 {
-            throughput *= 0.0;
-        }
+
         if bsdf_pdf > 0.0 {
             throughput /= bsdf_pdf;
-            // throughput *= mis_weight; // sanity check - commenting this works (in conjunction with ^)
         } else {
             throughput *= 0.0;
         }
@@ -2044,8 +2164,10 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
         lighting = vec3f(1.0, 1.0, 0.0);
     }
 
+
+
     if (globals.reject_hist > 0) {
-        screen[id.x + globals.res.x * id.y] = vec4f(lighting, 1.0);
+        screen[id.x + globals.res.x * id.y] = vec4f(max(lighting, vec3f(0)), 1.0);
     } else {
         // clamp NaNs
         screen[id.x + globals.res.x * id.y] += vec4f(max(lighting, vec3f(0)), 1.0);
@@ -2107,7 +2229,7 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     var col = scr.rgb / scr.a;
 
     if !(DEBUG && globals.debug_mode != 0) {
-        col = tonemap_pbr_neutral(col * EXPOSURE);
+        col = tonemap_pbr_neutral(col * globals.scene.camera.exposure);
     }
     
     // col = to_linear(sample_texture(primitives[1].material.albedo, uv).rgb);

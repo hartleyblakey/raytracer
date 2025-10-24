@@ -190,7 +190,8 @@ pub struct GpuPrimitive {
 }
 
 impl GpuPrimitive {
-    const TANGENT_FLAG: u32 = 1;
+    const TANGENT_FLAG:     u32 = 1 << 0;
+    const EMISSIVE_FLAG:    u32 = 1 << 1;
 
     fn new(transform: &Mat4, material: GpuMaterial, bvh_idx: u32, tri_start: u32, tri_count: u32, has_tangents: bool) -> Self {
         Self {
@@ -207,7 +208,7 @@ impl GpuPrimitive {
 
     fn set_mesh_light(&mut self, idx: u32) {
         self.flags = self.flags & 0xFF | (idx << 8);
-        self.flags |= 1 << 1;
+        self.flags |= Self::EMISSIVE_FLAG;
     }
 }
 
@@ -456,6 +457,13 @@ impl MeshLights {
     } 
 }
 
+pub struct Mesh {
+    primitives: Vec<u32>,
+    transform: Mat4,
+    path: String,
+}
+
+
 #[derive(Default)]
 pub struct RenderScene {
     // path to the environment map texture
@@ -473,9 +481,6 @@ pub struct RenderScene {
     /// list of mesh lights
     pub mesh_lights: Vec<MeshLight>,
 
-    /// CDF of mesh lights
-    pub mesh_lights_cdf: Vec<f32>,
-
     /// global buffer of triangle position data
     pub tris:               Vec<Tri>,
     pub tri_exts:           Vec<GpuTriExt>,
@@ -485,8 +490,6 @@ pub struct RenderScene {
     pub texture_map:        HashMap<usize, GpuTextureRef>,
 
     pub bvh_node_data:      Vec<BvhNode>,
-
-    
 
     /// cameras in scene
     pub cameras:            Vec<Camera>,
@@ -1182,14 +1185,16 @@ impl RenderScene {
         let mut primitive_leaves: Vec<PrimitiveLeaf> = self.primitives.iter()
             .map(|p| PrimitiveLeaf::new(*p, &self.bvh_node_data, &self.tris))
             .collect();
+
         let mut tlas = Bvh::new(primitive_leaves.as_slice(), 0, primitive_leaves.len());
 
-        // this is a little ridiculous since there is no actual data, but _ isn't copy.
-        tlas.flatten_leaves::<_, u32>(&mut primitive_leaves, None);
+        // fish
+        tlas.flatten_leaves::<_, ()>(&mut primitive_leaves, None);
         self.primitives.clear();
         for leaf in primitive_leaves {
             self.primitives.push(leaf.primitive)
         }
+
         println!("TLAS: {} nodes over {} primitives", tlas.nodes.len(), self.primitives.len());
 
         self.tlas_node_data = tlas.nodes;

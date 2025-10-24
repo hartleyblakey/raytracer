@@ -180,6 +180,8 @@ impl Camera {
             }
         }
 
+
+
         // cancel camera rotation on first frame
         if input.rmb && !self.rmb_last {
             input.mouse_x = 0.0;
@@ -194,7 +196,13 @@ impl Camera {
             input.mouse_y = 0.0;
         }
 
-        if input.scroll != 0.0 {
+        if input.keys.get(&PhysicalKey::Code(KeyE)).is_some() {
+            if input.scroll < 0.0 {
+                self.exposure /= 1.5 as f32;
+            } else if input.scroll > 0.0 {
+                self.exposure *= 1.5 as f32;
+            }
+        } else if input.scroll != 0.0 {
             if ctrl {
                 self.focus_delta(input.scroll as f32);
             } else if alt {
@@ -203,8 +211,8 @@ impl Camera {
                 self.zoom(self.fovy * (input.scroll * 0.1).clamp(-0.2, 0.2) as f32);
                 
             }
-
         }
+
         input.scroll = 0.0;
 
         self.rmb_last = input.rmb;
