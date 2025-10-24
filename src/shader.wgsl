@@ -1607,7 +1607,6 @@ fn sample_ndf_pdf(NoH: f32, a2: f32) -> f32 {
 fn sample_ggx_smith_vndf_refraction_pdf(wi_tangent: vec3f, wo_tangent: vec3f, ior_i: f32, ior_o: f32, roughness: f32) -> f32 {
     let a2 = roughness * roughness * roughness * roughness;
 
-    // 1. Calculate the REQUIRED half-vector for this refraction event.
     var h_required = -normalize(wi_tangent * ior_i + wo_tangent * ior_o) * sign(ior_i - ior_o);
 
     let n = vec3f(0.0, 0.0, 1.0);
@@ -1629,8 +1628,6 @@ fn sample_ggx_smith_vndf_refraction_pdf(wi_tangent: vec3f, wo_tangent: vec3f, io
     let pdf = G1 * max(0.0, VoH) * D * jacobian / VoN;
 
     return pdf;
-
-
 }
 
 const DEBUG: bool = true;
@@ -1886,7 +1883,7 @@ fn mis_power_heuristic_3(a: f32, b: f32, c: f32, a_prob: f32, b_prob: f32, c_pro
     //return (ap * ap) / (ap * ap + bp * bp + cp * cp);
 }
 
-const MESH_CHANCE: f32 = 0.5;
+const MESH_CHANCE: f32 = 0.95;
 
 struct LightSample {
     wi: vec3f,

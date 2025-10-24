@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::HashMap, f32::consts::PI};
 
-use glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use crate::glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::GenericImageView;
 use rand::random;
 

@@ -1,5 +1,7 @@
 use std::{collections::HashSet, f32::consts::PI};
 
+use hb_gpu::prelude::*;
+
 use glam::{vec3, vec4, Mat3, Mat4, Vec3};
 use winit::keyboard::{KeyCode, PhysicalKey};
 

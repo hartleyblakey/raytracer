@@ -2,7 +2,7 @@
 
 
 
-use std::{borrow::Cow, collections::HashSet, sync::{Arc, Mutex}};
+use std::{borrow::Cow, collections::HashSet, default, f32::consts::E, sync::{Arc, Mutex}};
 
 use pollster::FutureExt;
 
@@ -25,16 +25,13 @@ use winit::{
     dpi::PhysicalPosition, event::{DeviceEvent, Event, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode
 };
 
-
+use hb_gpu::{new_window, prelude::{winit::{application::ApplicationHandler, window::Window}, *}};
 
 use glam::uvec2;
 use web_time::{Instant, SystemTime};
 
 mod input;
 use input::*;
-
-mod gpu;
-use gpu::*;
 
 mod scene;
 use scene::*;
@@ -221,7 +218,7 @@ impl Context {
         self.update_rt_binding(gpu);
     }
 
-    async fn init<'a>(gpu: &'a Gpu<'a>) -> Context {
+    async fn init(gpu: &Gpu) -> Context {
         let scene = RenderScene::from_path(std::path::Path::new(DEFAULT_MODEL_PATH), std::path::Path::new(DEFAULT_ENV_PATH) ).await.unwrap();
 
         println!("Bvh size : {} mb", (scene.bvh_node_data.len() * size_of::<BvhNode>()) / (1000 * 1000));
@@ -664,218 +661,295 @@ fn update_debug_mode(key_code: KeyCode, numeral: u32, input: &InputState, frame_
     }
 }
 
+struct App {
+    gpu: Gpu,
+    ctx: Context,
+    frames_in_second: u32,
+    last_frame: Instant,
+    last_second: Instant,
+    input: InputState,
+    last_cursor_pos: PhysicalPosition<f64>,
+}
+
+#[derive(Clone, Default)]
+struct AppShell {
+    app: Arc<Mutex<Option<App>>>
+}
+
+impl AppShell {
+    async fn init(self, window: Arc<Window>) {
+        let Some(gpu) = Gpu::new(window).await else {
+            panic!("Failed to create gpu");
+        };
+        let ctx = Context::init(&gpu).await;
+        let Ok(mut lock) = self.app.lock() else {
+            panic!("Failed to acquire app lock");
+        };
+        let frames_in_second = 0;
+        let last_frame = Instant::now();
+        let last_second = Instant::now();
+        let input = InputState::default();
+        let last_position = PhysicalPosition::<f64>::default();
+        *lock = Some(App { gpu, ctx, frames_in_second, last_frame, last_second, input, last_cursor_pos: last_position});
+    }
+
+    async fn try_add_file(&self, path: &std::path::Path) {
+        let Ok(mut app) = self.app.lock() else {
+            return;
+        };
+
+        let Some(app) = &mut *app else {
+            return;
+        };
+
+        app.ctx.try_add_file(path).await;
+    }
+
+    async fn open_file(&self) {
+        if let Some(file) = rfd::AsyncFileDialog::new().set_title("Pick a gltf (or glb) file to render, or a .hdr if on native").pick_file().await {
+            let Ok(mut app) = self.app.lock() else {
+                return;
+            };
+
+            let Some(app) = &mut *app else {
+                return;
+            };
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let old_env = app.ctx.scene.env_map_path.clone();
+                app.ctx.try_change_scene_bytes(file.read().await.as_slice(), &old_env).await;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                app.ctx.try_add_file(&file.path()).await
+            };
+        }
+    }
+
+}
+
+impl ApplicationHandler for AppShell {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        let window = match new_window(event_loop, [512, 512]) {
+            Ok(window) => window,
+            Err(e) => panic!("{:?}", e),
+        };
+        let window = Arc::new(window);
+        spawn_future(self.clone().init(window));
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        window_id: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+
+
+
+        match event {
+            WindowEvent::Resized(new_size) => {
+                let Ok(mut app_guard) = self.app.lock() else { return; };
+                let Some(app) = &mut *app_guard else { return; };
+                let (gpu, ctx, input) = (&mut app.gpu, &mut app.ctx, &mut app.input);
+                
+                // Reconfigure the surface with the new size
+                gpu.surface_config.width  = new_size.width.clamp(1, 4096);
+                gpu.surface_config.height = new_size.height.clamp(1, 4096);
+                
+                gpu.surface.configure(&gpu.device, &gpu.surface_config);
+
+                ctx.update_resolution(&gpu);
+                
+                // On macos the window needs to be redrawn manually after resizing
+                gpu.window.request_redraw();
+            }
+
+            WindowEvent::RedrawRequested => {
+                let Ok(mut app_guard) = self.app.lock() else { return; };
+                let Some(app) = &mut *app_guard else { return; };
+                let (gpu, ctx, input) = (&mut app.gpu, &mut app.ctx, &mut app.input);
+
+                let this_frame = Instant::now();
+                app.frames_in_second += 1;
+                gpu.window.request_redraw();
+                let dt = (this_frame - app.last_frame).as_secs_f32();
+
+                ctx.scene.cameras[0].update(input, dt);
+                    
+                if ctx.should_reupload {
+                    ctx.update_env_map_texture(&gpu);
+                    ctx.upload_scene(&gpu);
+                }
+
+                // not the most elegant code in the world
+                // TODO: add a digits array to the InputState struct, if it would
+                // do anything other than move this logic into the key press event
+                update_debug_mode(KeyCode::Digit0, 0, &input, &mut ctx.frame_uniforms);
+                update_debug_mode(KeyCode::Digit1, 1, &input, &mut ctx.frame_uniforms);
+                update_debug_mode(KeyCode::Digit2, 2, &input, &mut ctx.frame_uniforms);
+                update_debug_mode(KeyCode::Digit3, 3, &input, &mut ctx.frame_uniforms);
+                update_debug_mode(KeyCode::Digit4, 4, &input, &mut ctx.frame_uniforms);
+                update_debug_mode(KeyCode::Digit5, 5, &input, &mut ctx.frame_uniforms);
+                update_debug_mode(KeyCode::Digit6, 6, &input, &mut ctx.frame_uniforms);
+                update_debug_mode(KeyCode::Digit7, 7, &input, &mut ctx.frame_uniforms);
+                update_debug_mode(KeyCode::Digit8, 8, &input, &mut ctx.frame_uniforms);
+                update_debug_mode(KeyCode::Digit9, 9, &input, &mut ctx.frame_uniforms);
+
+                frame(&gpu, ctx, dt);
+
+                if this_frame.duration_since(app.last_second).as_secs_f32() >= 1.0 {
+                    println!("fps: {}", app.frames_in_second);
+                    app.frames_in_second = 0;
+                    app.last_second = this_frame;
+                }
+                
+                
+                app.last_frame = this_frame;
+            },
+            WindowEvent::CursorMoved { device_id: _, position } => {
+                let Ok(mut app_guard) = self.app.lock() else { return; };
+                let Some(app) = &mut *app_guard else { return; };
+                if !app.input.rmb {app.last_cursor_pos = position}
+            },
+            WindowEvent::MouseInput { device_id: _, state, button } => {
+                let Ok(mut app_guard) = self.app.lock() else { return; };
+                let Some(app) = &mut *app_guard else { return; };
+                let (gpu, ctx, input) = (&mut app.gpu, &mut app.ctx, &mut app.input);
+
+                match button {
+                    MouseButton::Left =>  {
+                        input.lmb = state.is_pressed();
+                        ctx.scene.focus_camera(0);
+                    },
+                    MouseButton::Right => input.rmb = state.is_pressed(),
+                    _ => (),
+                }
+
+                // hide the curson when moving the camera
+                // and reset it back when released
+                if input.rmb {
+                    gpu.window.set_cursor_visible(false);
+                    gpu.window.set_cursor_grab(CursorGrabMode::Locked)
+                        .or_else(|_e| gpu.window.set_cursor_grab(CursorGrabMode::Confined))
+                        .or_else(|_e| gpu.window.set_cursor_grab(CursorGrabMode::None))
+                        .expect("Failed to set any cursor grab modes");
+                } else {
+                    // ignored because it is non-essential
+                    let _ = gpu.window.set_cursor_position(app.last_cursor_pos);
+                    gpu.window.set_cursor_visible(true);
+                    match gpu.window.set_cursor_grab(CursorGrabMode::None) {
+                        Ok(_) => (),
+                        Err(e) => panic!("Failed to let go of cursor: {e}"),
+                    }
+
+                }
+
+            }
+            WindowEvent::MouseWheel { device_id: _, delta, phase: _ } => {
+                let Ok(mut app_guard) = self.app.lock() else { return; };
+                let Some(app) = &mut *app_guard else { return; };
+                let (gpu, ctx, input) = (&mut app.gpu, &mut app.ctx, &mut app.input);
+
+                // hack: I have no idea how to keep a consistent sensitivity between these
+                //       two units. This works well enough for the devices I tested it on
+                match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => input.scroll += y as f64 / 2.0,
+                    winit::event::MouseScrollDelta::PixelDelta(physical_position) => input.scroll += physical_position.y / 128.0 / gpu.window.scale_factor(),
+                }
+            },
+            WindowEvent::DroppedFile(path) => {
+                // preempt some errors while the failure path is convenient
+                if path.to_str().is_some() {
+                    let c = self.clone();
+                    
+                    spawn_future(async move {
+                        c.try_add_file(&path).await
+                    });
+
+                    let Ok(mut app_guard) = self.app.lock() else { return; };
+                    let Some(app) = &mut *app_guard else { return; };
+                    let (gpu, ctx, input) = (&mut app.gpu, &mut app.ctx, &mut app.input);
+
+                    // Im not sure why, but the window sometimes needs to be manually redrawn here
+                    gpu.window.request_redraw();
+                }
+                
+            },
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::KeyboardInput { device_id: _, event, is_synthetic: _ } => {
+                match event.physical_key {
+                    PhysicalKey::Code(code) => {
+                        if event.state.is_pressed() {
+                            if code == KeyCode::KeyO {
+                                
+                                let c = self.clone();
+                                spawn_future(async move {
+                                    c.open_file().await;
+                                });
+                            } else if code == KeyCode::KeyP {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    let Ok(mut app_guard) = self.app.lock() else { return; };
+                                    let Some(app) = &mut *app_guard else { return; };
+
+                                    let img = app.ctx.scene.trace_cpu_image(app.ctx.frame_uniforms.scene.camera);
+                                    match img.save("screenshots/cpu.png") {
+                                        Ok(_) => (),
+                                        Err(e) => println!("Failed to save screenshot: \n{e}"),
+                                    };
+                                }
+                            }
+                            let Ok(mut app_guard) = self.app.lock() else { return; };
+                            let Some(app) = &mut *app_guard else { return; };
+                            app.input.keys.insert(PhysicalKey::Code(code));
+                        } else {
+                            let Ok(mut app_guard) = self.app.lock() else { return; };
+                            let Some(app) = &mut *app_guard else { return; };
+                            app.input.keys.remove(&PhysicalKey::Code(code));
+                        }
+                    }
+                    _ => ()
+                }
+            },
+            _ => ()
+        };
+    }
+
+    fn device_event(
+            &mut self,
+            event_loop: &winit::event_loop::ActiveEventLoop,
+            device_id: winit::event::DeviceId,
+            event: DeviceEvent,
+        ) {
+
+        let Ok(mut app) = self.app.lock() else {
+            return;
+        };
+
+        let Some(app) = &mut *app else {
+            return;
+        };
+
+        match event {
+            DeviceEvent::MouseMotion{ delta, } => {
+                app.input.mouse_x += delta.0;
+                app.input.mouse_y += delta.1;
+            }
+            _ => (),
+        };
+
+
+    }
+}
+
 
 async fn run() -> Result<(), AppError> {
     let event_loop = EventLoop::new()?;
-
-    // default size
-
-    #[cfg(target_arch = "wasm32")]
-    let window = new_window_in_canvas(&event_loop, "canvas")?;
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let window = new_window(&event_loop, [512, 512])?;
-
-    let mut gpu = match Gpu::new(&window).await {
-        Some(gpu) => gpu,
-        None => return Err(AppError::Text("Failed to create GPU".to_owned()))
-    };
-
-    let ctx = Arc::new(Mutex::new(Context::init(&gpu).await));
-
-    let mut input = InputState {
-        keys: HashSet::new(),
-        mouse_x: 0.0,
-        mouse_y: 0.0,
-        scroll: 0.0,
-        lmb: false,
-        rmb: false,
-    };
-
-    let mut last_second = Instant::now();
-    let mut last_frame  = Instant::now();
-    let mut frames_in_second: u32 = 0;
-    let mut last_cursor_pos = PhysicalPosition::new(0.0, 0.0);
-    let scale_factor = window.scale_factor();
-
-    event_loop.run(
-    move |event, target| {
-        match event {
-            Event::DeviceEvent {
-                event: DeviceEvent::MouseMotion{ delta, },
-                .. // We're not using device_id currently
-            } => {
-                input.mouse_x += delta.0;
-                input.mouse_y += delta.1;
-            },
-            Event::WindowEvent { window_id: _, event } => {
-                match event {
-                    WindowEvent::Resized(new_size) => {
-                        // Reconfigure the surface with the new size
-                        gpu.surface_config.width  = new_size.width.clamp(1, 4096);
-                        gpu.surface_config.height = new_size.height.clamp(1, 4096);
-                        
-                        gpu.surface.configure(&gpu.device, &gpu.surface_config);
-
-                        if let Ok(mut ctx_guard) = ctx.try_lock(){
-                            ctx_guard.update_resolution(&gpu);
-                        }
-                        
-                        // On macos the window needs to be redrawn manually after resizing
-                        gpu.window.request_redraw();
-                    }
-
-                    WindowEvent::RedrawRequested => {
-                        let this_frame = Instant::now();
-                        frames_in_second += 1;
-                        gpu.window.request_redraw();
-                        let dt = (this_frame - last_frame).as_secs_f32();
-
-                        
-
-                        if let Ok(mut ctx_guard) = ctx.try_lock() {
-                            ctx_guard.scene.cameras[0].update(&mut input, dt);
-                            
-                            if ctx_guard.should_reupload {
-                                ctx_guard.update_env_map_texture(&gpu);
-                                ctx_guard.upload_scene(&gpu);
-                            }
-
-                            // not the most elegant code in the world
-                            // TODO: add a digits array to the InputState struct, if it would
-                            // do anything other than move this logic into the key press event
-                            update_debug_mode(KeyCode::Digit0, 0, &input, &mut ctx_guard.frame_uniforms);
-                            update_debug_mode(KeyCode::Digit1, 1, &input, &mut ctx_guard.frame_uniforms);
-                            update_debug_mode(KeyCode::Digit2, 2, &input, &mut ctx_guard.frame_uniforms);
-                            update_debug_mode(KeyCode::Digit3, 3, &input, &mut ctx_guard.frame_uniforms);
-                            update_debug_mode(KeyCode::Digit4, 4, &input, &mut ctx_guard.frame_uniforms);
-                            update_debug_mode(KeyCode::Digit5, 5, &input, &mut ctx_guard.frame_uniforms);
-                            update_debug_mode(KeyCode::Digit6, 6, &input, &mut ctx_guard.frame_uniforms);
-                            update_debug_mode(KeyCode::Digit7, 7, &input, &mut ctx_guard.frame_uniforms);
-                            update_debug_mode(KeyCode::Digit8, 8, &input, &mut ctx_guard.frame_uniforms);
-                            update_debug_mode(KeyCode::Digit9, 9, &input, &mut ctx_guard.frame_uniforms);
-
-                            frame(&gpu, &mut ctx_guard, dt);
-                        } else {
-                            println!("Context is in use!");
-                        }
-
-                        if this_frame.duration_since(last_second).as_secs_f32() >= 1.0 {
-                            println!("fps: {}", frames_in_second);
-                            frames_in_second = 0;
-                            last_second = this_frame;
-                        }
-                        
-                        
-                        last_frame = this_frame;
-                    },
-                    WindowEvent::CursorMoved { device_id: _, position } => if !input.rmb {last_cursor_pos = position},
-                    WindowEvent::MouseInput { device_id: _, state, button } => {
-                        match button {
-                            MouseButton::Left =>  {
-                                if let Ok(mut ctx_guard) = ctx.try_lock(){
-                                    input.lmb = state.is_pressed();
-                                    ctx_guard.scene.focus_camera(0);
-                                }
-
-                            },
-                            MouseButton::Right => input.rmb = state.is_pressed(),
-                            _ => (),
-                        }
-
-                        // hide the curson when moving the camera
-                        // and reset it back when released
-                        if input.rmb {
-                            gpu.window.set_cursor_visible(false);
-                            gpu.window.set_cursor_grab(CursorGrabMode::Locked)
-                                .or_else(|_e| gpu.window.set_cursor_grab(CursorGrabMode::Confined))
-                                .or_else(|_e| gpu.window.set_cursor_grab(CursorGrabMode::None))
-                                .expect("Failed to set any cursor grab modes");
-                        } else {
-                            // ignored because it is non-essential
-                            let _ = gpu.window.set_cursor_position(last_cursor_pos);
-                            gpu.window.set_cursor_visible(true);
-                            match gpu.window.set_cursor_grab(CursorGrabMode::None) {
-                                Ok(_) => (),
-                                Err(e) => panic!("Failed to let go of cursor: {e}"),
-                            }
-
-                        }
-
-                    }
-                    WindowEvent::MouseWheel { device_id: _, delta, phase: _ } => {
-                        // hack: I have no idea how to keep a consistent sensitivity between these
-                        //       two units. This works well enough for the devices I tested it on
-                        match delta {
-                            winit::event::MouseScrollDelta::LineDelta(_, y) => input.scroll += y as f64 / 2.0,
-                            winit::event::MouseScrollDelta::PixelDelta(physical_position) => input.scroll += physical_position.y / 128.0 / scale_factor,
-                        }
-                    },
-                    WindowEvent::DroppedFile(path) => {
-                        // preempt some errors while the failure path is convenient
-                        if path.to_str().is_some() {
-                            let ctx_clone = Arc::clone(&ctx);
-                            spawn_future(async move {
-                                if let Ok(mut ctx_guard) = ctx_clone.lock() {
-                                    ctx_guard.try_add_file(&path).await;
-                                }
-                            });
-
-                            // Im not sure why, but the window sometimes needs to be manually redrawn here
-                            gpu.window.request_redraw();
-                        }
-                        
-                    },
-                    WindowEvent::CloseRequested => target.exit(),
-                    WindowEvent::KeyboardInput { device_id: _, event, is_synthetic: _ } => {
-                        match event.physical_key {
-                            PhysicalKey::Code(code) => {
-                                if event.state.is_pressed() {
-                                    input.keys.insert(PhysicalKey::Code(code));
-                                    if code == KeyCode::KeyO {
-                                        let ctx_clone = Arc::clone(&ctx);
-                                        spawn_future(async move {
-                                            if let Ok(mut ctx_guard) = ctx_clone.lock() {
-                                                if let Some(file) = rfd::AsyncFileDialog::new().set_title("Pick a gltf (or glb) file to render, or a .hdr if on native").pick_file().await {
-                                                #[cfg(target_arch = "wasm32")]
-                                                {
-                                                    let old_env = ctx_guard.scene.env_map_path.clone();
-                                                    ctx_guard.try_change_scene_bytes(file.read().await.as_slice(), &old_env).await;
-                                                }
-                                                #[cfg(not(target_arch = "wasm32"))]
-                                                {
-                                                    ctx_guard.try_add_file(&file.path()).await
-                                                };
-
-                                                    
-                                                }
-                                            }
-                                        });
-                                            
-                                    } else if code == KeyCode::KeyP {
-                                        if let Ok(ctx_guard) = ctx.lock() {
-                                            let img = ctx_guard.scene.trace_cpu_image(ctx_guard.frame_uniforms.scene.camera);
-                                            match img.save("screenshots/cpu.png") {
-                                                Ok(_) => (),
-                                                Err(e) => println!("Failed to save screenshot: \n{e}"),
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    input.keys.remove(&PhysicalKey::Code(code));
-                                }
-                            }
-                            _ => ()
-                        }
-                    },
-                    _ => {}
-                };
-            }
-
-            _ => (),
-        }
-
-    })?;
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    let mut app = AppShell::default();
+    event_loop.run_app(&mut app);
     Ok(())
 }
 
