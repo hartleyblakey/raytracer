@@ -102,6 +102,17 @@ pub struct GpuVertexExt {
     tangent_sign: f32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuRayState {
+    origin_max: Vec4,
+
+    direction_min: Vec4,
+   
+    throughput_flags: Vec4,
+
+    pixel_medium_depth: Vec4,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -112,16 +123,37 @@ pub struct GpuTriExt {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuVolume {
-    absorption:             Vec3,
-    ior:                    f32,
+    sigma_a:             Vec3,
+    ior:                 f32,
+    sigma_s:             Vec3,
+    g:                   f32,
+
+}
+
+impl GpuVolume {
+    const fn base() -> Self {
+        Self {
+            sigma_a: Vec3::ZERO,
+            ior: 1.5,
+            sigma_s: Vec3::ZERO,
+            g: 0.0,
+            
+        }
+    }
+
+    const fn air() -> Self {
+        Self {
+            sigma_a: Vec3::ZERO,
+            ior: 1.0,
+            sigma_s: Vec3::ZERO,
+            g: 0.0,
+        }
+    }
 }
 
 impl Default for GpuVolume {
     fn default() -> Self {
-        Self {
-            absorption: Vec3::ZERO,
-            ior: 1.5,
-        }
+        Self::base()
     }
 }
 
@@ -151,15 +183,15 @@ pub struct GpuMaterial {
     transmission_texcoord:  u32,
     thickness_factor:       f32,
     transmission_factor:    f32,
-    
 
     metallic_factor:        f32,
     roughness_factor:       f32,
     id:                     u32,
     alpha_settings:         u32,
 
-    volume:                 GpuVolume,
-    
+    /// pointer into media array
+    volume:                 u32,
+    _pad:                   [u32; 3],
 }
 
 
@@ -445,14 +477,17 @@ impl Default for EnvironmentMap {
 
 #[derive(Default)]
 pub struct RenderScene {
-    // path to the environment map texture
+    /// path to the environment map texture
     pub env_map_path:       std::path::PathBuf,
 
-    // path to the GLTF file
+    /// path to the GLTF file
     pub gltf_path:          Option<std::path::PathBuf>,
 
     /// flat array of primitives that share a material
     pub primitives:         Vec<GpuPrimitive>,
+
+    /// flat array of volumes
+    pub media:            Vec<GpuVolume>,
 
     /// bvh over RenderScene::primitives
     pub tlas_node_data: Vec<BvhNode>,
@@ -582,6 +617,18 @@ pub struct MeshLight {
 type LoadedMeshCache = HashMap<usize, HashMap<usize, usize>>;
 
 impl RenderScene {
+
+    const DEFAULT_VOLUME: GpuVolume = GpuVolume::base();
+    const DEFAULT_VOLUME_ID: u32 = 1;
+    const BACKGROUND_VOLUME_ID: u32 = 0;
+    const DEFAULT_BACKGROUND_VOLUME: GpuVolume = GpuVolume::air();
+
+    pub fn new() -> RenderScene {
+        let mut scene = RenderScene::default();
+        scene.media.push(Self::DEFAULT_BACKGROUND_VOLUME); // default background (air)
+        scene.media.push(Self::DEFAULT_VOLUME); // default surface (1.5 ior)
+        scene
+    }
 
     fn build_mesh_lights(&mut self) {
         
@@ -889,6 +936,7 @@ impl RenderScene {
                         };
 
                         let mut material = GpuMaterial::default();
+                        material.volume = Self::DEFAULT_VOLUME_ID;
 
                         material.alpha_settings = GpuMaterial::pack_alpha_settings(
                             primitive.material().alpha_mode(), 
@@ -929,14 +977,26 @@ impl RenderScene {
 
                             try_load_texcoords(&material.normal_texcoord);
                         }
-
-                        material.volume.ior = primitive.material().ior().unwrap_or(1.5);
+                        
+                        if let Some(ior) = primitive.material().ior() {
+                            if ior != Self::DEFAULT_VOLUME.ior {
+                                material.volume = self.media.len() as u32;
+                                self.media.push(GpuVolume::base());
+                                self.media[material.volume as usize].ior = ior;
+                            }
+                        }
 
                         if let Some(volume) = primitive.material().volume() {
+
                             material.thickness_factor = volume.thickness_factor();
-                            
-                            material.volume.absorption = -Vec3::from_array(volume.attenuation_color().map(|v| v.ln()))
-                                 / volume.attenuation_distance();
+
+                            if material.volume == Self::DEFAULT_VOLUME_ID {
+                                material.volume = self.media.len() as u32;
+                                self.media.push(GpuVolume::base());
+                            }
+
+                            self.media[material.volume as usize].sigma_a = 
+                            -Vec3::from_array(volume.attenuation_color().map(|v| v.ln())) / volume.attenuation_distance();
                             
                             if let Some(thickness_tex) = volume.thickness_texture() {
                                 material.thickness = self.add_gltf_texture(&thickness_tex.texture(), buffers);
@@ -1303,7 +1363,7 @@ impl RenderScene {
 
     pub async fn from_path(mesh_path: &std::path::Path, env_map_path: &std::path::Path) -> Option<RenderScene> {
         println!("building scene");
-        let mut scene = RenderScene::default();
+        let mut scene = RenderScene::new();
     
         if !scene.add_gltf(&Mat4::IDENTITY, mesh_path) {
             
@@ -1334,7 +1394,7 @@ impl RenderScene {
     #[cfg(target_arch = "wasm32")]
     pub async fn from_bytes(mesh_bytes: &[u8], env_map_path: &std::path::Path) -> Option<RenderScene> {
         println!("building scene");
-        let mut scene = RenderScene::default();
+        let mut scene = RenderScene::new();
     
         if !scene.add_gltf_bytes(&Mat4::IDENTITY, mesh_bytes) {
             

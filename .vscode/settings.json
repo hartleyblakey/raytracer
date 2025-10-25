@@ -20,6 +20,7 @@
         "mikktspace",
         "multisampled",
         "multisampling",
+        "raygen",
         "Raytracer",
         "Raytraces",
         "renderable",
@@ -41,5 +42,8 @@
         "workgroups",
         "yfov",
         "Zeroable"
-    ]
+    ],
+    "wgsl-analyzer.customImports": {
+        "rt::common": "file:///c:/Users/hartley/projects/raytracer/src/common.wgsl"
+    }
 }
