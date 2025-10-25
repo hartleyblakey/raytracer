@@ -22,7 +22,7 @@ use winit::{
     dpi::PhysicalPosition, event::{DeviceEvent, MouseButton, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode
 };
 
-use hb_gpu::{fetch_bytes, glam, new_window, prelude::*, wgpu, winit::{application::ApplicationHandler, window::Window}};
+use hb_gpu::{fetch_bytes, glam::{self, Vec4}, new_window, prelude::*, wgpu, winit::{application::ApplicationHandler, window::Window}};
 
 use glam::uvec2;
 use web_time::{Instant, SystemTime};
@@ -49,6 +49,25 @@ struct FrameUniforms {
     debug_mode: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuRayState {
+    origin_max: Vec4,
+
+    direction_min: Vec4,
+   
+    throughput_flags: Vec4,
+
+    pixel_medium_depth_pad: Vec4,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuWavefrontQueueParams {
+
+}
+
+
 const SHADER_PATH: &'static str = "./src/shader.wgsl";
 const DEFAULT_MODEL_PATH: &'static str = "./resources/simple2.glb";
 const DEFAULT_ENV_PATH: &'static str = "./resources/trail.hdr";
@@ -59,10 +78,10 @@ struct Context {
     raytrace_pipeline:          Option<wgpu::ComputePipeline>,
     raytrace_pipeline_layout:   wgpu::PipelineLayout,
 
-    // raygen_pipeline:            Option<wgpu::ComputePipeline>,
+    raygen_pipeline:            Option<wgpu::ComputePipeline>,
 
     megakernel_shader:          ShaderHandle,
-    // raygen_shader:              ShaderHandle,
+    raygen_shader:              ShaderHandle,
     screen_shader:              ShaderHandle,
 
     triangles_ssbo:             Buffer,
@@ -74,7 +93,7 @@ struct Context {
     mesh_light_ssbo:            Buffer,
     media_ssbo:                 Buffer,
 
-    // ray_intersect_queue:        Buffer,
+    ray_queue_ssbo:             Buffer,
 
     env_map_texture:            Texture,
     env_map_col_cdf:            Texture,
@@ -107,6 +126,7 @@ impl Context {
             .with_buffer(&self.env_map_rows_cdf.view_all(),      wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.mesh_light_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.media_ssbo.view_all(),            wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.ray_queue_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&self.env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&self.env_map_col_cdf,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&self.env_map_pdf,                     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
@@ -117,8 +137,9 @@ impl Context {
         let res = [gpu.surface_config.width, gpu.surface_config.height];
         self.frame_uniforms.res = res;
         println!("x: {}, y: {}", res[0], res[1]);
-        self.screen_ssbo = gpu.new_storage_buffer(res[0] as u64 * res[1]  as u64 * 4 * 4);
-
+        let n = res[0].max(1) as u64 * res[1].max(1) as u64;
+        self.screen_ssbo = gpu.new_storage_buffer(n * 4 * 4);
+        self.ray_queue_ssbo = gpu.new_storage_buffer(n * size_of::<GpuRayState>() as u64);
         self.update_rt_binding(gpu);
     }
 
@@ -161,8 +182,22 @@ impl Context {
             }
         );
 
+        let raygen_module = self.resources.get_shader(self.raygen_shader).module.as_ref().unwrap();
+
+        let raygen_pipeline = gpu.device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("ray generation compute pipeline"),
+                module: &raygen_module,
+                layout: Some(&self.raytrace_pipeline_layout),
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            }
+        );
+
         self.screen_pipeline = Some(screen_pipeline);
         self.raytrace_pipeline = Some(raytrace_pipeline);
+        self.raygen_pipeline = Some(raygen_pipeline);
     }
 
 
@@ -230,9 +265,12 @@ impl Context {
         let screen_ssbo =           gpu.new_storage_buffer(u_frame_0.res[0] as u64 * u_frame_0.res[1] as u64 * 4 * 4);
         let mesh_light_ssbo =       gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
 
+
         let env_map_rows_cdf = gpu.new_storage_buffer((scene.env_map.height * scene.env_map.width * size_of::<f32>()) as u64);
-        
+
         let media_ssbo =       gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
+
+        let ray_queue_ssbo =   gpu.new_storage_buffer(initial_buffer_size_mb * 1024 * 1024);
 
         let env_map_texture = gpu.new_texture(uvec2(2 * scene.env_map.height as u32, scene.env_map.height as u32), wgpu::TextureFormat::Rgba32Float, false);
         let env_map_col_cdf = gpu.new_texture(uvec2(2 * scene.env_map.height as u32, scene.env_map.height as u32), wgpu::TextureFormat::R32Float, false);
@@ -248,6 +286,7 @@ impl Context {
             .with_buffer(&env_map_rows_cdf.view_all(),      wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&mesh_light_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&media_ssbo.view_all(),            wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&ray_queue_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&env_map_texture,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&env_map_col_cdf,                 wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_texture(&env_map_pdf,                     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
@@ -259,7 +298,11 @@ impl Context {
         };
 
         let Some(screen) = resources.new_shader(std::path::Path::new("src/screen.wgsl"), gpu) else {
-            panic!("Unable to add shader at {SHADER_PATH}");
+            panic!("Unable to add screen shader");
+        };
+
+        let Some(raygen_shader) = resources.new_shader(std::path::Path::new("src/raygen.wgsl"), gpu) else {
+            panic!("Unable to add raygen shader");
         };
         
 
@@ -285,6 +328,10 @@ impl Context {
             
             raytrace_pipeline: None,
             raytrace_pipeline_layout,
+
+            raygen_pipeline: None,
+            raygen_shader,
+            
             screen_ssbo,
             bvh_ssbo,
             triangles_ssbo,
@@ -293,6 +340,8 @@ impl Context {
             primitive_data_ssbo,
             mesh_light_ssbo,
             media_ssbo,
+
+            ray_queue_ssbo,
 
             env_map_col_cdf,
             env_map_texture,
@@ -489,7 +538,19 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     gpu.queue.write_buffer(&ctx.frame_uniforms_buffer, 0, bytemuck::bytes_of(&ctx.frame_uniforms));
     
     let workgroup_size = [8, 8];
-    {
+    {   // ray gen
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        cpass.set_pipeline(&ctx.raygen_pipeline.as_ref().unwrap());
+        cpass.set_bind_group(0, &ctx.frame_uniforms_binding.raw, &[]);
+        cpass.set_bind_group(1, &ctx.rt_data_binding.raw, &[]);
+        cpass.dispatch_workgroups(
+            (ctx.frame_uniforms.res[0] + workgroup_size[0] - 1) / workgroup_size[0],
+            (ctx.frame_uniforms.res[1] + workgroup_size[1] - 1) / workgroup_size[1], 
+            1
+        );
+    }
+    
+    {   // megakernel
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&ctx.raytrace_pipeline.as_ref().unwrap());
         cpass.set_bind_group(0, &ctx.frame_uniforms_binding.raw, &[]);

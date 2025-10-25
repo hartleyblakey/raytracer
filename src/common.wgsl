@@ -1,9 +1,3 @@
-override NUM_TRIANGLES: u32 = 1u;
-override NUM_BVH_NODES: u32 = 1u;
-override NUM_PRIMITIVES: u32 = 1u;
-override NUM_VOLUMES: u32 = 2u;
-override NUM_MESH_LIGHTS: u32 = 0u;
-
 @group(0) @binding(0) var<uniform> globals : FrameUniforms;
 @group(1) @binding(0) var<storage, read_write> triangles :      array<Tri>;
 @group(1) @binding(1) var<storage, read_write> tri_exts :       array<TriExt>;
@@ -14,17 +8,10 @@ override NUM_MESH_LIGHTS: u32 = 0u;
 @group(1) @binding(6) var<storage, read_write> env_map_rows_cdf:array<f32>;
 @group(1) @binding(7) var<storage, read_write> mesh_lights:     array<MeshLight>;
 @group(1) @binding(8) var<storage, read_write> media:           array<GpuVolume>;
-@group(1) @binding(9) var                      env_map:         texture_2d<f32>;
-@group(1) @binding(10) var                     env_map_col_cdf: texture_2d<f32>;
-@group(1) @binding(11) var                     env_map_pdf:     texture_2d<f32>;
-
-
-// struct SceneGeometry {
-//     triangles: array<Tri, NUM_TRIANGLES>,
-//     tri_exts:  array<TriExt, NUM_TRIANGLES>,
-//     bvh:       array<BvhNode>
-// }
-
+@group(1) @binding(9) var<storage, read_write> ray_queue:       array<RayState>;
+@group(1) @binding(10) var                      env_map:         texture_2d<f32>;
+@group(1) @binding(11) var                     env_map_col_cdf: texture_2d<f32>;
+@group(1) @binding(12) var                     env_map_pdf:     texture_2d<f32>;
 
 const DEBUG: bool = true;
 
@@ -34,12 +21,24 @@ const FORWARD = vec3f(1.0, 0.0, 0.0);
 const UP = vec3f(0.0, 0.0, 1.0);
 const RIGHT = vec3f(0.0, -1.0, 0.0);
 
-const NUM_TEXCOORDS = 2;
+const NUM_TEXCOORDS: u32 = 2u;
 
-const EXPOSURE = 1.000;
 
 alias mat4x4f = mat4x4<f32>;
 
+
+struct RayState {
+    origin_max: vec4f,
+
+    direction_min: vec4f,
+   
+    throughput_flags: vec4f,
+
+    pixel: u32,
+    medium: u32,
+    depth: u32,
+    rng_state: u32,
+}
 
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
@@ -120,6 +119,25 @@ fn orthonormal_basis(n: vec3f) -> mat3x3<f32> {
     return mat3x3<f32>(b1, b2, n);
 }
 
+// MARK: Hit
+////////////// hit //////////////
+struct Hit {
+    t: f32,
+    idx: i32,
+    prim_idx: i32,
+    material: Material,
+    normal: vec3f,
+    bary: vec3f,
+    backface: bool,
+}
+
+// MARK: Ray
+////////////// ray //////////////
+struct Ray {
+    origin: vec3f,
+    dir: vec3f,
+    idir: vec3f,
+}
 
 struct MeshLight {
     prim: i32,

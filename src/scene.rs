@@ -102,17 +102,7 @@ pub struct GpuVertexExt {
     tangent_sign: f32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct GpuRayState {
-    origin_max: Vec4,
 
-    direction_min: Vec4,
-   
-    throughput_flags: Vec4,
-
-    pixel_medium_depth: Vec4,
-}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]

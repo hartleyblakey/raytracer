@@ -126,25 +126,7 @@ fn pop(stack: ptr<function, Stack>) -> u32 {
     return (*stack).data[(*stack).size];
 }
 
-// MARK: Hit
-////////////// hit //////////////
-struct Hit {
-    t: f32,
-    idx: i32,
-    prim_idx: i32,
-    material: Material,
-    normal: vec3f,
-    bary: vec3f,
-    backface: bool,
-}
 
-// MARK: Ray
-////////////// ray //////////////
-struct Ray {
-    origin: vec3f,
-    dir: vec3f,
-    idir: vec3f,
-}
 
 const TRI_EPS: f32 = 0.00000001;
 
@@ -921,47 +903,6 @@ fn ramp(x: f32) -> vec3f {
     return to_linear(clamp(magma_quintic(x), vec3f(0.0), vec3f(1.0)));
 }
 
-// MARK: camera_ray
-fn camera_ray(pixel: vec2u) -> Ray {
-    var ray: Ray;
-
-    ray.origin  = globals.scene.camera.origin;
-    let forward = globals.scene.camera.dir;
-    let fov_factor = (sin(globals.scene.camera.fovy / 2.0) / cos(globals.scene.camera.fovy / 2.0)) * 2.0;
-
-    let unreachable = vec3(0.0, 0.0, 1.0);
-    let right = normalize(cross(forward, unreachable));
-    let up    = normalize(cross(right,   forward));
-    var pixel_pos = ray.origin + forward;
-
-
-    let aa_pixel = vec2f(pixel) + vec2f(rand(), rand());
-    let aspect = f32(globals.res.x) / f32(globals.res.y);
-
-    pixel_pos += right * (aa_pixel.x / f32(globals.res.x) - 0.5) * fov_factor * aspect;
-    pixel_pos += up    * (0.5 - aa_pixel.y / f32(globals.res.y)) * fov_factor;
-    
-    // "bloom"
-    // let a = rand() * pi * 2.0;
-    // let m = rand();
-    // pixel_pos += right * aspect * cos(a) * pow(m, 150.0);
-    // pixel_pos += up             * sin(a) * pow(m, 150.0);
-
-    let aperture_radius = globals.scene.camera.aperture;
-    ray.dir  = normalize(pixel_pos - ray.origin);
-
-    let aperture = aperture_radius * rand_disk();
-
-    ray.origin += right * aperture.x;
-    ray.origin += up * aperture.y;
-
-    pixel_pos +=  ray.dir * (globals.scene.camera.focus - 1.0);
-    ray.dir  = normalize(pixel_pos - ray.origin);
-    
-    ray.idir = 1.0 / ray.dir;
-
-    return ray;
-}
 
 fn project_to_hemisphere(dir: vec3f, normal: vec3f) -> vec3f {
     if dot(dir, normal) < 0.0 {
@@ -1527,42 +1468,26 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 if (id.x < globals.res.x && id.y < globals.res.y) {
 
     var lighting   = vec3f(0.0);
-    var throughput = vec3f(1.0);
-
-    seed = hash21(vec2u(hash21(id.xy), globals.frame));
-    // spin the rng to improve the quality of the first samples
-    rand(); rand();
-
-    var NEE_PROB = 0.2;
-    var RR_PROB = 0.6;
-
-    var ray_volume = background_volume();
     
-    // constant, but no way to select() in const expressions apparently
+    var RR_PROB = 0.6;
+    
     var NUM_BOUNCES = 12;
     if DEBUG && globals.debug_mode != 0u {
         if globals.debug_mode != 9u {
             NUM_BOUNCES = 1;
         }
-        // if globals.debug_mode == 8u {
-        //     NUM_BOUNCES = 3;
-        // }
     }
 
-    // debug variable
-    var right = id.x > globals.res.x / 2u;
-    right = false;
+    let ray_state = ray_queue[id.y * globals.res.x + id.x];
 
-    if right {
-        NEE_PROB = 0.5;
-    } else {
-        NEE_PROB = 0.5;
-    }
+    var ray_volume = media[ray_state.medium];
+    var throughput = ray_state.throughput_flags.rgb;
+    seed = ray_state.rng_state;
 
-    var last_prim = -1;
-    var last_tri = -1;
-
-    var ray = camera_ray(id.xy);
+    var ray: Ray;
+    ray.dir = ray_state.direction_min.xyz;
+    ray.origin = ray_state.origin_max.xyz;
+    ray.idir = 1.0 / ray.dir;
 
     var bsdf_pdf = 1.0;
     var bsdf_mis_weight = 1.0;
@@ -1697,9 +1622,6 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
             lighting = rand_color() * evaluate_lambert(wo, hit.normal) * pi;
             seed = backup;
         }
-
-        last_prim = hit.prim_idx;
-        last_tri = hit.idx;
     }
 
     if DEBUG {
@@ -1718,11 +1640,11 @@ if (id.x < globals.res.x && id.y < globals.res.y) {
 
 
     if (globals.reject_hist > 0u) {
-        screen[id.x + globals.res.x * id.y] = vec4f(max(lighting, vec3f(0.0)), 1.0);
+        screen[ray_state.pixel] = vec4f(max(lighting, vec3f(0.0)), 1.0);
     } else {
         // clamp NaNs
         // screen[id.x + globals.res.x * id.y] += vec4f(lighting, 1.0);
-        screen[id.x + globals.res.x * id.y] += vec4f(max(lighting, vec3f(0.0)), 1.0);
+        screen[ray_state.pixel] += vec4f(max(lighting, vec3f(0.0)), 1.0);
     }
 }
 }
