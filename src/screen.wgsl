@@ -50,7 +50,14 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     let uv = p.xy / vec2f(f32(globals.res.x), f32(globals.res.y));
 
     // divide total by number of samples
-    var col = scr.rgb / scr.a;
+    var col = scr.rgb / max(scr.a, 1.0);
+
+    if DEBUG && globals.debug_mode == 8u {
+        col = scr.rgb;
+        if scr.r > 1.0 {
+            col = vec3f(1.0, 0.0, 0.0);
+        }
+    }
 
     if !DEBUG || globals.debug_mode == 0u {
         col = tonemap_pbr_neutral(col * globals.scene.camera.exposure);

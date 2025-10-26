@@ -10,13 +10,14 @@
 @group(1) @binding(8) var<storage, read_write> media:           array<GpuVolume>;
 
 @group(1) @binding(9) var<storage, read_write> in_ray_queue:    array<RayState>;
-@group(1) @binding(10) var<storage, read_write> out_ray_queue:   array<RayState>;
-@group(1) @binding(11) var<storage, read_write> vis_ray_queue:   array<VisRayState>;
-@group(1) @binding(12) var<storage, read_write> ray_queue_meta:  RayQueueMeta;
+@group(1) @binding(10) var<storage, read_write> out_ray_queue:  array<RayState>;
+@group(1) @binding(11) var<storage, read_write> vis_ray_queue:  array<VisRayState>;
+@group(1) @binding(12) var<storage, read_write> ray_hit_queue:  array<RayHit>;
+@group(1) @binding(13) var<storage, read_write> ray_queue_meta: RayQueueMeta;
 
-@group(1) @binding(13) var                      env_map:         texture_2d<f32>;
-@group(1) @binding(14) var                     env_map_col_cdf: texture_2d<f32>;
-@group(1) @binding(15) var                     env_map_pdf:     texture_2d<f32>;
+@group(1) @binding(14) var                      env_map:         texture_2d<f32>;
+@group(1) @binding(15) var                     env_map_col_cdf: texture_2d<f32>;
+@group(1) @binding(16) var                     env_map_pdf:     texture_2d<f32>;
 
 const DEBUG: bool = true;
 
@@ -34,6 +35,15 @@ struct RayQueueMeta {
     num_in_rays: atomic<u32>,
     num_out_rays: atomic<u32>,
     num_vis_rays: atomic<u32>,
+    in_rays_indirect: IndirectParams,
+    out_rays_indirect: IndirectParams,
+    vis_rays_indirect: IndirectParams,
+}
+
+struct IndirectParams {
+    x: u32,
+    y: u32,
+    z: u32,
 }
 
 struct RayState {
@@ -80,6 +90,19 @@ struct VisRayState {
     contrib_pixel: vec4f,
 }
 
+struct RayHit {
+    tri: i32,
+    prim: i32,
+    t: f32,
+    uv_bf: u32,
+}
+
+fn ray_hit_barycentric(rh: RayHit) -> vec3f {
+    let uuv = rh.uv_bf >> 1u;
+    let u = f32(uuv & ((1u << 15u) - 1u));
+    let v = f32(uuv >> 15u);
+    return vec3f((1.0 - u) - v, u, v);
+}
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
 fn hash21(in: vec2u) -> u32 {
@@ -310,20 +333,24 @@ struct Scene {
     num_directional_lights: u32,
     tlas_node_count:        u32,
     mesh_light_count:       u32,
-    pad1:                   u32,
-    pad2:                   u32,
+    node_count:             u32,
+    prim_count:             u32,
     pad3:                   u32,
 }
 
 struct FrameUniforms {
     scene:          Scene,
+
     res:            vec2u,
     frame:          u32,
     time:           f32,
+
     reject_hist:    u32,
-    node_count:     u32,
-    prim_count:     u32,
+    max_depth:     u32,
+    _pad:     u32,
     debug_mode:     u32,
+
+
 }
 
 

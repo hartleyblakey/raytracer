@@ -80,7 +80,7 @@ fn trace_bvh_shadow(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primit
 fn trace_shadow(ray: Ray, t: f32) -> bool {
     var stack: Stack;
     stack.size = 0u;
-    var node = bvh[globals.node_count];
+    var node = bvh[globals.scene.node_count];
     var best_t = t;
     if intersect_aabb(ray, node.aabb) > best_t {
         return false;
@@ -104,7 +104,7 @@ fn trace_shadow(ray: Ray, t: f32) -> bool {
             node = bvh[pop(&stack)];
         } else {
             // TLAS is tacked onto end of bvh:
-            let node_first = globals.node_count + node.first;
+            let node_first = globals.scene.node_count + node.first;
 
             // try ordering the nodes
             let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
@@ -142,21 +142,25 @@ fn trace_shadow(ray: Ray, t: f32) -> bool {
 
 
 @compute
-@workgroup_size(8, 8)
+@workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
-    let lid = id.y * globals.res.x + id.x;
-    if (lid > atomicLoad(&ray_queue_meta.num_vis_rays)) {
+    let lid = id.x;
+    if (lid >= atomicLoad(&ray_queue_meta.num_vis_rays)) {
         return;
     }
 
+    
+
     let state = vis_ray_queue[lid];
+
+    // screen[bitcast<u32>(state.contrib_pixel.w)] = vec4f(1.0, 0.0, 0.0, 1.0);
 
     var ray: Ray;
     ray.origin = state.origin_max.xyz;
     ray.dir = state.direction_min.xyz;
     ray.idir = 1.0 / ray.dir;
 
-    if !trace_shadow(ray, state.origin_max.w) {
+    if !trace_shadow(ray, state.origin_max.w - 0.001) {
         screen[bitcast<u32>(state.contrib_pixel.w)] += vec4f(state.contrib_pixel.rgb, 0.0);
     }
 }

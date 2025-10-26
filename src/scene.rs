@@ -61,7 +61,9 @@ pub struct GpuSceneUniform {
     pub num_directional_lights: u32,
     pub tlas_node_count: u32,
     pub mesh_light_count: u32,
-    _pad: [u32; 3],
+    pub node_count: u32,
+    pub prim_count: u32,
+    _pad:           u32,
 }
 
 
@@ -1215,7 +1217,9 @@ impl RenderScene {
             num_directional_lights: self.directional_lights.len() as u32,
             num_point_lights: self.point_lights.len() as u32,
             tri_count: self.tris.len() as u32,
-            _pad: [0; 3],
+            node_count: self.bvh_node_data.len() as u32,
+            prim_count: self.primitives.len() as u32,
+            _pad: 0,
             mesh_light_count: self.mesh_lights.len() as u32,
         }
     }
@@ -1503,7 +1507,7 @@ impl Aabb {
     }
 
     pub fn point(point: Vec3) -> Self {
-        const EPS: f32 = 0.000001;//0.00001;
+        const EPS: f32 = 0.0001;//0.00001;
 
         Self {
             data: [point.x - EPS, point.y - EPS, point.z - EPS, point.x + EPS, point.y + EPS, point.z + EPS]

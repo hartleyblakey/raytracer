@@ -59,10 +59,14 @@ fn sample_hit(hit: Hit) -> ExtSample {
         // this is what the guys website says, but it looks a little off to me
         let bt = normalize(sample.t_sign * cross(sample.vertex_normal, sample.tangent));
         // let bt = sample.bi_tangent;
-
+        
         sample.normal = normalize(
             normal_tangent.x * sample.tangent + normal_tangent.y * bt + normal_tangent.z * sample.vertex_normal
         );
+
+        if all(sample.vertex_normal == sample.tangent) {
+            sample.normal = sample.vertex_normal;
+        }
     }
 
     sample.albedo = hit.material.albedo_factor;
@@ -95,7 +99,7 @@ fn sample_hit(hit: Hit) -> ExtSample {
     if globals.debug_mode == 9u {
         sample.albedo = vec4(1.0);
     }
-    sample.metallic_roughness.g = 0.03;
+    // sample.metallic_roughness.g = 0.03;
 
     return sample;
 }
@@ -105,8 +109,6 @@ fn sample_hit(hit: Hit) -> ExtSample {
 
 
 // MARK: trace_bvh
-
-
 
 fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) -> i32 {
     var stack: Stack;
@@ -209,7 +211,7 @@ fn trace(ray: Ray) -> Hit {
     debug = 0.0;
     var stack: Stack;
     stack.size = 0u;
-    var node = bvh[globals.node_count];
+    var node = bvh[globals.scene.node_count];
     var best_t = 99999999.0;
     var closest_tri: i32 = -1;
     var closest_primitive: i32 = -1;
@@ -254,7 +256,7 @@ fn trace(ray: Ray) -> Hit {
             // order nodes based on distance
 
             // TLAS is tacked onto end of bvh:
-            let node_first = globals.node_count + node.first;
+            let node_first = globals.scene.node_count + node.first;
 
             // try ordering the nodes
             let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
@@ -305,7 +307,7 @@ fn trace(ray: Ray) -> Hit {
 fn trace_to_target(ray: Ray, prim: i32, tri: i32) -> Hit {
     var stack: Stack;
     stack.size = 0u;
-    var node = bvh[globals.node_count];
+    var node = bvh[globals.scene.node_count];
 
     var hit = trace_transformed_tri(ray, prim, tri);
     if hit.idx == -1 {
@@ -339,7 +341,7 @@ fn trace_to_target(ray: Ray, prim: i32, tri: i32) -> Hit {
             // order nodes based on distance
 
             // TLAS is tacked onto end of bvh:
-            let node_first = globals.node_count + node.first;
+            let node_first = globals.scene.node_count + node.first;
 
             // try ordering the nodes
             let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
@@ -1182,11 +1184,11 @@ fn sample_light_pdf(reference: vec3f, point: vec3f, prim: i32, tri: i32) -> f32 
 
 
 @compute
-@workgroup_size(8, 8)
+@workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
-    let lid = id.y * globals.res.x + id.x;
+    let lid = id.x;
 
-    if (lid > atomicLoad(&ray_queue_meta.num_in_rays)) {
+    if (lid >= atomicLoad(&ray_queue_meta.num_in_rays)) {
         return;
     }
 
@@ -1210,12 +1212,18 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
     if DEBUG && globals.debug_mode == 3u {
         add_contrib(magma_quintic(debug / 256.0), ray_state.pixel);
+        on_kill(ray_state.pixel);
         return;
     }
 
+    if DEBUG && globals.debug_mode == 8u && flags.depth > 0u {
+        // add_contrib(vec3f(debug / 2048.0), ray_state.pixel);
+        screen[ray_state.pixel] = max(screen[ray_state.pixel], vec4f(vec3f(debug / 512.0), 1.0));
+        // on_kill(ray_state.pixel);
+        // return;
+    }
 
     // MARK: - Shade
-
     var lighting   = vec3f(0.0);
 
     if hit.idx == -1 {
@@ -1224,11 +1232,11 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
         if flags.depth > 0u {
             bsdf_mis_weight = mis_power_heuristic(ray_state.last_pdf, nee_pdf, 1.0, 1.0);
         }
-        
 
         lighting += throughput * bsdf_mis_weight * evaluate_env_map(ray.dir).rgb;
         
-        add_contrib(lighting, ray_state.pixel);
+        if globals.debug_mode != 8u {add_contrib(lighting, ray_state.pixel);}
+        screen[ray_state.pixel].w += 1.0;
         return;
     }
 
@@ -1274,13 +1282,14 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
             let nee_bsdf = evaluate_bsdf(light.wi, wo, hit_ior, ray_volume.ior, sample);
 
             vis_ray_state.contrib_pixel = vec4f(
-                throughput * nee_bsdf * max(dot(light.wi, sample.normal), 0.0) * light.contrib * nee_mis_weight / light.pdf,
+                throughput * nee_bsdf * abs(dot(light.wi, sample.normal)) * light.contrib * nee_mis_weight / light.pdf,
                 bitcast<f32>(ray_state.pixel)
             );
         } else {
             cast_vis_ray = false;
         }
     }
+
 
     var rr_prob = clamp(1.0 - max(throughput.x, max(throughput.y, throughput.z)), 0.0, 0.95);
     if flags.depth < 2u {
@@ -1289,6 +1298,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
         rr_prob = max(rr_prob, 0.2);
     }
     if rand() < rr_prob {
+        on_kill(ray_state.pixel);
         return;
     } else {
         throughput /= (1.0 - rr_prob);
@@ -1338,10 +1348,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
         lighting = rand_color() * evaluate_lambert(wo, hit.normal) * pi;
         seed = backup;
     }
+
+    if DEBUG && globals.debug_mode == 8u {
+        cast_vis_ray = false;
+        throughput = vec3f(1.0);
+    }
     
-
-    add_contrib(lighting, ray_state.pixel);
-
     ray_state.direction_min = vec4f(ray.dir, 0.0);
     ray_state.origin_max = vec4f(ray.origin, 1e30);
     ray_state.last_pdf = bsdf_pdf;
@@ -1352,6 +1364,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     flags.depth += 1u;
     set_flags(&ray_state, flags);
 
+
+
+
     {
         let idx = atomicAdd(&ray_queue_meta.num_out_rays, 1u);
         out_ray_queue[idx] = ray_state;
@@ -1361,10 +1376,17 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
         let idx = atomicAdd(&ray_queue_meta.num_vis_rays, 1u);
         vis_ray_queue[idx] = vis_ray_state;
     }
+
+
+    add_contrib(lighting, ray_state.pixel);
+
+    if flags.depth >= globals.max_depth {
+        on_kill(ray_state.pixel);
+    }
 }
 
 fn add_contrib(lighting: vec3f, pixel: u32) {
-    screen[pixel] += vec4f(max(lighting, vec3f(0.0)), 1.0);
+    screen[pixel] += vec4f(max(lighting, vec3f(0.0)), 0.0);
     // var lighting = _lighting;
     // if (debug < 0.0) {
     //     lighting = vec3f(1.0, 1.0, 0.0);
@@ -1377,6 +1399,10 @@ fn add_contrib(lighting: vec3f, pixel: u32) {
     //     // screen[id.x + globals.res.x * id.y] += vec4f(lighting, 1.0);
     //     screen[pixel] += vec4f(max(lighting, vec3f(0.0)), 1.0);
     // }
+}
+
+fn on_kill(pixel: u32) {
+    screen[pixel].w += 1.0;
 }
 
 

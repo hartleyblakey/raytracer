@@ -21,6 +21,7 @@
         "multisampled",
         "multisampling",
         "raygen",
+        "rayshade",
         "Raytracer",
         "Raytraces",
         "rayvis",
