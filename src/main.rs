@@ -197,6 +197,7 @@ impl Context {
         self.screen_ssbo = gpu.new_storage_buffer(n * 4 * 4);
         self.ray_ab_ssbo = gpu.new_storage_buffer(self.ray_buf_size * 2);
         self.vis_ray_ssbo = gpu.new_storage_buffer(n * size_of::<GpuRayState>() as u64);
+        self.hit_ssbo = gpu.new_storage_buffer(n * size_of::<GpuRayHit>() as u64);
         self.update_rt_binding(gpu);
     }
 
@@ -645,26 +646,14 @@ impl Context {
 }
 
 fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
-    let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next surface texture");
-    let surface_view = gpu.get_surface_view(&surface_texture);
 
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: None,
     });
-    
-    let rpass_desc = wgpu::RenderPassDescriptor {
-        label: None,
-        color_attachments: &[Some(surface_view.attachment())],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-    };
 
     ctx.frame_uniforms.frame += 1;
     ctx.frame_uniforms.time += dt; // hack
     ctx.frame_uniforms.scene.camera = ctx.scene.cameras[0].to_gpu();
-
-
     
     if ctx.check_recompile_shader(gpu) || ctx.scene.cameras[0].check_moved() {
         ctx.frame_uniforms.reject_hist = 1;
@@ -709,8 +698,12 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
             cpass.set_pipeline(&ctx.swap_pipeline.as_ref().unwrap());
             cpass.dispatch_workgroups(1, 1, 1);
 
-            // ray trace
+            // extension trace
             cpass.set_pipeline(&ctx.raytrace_pipeline.as_ref().unwrap());
+            cpass.dispatch_workgroups_indirect(&ctx.queue_meta_ssbo, GpuWavefrontQueueParams::IN_OFF);
+
+            // shade
+            cpass.set_pipeline(&ctx.rayshade_pipeline.as_ref().unwrap());
             cpass.dispatch_workgroups_indirect(&ctx.queue_meta_ssbo, GpuWavefrontQueueParams::IN_OFF);
 
             // visibility trace
@@ -720,6 +713,17 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
             }
         }
     }
+
+    let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next surface texture");
+    let surface_view = gpu.get_surface_view(&surface_texture);
+
+    let rpass_desc = wgpu::RenderPassDescriptor {
+        label: None,
+        color_attachments: &[Some(surface_view.attachment())],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    };
 
     {   // copy framebuffer to screen and tonemap for display
         let mut rpass = encoder.begin_render_pass(&rpass_desc);

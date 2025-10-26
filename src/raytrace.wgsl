@@ -1,3 +1,202 @@
+#import "common.wgsl"
+
+var<private> debug: f32;
+
+// MARK: trace_bvh
+
+fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) -> i32 {
+    var stack: Stack;
+    stack.size = 0u;
+    var node = bvh[root];
+    var best_t = *t_max;
+    var best_i: i32 = -1;
+    if intersect_aabb(ray, node.aabb) >= best_t {
+        return best_i;
+    }
+    
+    while (true) {
+        // debug = max(debug, f32(stack.size + 1u));
+        // visualize bvh steps
+        debug += 0.5;
+
+
+        if node.count > 0u {
+
+            // if debug > 0.0 {
+            //     return i32(node.first);
+            // }
+
+            // intersect triangles of node
+            for (var i = node.first; i < node.first + node.count; i++) {
+                let t = intersect(ray, triangles[i]);
+                if t >= 0.0 && t < best_t {
+                    if (prim.material.alpha_settings & 3u) != 0u {
+                        let hit = intersect_full(ray, i32(i));
+                        var ext = tri_exts[i];
+
+                        var texcoord = vec2f(0.0);
+
+                        texcoord += hit.bary.x * ext.vertices[0].texcoords[prim.material.albedo_texcoord];
+                        texcoord += hit.bary.y * ext.vertices[1].texcoords[prim.material.albedo_texcoord];
+                        texcoord += hit.bary.z * ext.vertices[2].texcoords[prim.material.albedo_texcoord];
+
+                        let alpha = sample_texture(prim.material.albedo, texcoord).a;
+
+                        if (prim.material.alpha_settings & 3u) == 1u {
+                            // MASK
+                            if alpha < f32(prim.material.alpha_settings >> 16u) / f32(1u << 16u) {
+                                continue;
+                            }
+                        } else {
+                            // BLEND
+                            if rand() > alpha * alpha {
+                                continue;
+                            }
+                        }
+                    }
+                    best_i = i32(i);
+                    best_t = t;
+                }
+            }
+            if stack.size == 0u {
+                break;
+            }
+            node = bvh[pop(&stack)];
+        } else {
+            // avoid pushing nodes onto the stack where possible
+            // order nodes based on distance
+
+            // try ordering the nodes
+            var left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
+            var right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
+    
+            if (left > best_t) && (right > best_t) {
+                if stack.size == 0u {
+                    break;
+                }
+                node = bvh[pop(&stack)];
+            } else if (left > best_t) {
+                node = bvh[node.first + 1u];
+            } else if (right > best_t) {
+                node = bvh[node.first + 0u];
+            } else if right > left {
+                // push(&stack, node.first + 0u);
+                // node = bvh[node.first + 1u];
+
+                push(&stack, node.first + 1u);
+                node = bvh[node.first + 0u];
+            } else {
+                // push(&stack, node.first + 1u);
+                // node = bvh[node.first + 0u];
+
+                push(&stack, node.first + 0u);
+                node = bvh[node.first + 1u];
+            } 
+
+        }
+    }
+    *t_max = best_t;
+    return best_i;
+}
+
+
+
+fn trace(ray: Ray) -> Hit {
+    debug = 0.0;
+    var stack: Stack;
+    stack.size = 0u;
+    var node = bvh[globals.scene.node_count];
+    var best_t = 99999999.0;
+    var closest_tri: i32 = -1;
+    var closest_primitive: i32 = -1;
+    if intersect_aabb(ray, node.aabb) > best_t {
+        return hit_default();
+    }
+    var tlas_steps = 0.0;
+    while (true) {
+        // debug = max(debug, f32(stack.size + 1u));
+        // visualize bvh steps
+        debug += 1.0;
+
+        if node.count > 0u {
+            tlas_steps += 1.0;
+            // intersect BLAS(s) of node
+            for (var i = node.first; i < node.first + node.count; i++) {
+                let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
+                let t_ray = transform_ray(ray, primitives[i].inv_transform);
+                // debug += 1.0;
+                var new_t = best_t * scale_factor;
+                let new_tri = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
+                
+
+                if new_tri >= 0 {
+                    best_t = new_t / scale_factor;
+                    closest_tri = new_tri;
+                    closest_primitive = i32(i);
+
+                    // var hit = hit_default();
+                    // hit.prim_idx = i32(i);
+                    // hit.idx = i32(new_tri);
+                    // hit.normal = -ray.dir;
+                    // return hit;
+                }
+            }
+            if stack.size == 0u {
+                break;
+            }
+            node = bvh[pop(&stack)];
+        } else {
+            // avoid pushing nodes onto the stack where possible
+            // order nodes based on distance
+
+            // TLAS is tacked onto end of bvh:
+            let node_first = globals.scene.node_count + node.first;
+
+            // try ordering the nodes
+            let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
+            let right = intersect_aabb(ray, bvh[node_first + 1u].aabb);
+    
+            if (left > best_t) && (right > best_t) {
+                if stack.size == 0u {
+                    break;
+                }
+                node = bvh[pop(&stack)];
+            } else if (left > best_t) {
+                node = bvh[node_first + 1u];
+            } else if (right > best_t) {
+                node = bvh[node_first + 0u];
+            } else if right < left {
+                // push(&stack, node_first + 1u);
+                // node = bvh[node_first + 0u];
+
+                push(&stack, node_first + 0u);
+                node = bvh[node_first + 1u];
+
+            } else {
+                // push(&stack, node_first + 0u);
+                // node = bvh[node_first + 1u];
+
+                
+                push(&stack, node_first + 1u);
+                node = bvh[node_first + 0u];
+            }
+
+        }
+    }
+
+    let t_ray_final = transform_ray(ray, primitives[closest_primitive].inv_transform);
+    var hit = intersect_full(t_ray_final, closest_tri);
+
+    // transform the hit back to world space
+    hit.t = best_t;
+    hit.normal = transform_normal(hit.normal, primitives[closest_primitive].inv_transform);
+    hit.prim_idx = closest_primitive;
+    hit.material = primitives[closest_primitive].material;
+    return hit;
+
+}
+
+
 @compute
 @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
@@ -8,194 +207,26 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     }
 
     var ray_state = in_ray_queue[lid];
-
-    var ray_volume = media[ray_state.medium];
-    var throughput = ray_state.throughput_flags.rgb;
     seed = ray_state.rng_state;
-
-    var flags = get_flags(ray_state);
 
     var ray: Ray;
     ray.dir = ray_state.direction_min.xyz;
     ray.origin = ray_state.origin_max.xyz;
     ray.idir = 1.0 / ray.dir;
-
-    var bsdf_mis_weight = 1.0;
     
     let hit = trace(ray);
-    let point = ray.origin + ray.dir * hit.t;
 
-    if DEBUG && globals.debug_mode == 3u {
-        add_contrib(magma_quintic(debug / 256.0), ray_state.pixel);
-        on_kill(ray_state.pixel);
-        return;
-    }
+    // if DEBUG && globals.debug_mode == 3u {
+    //     screen[ray_state.pixel] += vec4f(vec3f(magma_quintic(debug / 256.0), ray_state.pixel), 0.0);
+    //     // on_kill(ray_state.pixel);
+    //     return;
+    // }
 
-    if DEBUG && globals.debug_mode == 8u && flags.depth > 0u {
-        // add_contrib(vec3f(debug / 2048.0), ray_state.pixel);
-        screen[ray_state.pixel] = max(screen[ray_state.pixel], vec4f(vec3f(debug / 512.0), 1.0));
-        // on_kill(ray_state.pixel);
-        // return;
-    }
-
-    // MARK: - Shade
-    var lighting   = vec3f(0.0);
-
-    if hit.idx == -1 {
-        let nee_pdf = sample_light_pdf(ray.origin, point, hit.prim_idx, hit.idx);
-
-        if flags.depth > 0u {
-            bsdf_mis_weight = mis_power_heuristic(ray_state.last_pdf, nee_pdf, 1.0, 1.0);
-        }
-
-        lighting += throughput * bsdf_mis_weight * evaluate_env_map(ray.dir).rgb;
-        
-        if globals.debug_mode != 8u {add_contrib(lighting, ray_state.pixel);}
-        screen[ray_state.pixel].w += 1.0;
-        return;
-    }
-
-    let sample = sample_hit(hit);
-
-    var hit_ior = media[hit.material.volume].ior;
-    if hit.backface {
-        hit_ior = background_volume().ior;
-    }
-
-    if hit_ior == ray_volume.ior {
-        hit_ior = 1.6 * ray_volume.ior;
-    }
-
-    if globals.debug_mode != 9u {
-        throughput *= exp(-ray_volume.absorption * hit.t);
-    }
-
-    let nee_pdf = sample_light_pdf(ray.origin, point, hit.prim_idx, hit.idx);
-
-    bsdf_mis_weight = mis_power_heuristic(ray_state.last_pdf, nee_pdf, 1.0, 1.0);
+    var hit_state: RayHit;
+    hit_state.prim = hit.prim_idx;
+    hit_state.tri = hit.idx;
+    hit_state.t = hit.t;
+    hit_state.uv_bf = 0u; // UNIMPLEMENTED
     
-    if nee_pdf != 0.0 {
-        lighting += throughput * sample.emissive * bsdf_mis_weight;
-    }
-    
-    let wo = -ray.dir;
-
-    // sample NEE shadow ray
-    
-    var vis_ray_state: VisRayState;
-    var cast_vis_ray = true;
-    {
-        let light = sample_light(ray.origin + ray.dir * hit.t);
-
-        if light.pdf > 0.0 {
-            vis_ray_state.origin_max = vec4f(ray.origin + ray.dir * hit.t + light.wi * 0.001, light.t_max);
-            vis_ray_state.direction_min = vec4f(light.wi, 0.001);
-
-
-            let nee_ray_bsdf_pdf = sample_bsdf_pdf(light.wi, wo, hit_ior, ray_volume.ior, sample);
-            let nee_mis_weight = mis_power_heuristic(light.pdf, nee_ray_bsdf_pdf, 1.0, 1.0);
-            let nee_bsdf = evaluate_bsdf(light.wi, wo, hit_ior, ray_volume.ior, sample);
-
-            vis_ray_state.contrib_pixel = vec4f(
-                throughput * nee_bsdf * abs(dot(light.wi, sample.normal)) * light.contrib * nee_mis_weight / light.pdf,
-                bitcast<f32>(ray_state.pixel)
-            );
-        } else {
-            cast_vis_ray = false;
-        }
-    }
-
-
-    var rr_prob = clamp(1.0 - max(throughput.x, max(throughput.y, throughput.z)), 0.0, 0.95);
-    if flags.depth < 2u {
-        rr_prob = 0.0;
-    } else {
-        rr_prob = max(rr_prob, 0.2);
-    }
-    if rand() < rr_prob {
-        on_kill(ray_state.pixel);
-        return;
-    } else {
-        throughput /= (1.0 - rr_prob);
-    }
-
-    // sample BSDF continuation
-    var bsdf_pdf: f32;
-    var bsdf: vec3f;
-    var wi = sample_bsdf(wo, ray_volume.ior, hit_ior, sample, &lighting, &bsdf_pdf, &bsdf);
-
-    if bsdf_pdf > 0.0 {
-        throughput /= bsdf_pdf;
-    } else {
-        throughput *= 0.0;
-    }
-
-    throughput *= bsdf * abs(dot(wi, sample.normal));
-    
-    ray.origin += ray.dir * hit.t;
-    ray.dir = wi;
-    ray.idir = 1.0 / ray.dir;
-
-    var out_medium = ray_state.medium;
-    
-    if dot(wi, sample.normal) > 0.0 {
-        ray.origin += hit.normal * 0.001;
-    } else {
-        ray.origin -= hit.normal * 0.001;
-        if hit.backface {
-            out_medium = 0u;
-        } else {
-            out_medium = hit.material.volume;
-        }
-    }
-    if globals.debug_mode == 6u {
-        let backup = seed;
-        seed = bitcast<u32>(hit.prim_idx) + 777u;
-        rand(); rand();
-        lighting = rand_color() * evaluate_lambert(wo, sample.normal) * pi;
-        seed = backup;
-    }
-
-    if globals.debug_mode == 7u {
-        let backup = seed;
-        seed = bitcast<u32>(hit.idx) + 777u;
-        rand(); rand();
-        lighting = rand_color() * evaluate_lambert(wo, hit.normal) * pi;
-        seed = backup;
-    }
-
-    if DEBUG && globals.debug_mode == 8u {
-        cast_vis_ray = false;
-        throughput = vec3f(1.0);
-    }
-    
-    ray_state.direction_min = vec4f(ray.dir, 0.0);
-    ray_state.origin_max = vec4f(ray.origin, 1e30);
-    ray_state.last_pdf = bsdf_pdf;
-    ray_state.medium = out_medium;
-    ray_state.rng_state = seed;
-    ray_state.throughput_flags = vec4f(throughput, 0.0);
-
-    flags.depth += 1u;
-    set_flags(&ray_state, flags);
-
-
-
-
-    {
-        let idx = atomicAdd(&ray_queue_meta.num_out_rays, 1u);
-        out_ray_queue[idx] = ray_state;
-    }
-
-    if cast_vis_ray {
-        let idx = atomicAdd(&ray_queue_meta.num_vis_rays, 1u);
-        vis_ray_queue[idx] = vis_ray_state;
-    }
-
-
-    add_contrib(lighting, ray_state.pixel);
-
-    if flags.depth >= globals.max_depth {
-        on_kill(ray_state.pixel);
-    }
+    ray_hit_queue[lid] = hit_state;
 }

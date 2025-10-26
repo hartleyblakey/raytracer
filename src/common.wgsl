@@ -97,13 +97,6 @@ struct RayHit {
     uv_bf: u32,
 }
 
-fn ray_hit_barycentric(rh: RayHit) -> vec3f {
-    let uuv = rh.uv_bf >> 1u;
-    let u = f32(uuv & ((1u << 15u) - 1u));
-    let v = f32(uuv >> 15u);
-    return vec3f((1.0 - u) - v, u, v);
-}
-
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
 fn hash21(in: vec2u) -> u32 {
     var p = in;
