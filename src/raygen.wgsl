@@ -52,6 +52,15 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
     let lid = id.y * globals.res.x + id.x;
 
+    // clear screen
+    if globals.reject_hist == 1u {
+        screen[lid] = vec4f(0.0);
+    }
+
+    if lid == 0u {
+        atomicStore(&ray_queue_meta.num_out_rays, globals.res.x * globals.res.y);
+    }
+
     seed = hash21(vec2u(hash21(id.xy), globals.frame));
     // spin the rng to improve the quality of the first samples
     rand(); rand();
@@ -62,11 +71,11 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
     state.direction_min = vec4f(ray.dir, 0.0);
     state.origin_max = vec4f(ray.origin, 1e30);
-    state.depth = 0u;
+    state.last_pdf = 9999999.0; // delta ish
     state.medium = 0u; // background
     state.pixel = lid;
     state.throughput_flags = vec4f(1.0, 1.0, 1.0, bitcast<f32>(0u));
     state.rng_state = seed;
 
-    ray_queue[lid] = state;
+    out_ray_queue[lid] = state;
 }

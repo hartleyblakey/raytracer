@@ -23,6 +23,7 @@
         "raygen",
         "Raytracer",
         "Raytraces",
+        "rayvis",
         "renderable",
         "rgba",
         "rmax",

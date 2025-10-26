@@ -8,10 +8,15 @@
 @group(1) @binding(6) var<storage, read_write> env_map_rows_cdf:array<f32>;
 @group(1) @binding(7) var<storage, read_write> mesh_lights:     array<MeshLight>;
 @group(1) @binding(8) var<storage, read_write> media:           array<GpuVolume>;
-@group(1) @binding(9) var<storage, read_write> ray_queue:       array<RayState>;
-@group(1) @binding(10) var                      env_map:         texture_2d<f32>;
-@group(1) @binding(11) var                     env_map_col_cdf: texture_2d<f32>;
-@group(1) @binding(12) var                     env_map_pdf:     texture_2d<f32>;
+
+@group(1) @binding(9) var<storage, read_write> in_ray_queue:    array<RayState>;
+@group(1) @binding(10) var<storage, read_write> out_ray_queue:   array<RayState>;
+@group(1) @binding(11) var<storage, read_write> vis_ray_queue:   array<VisRayState>;
+@group(1) @binding(12) var<storage, read_write> ray_queue_meta:  RayQueueMeta;
+
+@group(1) @binding(13) var                      env_map:         texture_2d<f32>;
+@group(1) @binding(14) var                     env_map_col_cdf: texture_2d<f32>;
+@group(1) @binding(15) var                     env_map_pdf:     texture_2d<f32>;
 
 const DEBUG: bool = true;
 
@@ -23,9 +28,13 @@ const RIGHT = vec3f(0.0, -1.0, 0.0);
 
 const NUM_TEXCOORDS: u32 = 2u;
 
-
 alias mat4x4f = mat4x4<f32>;
 
+struct RayQueueMeta {
+    num_in_rays: atomic<u32>,
+    num_out_rays: atomic<u32>,
+    num_vis_rays: atomic<u32>,
+}
 
 struct RayState {
     origin_max: vec4f,
@@ -36,8 +45,39 @@ struct RayState {
 
     pixel: u32,
     medium: u32,
-    depth: u32,
+    last_pdf: f32,
     rng_state: u32,
+}
+
+struct RayFlags {
+    // Least Significant
+
+    // 12
+    depth: u32, 
+
+
+    // Most Significant
+}
+
+fn get_flags(state: RayState) -> RayFlags {
+    let f = bitcast<u32>(state.throughput_flags.w);
+    let depth = f & 0xFFFu;
+
+    return RayFlags(depth);
+}
+
+fn set_flags(state: ptr<function, RayState>, flags: RayFlags) {
+    var f = 0u;
+    f |= flags.depth << 0u;
+    (*state).throughput_flags = vec4f((*state).throughput_flags.xyz, bitcast<f32>(f));
+}
+
+struct VisRayState {
+    origin_max: vec4f,
+
+    direction_min: vec4f,
+   
+    contrib_pixel: vec4f,
 }
 
 
@@ -479,4 +519,148 @@ fn tri_ext_interpolate(tri: ptr<function, TriExt>, bary: vec3f) -> ExtSample {
     res.tangent = normalize(res.tangent);
 
     return res;
+}
+
+fn transform_dir(x: vec3f, t: mat4x4f) -> vec3f {
+    return (t * vec4f(x.x, x.y, x.z, 0.0)).xyz;
+}
+
+fn transform_pos(x: vec3f, t: mat4x4f) -> vec3f {
+    return (t * vec4f(x.x, x.y, x.z, 1.0)).xyz;
+}
+
+fn transform_normal(x: vec3f, t_inv: mat4x4f) -> vec3f {
+    return normalize(transform_dir(x, transpose(t_inv)));
+}
+
+fn transform_ray(x: Ray, it: mat4x4f) -> Ray {
+    var r = x;
+    r.dir = normalize(transform_dir(r.dir, it));
+    r.origin = transform_pos(r.origin, it);
+    r.idir = 1.0 / r.dir;
+    return r;
+}
+
+//
+// MARK: Stack
+////////////// stack //////////////
+struct Stack {
+    data: array<u32, 23>,
+    size: u32,
+}
+fn push(stack: ptr<function, Stack>, val: u32) {
+    if ((*stack).size < 23u) {
+        (*stack).data[(*stack).size] = val;
+        (*stack).size += 1u;
+    } else {
+        
+    }
+}
+fn pop(stack: ptr<function, Stack>) -> u32 {
+    (*stack).size -= 1u;
+    return (*stack).data[(*stack).size];
+}
+
+
+
+const TRI_EPS: f32 = 0.00000001;
+
+// https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
+// epsilon stolen from https://www.shadertoy.com/view/wlsfRs
+fn intersect (ray: Ray, tri: Tri) -> f32 {
+    let edge1 = tri.d1.xyz - tri.d0.xyz;
+    let edge2 = tri.d2.xyz - tri.d0.xyz;
+    let h = cross( ray.dir, edge2 );
+    let a = dot( edge1, h );
+    if (a > -TRI_EPS && a < TRI_EPS) {
+        return -1.0;
+    }// ray parallel to triangle
+    let f = 1.0 / a;
+    let s = ray.origin - tri.d0.xyz;
+    let u = f * dot( s, h );
+    if (u < 0.0 || u > 1.0) {
+        return -1.0;
+    }
+    let q = cross( s, edge1 );
+    let v = f * dot( ray.dir, q );
+    if (v < 0.0 || u + v > 1.0) {
+        return -1.0;
+    }
+    let t = f * dot( edge2, q );
+    if (t > TRI_EPS) {
+        return t;
+    } else {
+        return -1.0;
+    }
+}
+
+
+
+fn hit_default() -> Hit {
+    return Hit(0.0, -1, -1, DEFAULT_MATERIAL, vec3f(0.0, 0.0, 1.0), vec3f(0.333, 0.333, 0.333), false);
+}
+
+// modified version of intersect() to return more info
+//     from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
+fn intersect_full(ray: Ray, idx: i32) -> Hit {
+    let tri = triangles[idx];
+    var hit = hit_default();
+
+    let edge1 = tri.d1.xyz - tri.d0.xyz;
+    let edge2 = tri.d2.xyz - tri.d0.xyz;
+
+    hit.normal = normalize(cross(edge1, edge2));
+    if dot(hit.normal, ray.dir) > 0.0 {
+        hit.backface = true;
+    }
+    hit.normal *= -sign11(dot(hit.normal, ray.dir));
+
+    let h = cross( ray.dir, edge2 );
+    let a = dot( edge1, h );
+    if (a > -TRI_EPS && a < TRI_EPS) {
+        return hit;
+    }// ray parallel to triangle
+    let f = 1.0 / a;
+    let s = ray.origin - tri.d0.xyz;
+    let u = f * dot( s, h );
+    if (u < 0.0 || u > 1.0) {
+        return hit;
+    }   // miss?
+    let q = cross( s, edge1 );
+    let v = f * dot( ray.dir, q );
+    if (v < 0.0 || u + v > 1.0) {
+        return hit;
+    }   // miss?
+    let t = f * dot( edge2, q );
+    if (t <= TRI_EPS) {
+        return hit;
+    }   // miss?
+
+
+    hit.idx = idx;
+    hit.t = t;
+    hit.bary = vec3f((1.0 - u) - v, u, v);
+    return hit;
+}
+
+// from https://gist.github.com/DomNomNom/46bb1ce47f68d255fd5d
+fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
+
+    let bmin = aabb_min(aabb);
+    let bmax = aabb_max(aabb);
+
+    let rmin = (bmin - ray.origin) * ray.idir;
+    let rmax = (bmax - ray.origin) * ray.idir;
+
+    let tmin = min(rmin, rmax);
+    let tmax = max(rmin, rmax);
+
+    let t0 = max(tmin.x, max(tmin.y, tmin.z));
+    let t1 = min(tmax.x, min(tmax.y, tmax.z));
+
+    if (t0 > t1 || t1 < 0.0) {
+        return 1e30;
+    }
+
+    return max(t0, 0.0);
 }

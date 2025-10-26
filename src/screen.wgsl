@@ -52,7 +52,7 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     // divide total by number of samples
     var col = scr.rgb / scr.a;
 
-    if !(DEBUG && globals.debug_mode != 0u) {
+    if !DEBUG || globals.debug_mode == 0u {
         col = tonemap_pbr_neutral(col * globals.scene.camera.exposure);
     }
     
