@@ -196,7 +196,6 @@ fn trace(ray: Ray) -> Hit {
 
 }
 
-
 @compute
 @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) id: vec3u) {
