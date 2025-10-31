@@ -52,10 +52,15 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
     let lid = id.y * globals.res.x + id.x;
 
-    // clear screen
+    var patch_size = 512u;
+
+        // clear screen
     if globals.reject_hist == 1u {
         screen[lid] = vec4f(0.0);
+        patch_size = globals.res.x * globals.res.y;
     }
+
+
 
     if lid == 0u {
         atomicStore(&ray_queue_meta.num_out_rays, globals.res.x * globals.res.y);

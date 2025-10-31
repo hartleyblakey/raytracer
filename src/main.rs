@@ -1,9 +1,7 @@
-use std::{borrow::Cow, mem::offset_of, sync::{Arc, Mutex}};
+use std::{mem::offset_of, sync::{Arc, Mutex}};
 
-use gltf::json::path;
 #[cfg(not(target_arch = "wasm32"))]
 use hb_gpu::winit;
-use pollster::FutureExt;
 
 #[cfg(target_arch = "wasm32")]
 use js_sys::ArrayBuffer;
@@ -26,7 +24,7 @@ use winit::{
 use hb_gpu::{fetch_bytes, glam::{self, Vec4}, new_window, prelude::*, wgpu::{self, util::align_to}, winit::{application::ApplicationHandler, window::Window}};
 
 use glam::uvec2;
-use web_time::{Instant, SystemTime};
+use web_time::{Instant};
 
 mod input;
 use input::*;
@@ -85,7 +83,6 @@ struct GpuWavefrontQueueParams {
 
 impl GpuWavefrontQueueParams {
     const IN_OFF: u64 = offset_of!(GpuWavefrontQueueParams,in_ray_indirect) as u64;
-    const OUT_OFF: u64 = offset_of!(GpuWavefrontQueueParams,out_ray_indirect) as u64;
     const VIS_OFF: u64 = offset_of!(GpuWavefrontQueueParams,vis_ray_indirect) as u64;
 }
 
@@ -405,7 +402,9 @@ impl Context {
             .with_texture(&env_map_pdf,                     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .finish(&mut resources);
 
-        let Some(raytrace_shader) = resources.new_shader(std::path::Path::new("src/raytrace.wgsl"), gpu) else {
+        let shader_dir = std::path::PathBuf::from(SHADER_DIR);
+        
+        let Some(raytrace_shader) = resources.new_shader(&shader_dir.join("raytrace.wgsl"), gpu) else {
             panic!("Unable to add ray extend shader");
         };
 
@@ -988,7 +987,7 @@ impl ApplicationHandler for AppShell {
                     _ => (),
                 }
 
-                // hide the curson when moving the camera
+                // hide the cursor when moving the camera
                 // and reset it back when released
                 if input.rmb {
                     gpu.window.set_cursor_visible(false);

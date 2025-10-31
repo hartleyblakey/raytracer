@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashMap, f32::consts::PI};
+use std::{cmp::Ordering, collections::HashMap, f32::consts::PI, sync::{Arc, Mutex}, time::{Duration, Instant}};
 
 use crate::glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use image::GenericImageView;
@@ -570,7 +570,7 @@ impl<'a> mikktspace::Geometry for PrimitiveGeometry<'a> {
         // https://github.com/KhronosGroup/glTF/issues/2056
         // GLTF (and me i guess) use a texture coordinate system where (0, 0) is the bottom left
         // mikktspace and blender use (0, 0) as the upper left
-        // this is the same as flipping the sign of the bitangent for generated meshes, which
+        // this is the same as flipping the sign of the bi-tangent for generated meshes, which
         // is the fix most other implementations appear to use
         tc[1] = 1.0 - tc[1];
         tc
@@ -597,6 +597,10 @@ fn unpack_rgba8(x: u32) -> Vec4 {
     );
 }
 
+
+
+
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct MeshLight {
@@ -612,7 +616,6 @@ impl RenderScene {
 
     const DEFAULT_VOLUME: GpuVolume = GpuVolume::base();
     const DEFAULT_VOLUME_ID: u32 = 1;
-    const BACKGROUND_VOLUME_ID: u32 = 0;
     const DEFAULT_BACKGROUND_VOLUME: GpuVolume = GpuVolume::air();
 
     pub fn new() -> RenderScene {
@@ -701,6 +704,8 @@ impl RenderScene {
     pub fn add_gltf(&mut self, transform: &Mat4, path: &std::path::Path) -> bool {
         let mut cache = LoadedMeshCache::new();
         
+        let start = Instant::now();
+
         let (document, buffers, _) = match gltf::import(path) {
             Ok(r) => r,
             Err(_) =>{println!("Failed to import gltf"); return false},
@@ -723,6 +728,8 @@ impl RenderScene {
 
         self.on_geometry_changed();
         
+        println!("Total import time: {}s", Instant::now().duration_since(start).as_secs_f32());
+
         true
     }  
 
@@ -863,13 +870,13 @@ impl RenderScene {
         if let Some(mesh) = node.mesh() {
             
             if let Some(loaded_primitives) = cache.get(&mesh.index()) {
-                let mut count = 0;
-                let mut total = 0;
+                let mut _count = 0;
+                let mut _total = 0;
                 for primitive in mesh.primitives() {
-                    total += 1;
+                    _total += 1;
                     // if the primitive was already loaded, copy it and change the transforms
                     if let Some(&prim_idx) = loaded_primitives.get(&primitive.index()) {
-                        count += 1;
+                        _count += 1;
                         
                         let mut new_primitive = self.primitives[prim_idx];
                         new_primitive.transform = node_transform_mine;
@@ -878,7 +885,7 @@ impl RenderScene {
                         continue;
                     }
                 }
-                println!("Instanced mesh with {count}/{total} primitives");
+                // println!("Instanced mesh with {count}/{total} primitives");
             } else {
                 
                 let mut loaded_primitives: HashMap<usize, usize> = HashMap::new();
@@ -1558,6 +1565,9 @@ pub trait BvhLeaf : Default + Copy {
         let aabb = self.aabb();
         (aabb.min() + aabb.max()) / 2.0
     }
+    fn cost(&self) -> f64 {
+        return 1.0; // AABB traversal cost
+    }
 }
 
 impl BvhLeaf for Tri {
@@ -1576,6 +1586,7 @@ impl BvhLeaf for Tri {
 struct PrimitiveLeaf {
     primitive: GpuPrimitive,
     aabb: Aabb,
+    cost: f64,
 }
 
 fn aabb_over_bvh_node(bvh: &Vec<BvhNode>, tris: &Vec<Tri>, transform: &Mat4, idx: usize) -> Aabb {
@@ -1599,10 +1610,14 @@ impl PrimitiveLeaf {
     pub fn new(primitive: GpuPrimitive, bvh: &Vec<BvhNode>, tris: &Vec<Tri>) -> Self {
         let transform = primitive.transform;
         let aabb = aabb_over_bvh_node(&bvh, &tris, &transform, primitive.bvh_idx as usize);
-
+        let eval = Bvh::evaluate_tree(bvh, primitive.bvh_idx, tris);
+        if eval.max_count > 100 {
+            println!("eval: {} nodes, {} leaves, {} maximum leaves per node, {} sah", eval.num_nodes, eval.total_count, eval.max_count, eval.sah);
+        }
         Self {
             primitive,
             aabb,
+            cost: eval.sah / bvh[primitive.bvh_idx as usize].aabb.surface() as f64,
         }
     }
 }
@@ -1614,6 +1629,10 @@ impl BvhLeaf for PrimitiveLeaf {
 
     fn closest_hit(&self, _ro: Vec3, _rd: Vec3) -> Option<f32> {
         unimplemented!()
+    }
+
+    fn cost(&self) -> f64 {
+        self.cost
     }
 }
 
@@ -1641,19 +1660,19 @@ impl BvhNode {
         }
     }
 
-    fn from_leaves<Leaf: BvhLeaf>(first: u32, count: u32, indices: &Vec<u32>, leaves: &[Leaf], offset: usize) -> Self {
+    fn from_leaves<Leaf: BvhLeaf>(first: u32, count: u32, indices: &Vec<u32>, leaves: &[Leaf], offset: usize, aabb_cache: &Vec<Aabb>) -> Self {
         let mut new = Self::new();
         new.first = first;
         new.count = count;
-        new.update_aabb(indices, leaves, offset);
+        new.update_aabb(indices, leaves, offset, aabb_cache);
         new
     }
 
-    fn update_aabb<Leaf: BvhLeaf>(&mut self, indices: &Vec<u32>, leaves: &[Leaf], offset: usize) {
+    fn update_aabb<Leaf: BvhLeaf>(&mut self, indices: &Vec<u32>, _leaves: &[Leaf], offset: usize, aabb_cache: &Vec<Aabb>) {
         if self.count != 0 {
-            self.aabb = leaves[indices[self.first as usize - offset] as usize].aabb();
+            self.aabb = aabb_cache[indices[self.first as usize - offset] as usize - offset];
             for i in self.first..self.first + self.count {
-                self.aabb.expand(leaves[indices[i as usize - offset] as usize].aabb());
+                self.aabb.expand(aabb_cache[indices[i as usize - offset] as usize - offset]);
             }
         }
     }
@@ -1661,22 +1680,63 @@ impl BvhNode {
 
 pub struct Bvh {
     pub nodes: Vec<BvhNode>,
+    method: BvhSplitMethod,
     indices: Vec<u32>,
     offset: usize,
     size: usize,
 }
 
+#[derive(Clone, Copy)]
+struct BvhLeafBin {
+    aabb: Aabb,
+    cost: f32,
+}
+
+pub enum BvhSplitMethod {
+    #[allow(unused)]
+    HybridSweep {
+        threshold: u32,
+        bins: u32,
+    },
+
+    #[allow(unused)]
+    Hybrid {
+        threshold: u32,
+        bins: u32,
+    },
+
+    #[allow(unused)]
+    Sah,
+}
+
+static GLOBAL_TIME: std::sync::LazyLock<Arc<Mutex<Duration>>> = std::sync::LazyLock::new(|| Arc::new(Mutex::new(Duration::from_secs(0))));
+
 impl Bvh {
     pub fn new<Leaf: BvhLeaf>(leaves: &[Leaf], offset: usize, size: usize) -> Self {
+        Self::with_method(leaves, offset, size, BvhSplitMethod::HybridSweep { threshold: 32, bins: 32 })
+    }
+
+    pub fn with_method<Leaf: BvhLeaf>(leaves: &[Leaf], offset: usize, size: usize, method: BvhSplitMethod) -> Self {
         let mut res = Self {
             nodes: Vec::new(),
             indices: ( (offset  as u32) .. (offset + size) as u32 ).collect(),
             offset,
-            size
+            size,
+            method
         };
+        let start = Instant::now();
 
-        res.nodes.push(BvhNode::from_leaves(offset as u32, size as u32, &res.indices, &leaves, offset));
-        res.subdivide(res.nodes.len() - 1, leaves);
+        let aabb_cache = leaves[offset..offset + size].iter().map(|x| x.aabb()).collect();
+
+        res.nodes.push(BvhNode::from_leaves(offset as u32, size as u32, &res.indices, &leaves, offset, &aabb_cache));
+        res.subdivide(res.nodes.len() - 1, leaves, &aabb_cache);
+        {
+            let mut guard = GLOBAL_TIME.lock().unwrap();
+            *guard = guard.saturating_add(Instant::now().duration_since(start));
+            // println!("Total time: {}", guard.as_secs_f32());
+        }
+        
+        
         return res;
     }
 
@@ -1712,34 +1772,35 @@ impl Bvh {
 
     }
 
-    fn evaluate_split<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode, axis: usize, split: f32, ) -> f32 {
+    fn evaluate_split<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode, axis: usize, split: f32, aabb_cache: &Vec<Aabb>) -> f32 {
         let mut left_aabb = Aabb::new();
         let mut right_aabb = Aabb::new();
-        let mut left_count = 0.0;
-        let mut right_count = 0.0;
+        let mut left_cost = 0.0;
+        let mut right_cost = 0.0;
 
         for i in (node.first)..(node.first + node.count) {
             let leaf = leaves[self.indices[i as usize - self.offset] as usize];
+            let aabb = aabb_cache[self.indices[i as usize - self.offset] as usize - self.offset];
             if leaf.centroid()[axis] < split {
-                left_count += 1.0;
-                left_aabb.expand(leaf.aabb());
+                left_cost += leaf.cost() as f32;
+                left_aabb.expand(aabb);
             } else {
-                right_count += 1.0;
-                right_aabb.expand(leaf.aabb());
+                right_cost += leaf.cost() as f32;
+                right_aabb.expand(aabb);
             }
 
         }
 
-        let cost = left_count * left_aabb.surface() + right_count * right_aabb.surface();
+        let cost = left_cost * left_aabb.surface() + right_cost * right_aabb.surface();
 
-        if cost > 0.0 {
+        if left_cost > 0.0 && right_cost > 0.0 {
             cost
         } else {
             f32::MAX
         }
     }
 
-    fn find_best_split<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode) -> (usize, f32) {
+    fn find_best_split<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode, aabb_cache: &Vec<Aabb>) -> (usize, f32) {
         let mut best_axis = 0;
         let mut best_split = 0.0;
         let mut best_cost = f32::MAX;
@@ -1748,7 +1809,7 @@ impl Bvh {
             for idx in (node.first)..(node.first + node.count) {
                 let leaf = leaves[self.indices[idx as usize - self.offset] as usize];
                 let split = leaf.centroid()[axis as usize];
-                let cost = self.evaluate_split(leaves, node, axis, split);
+                let cost = self.evaluate_split(leaves, node, axis, split, aabb_cache);
                 if cost < best_cost {
                     best_axis = axis;
                     best_cost = cost;
@@ -1760,15 +1821,112 @@ impl Bvh {
         (best_axis, best_split)
     }
 
-    fn find_split_approx<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode,  count: usize) -> (usize, f32) {
+    fn centroid_aabb<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode) -> Aabb {
+        let mut aabb = Aabb::new();
+        for i in node.first..node.first + node.count {
+            aabb.expand(Aabb::point(leaves[self.indices[i as usize - self.offset] as usize].centroid()))
+        }
+        aabb
+    }
+
+
+    fn find_split_binned<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode, count: usize) -> (usize, f32) {
+        let ca = self.centroid_aabb(leaves, node);
+        let mut bins = Vec::new();
+        let bin_size = (ca.max() - ca.min()) / count as f32;
+
+        let mut best_cost = f32::MAX;
+        let mut best_split = 0.0;
+        let mut best_axis = 0;
+
+        
+        for axis in 0..3 {
+            let best_length = (ca.max()[axis] - ca.min()[axis]) / 2.0;
+            if best_length > best_split {
+                best_split = best_length;
+                best_axis = axis;
+            }
+        }
+
+        best_split += ca.min()[best_axis];
+
+        for axis in 0..3 {
+
+            if bin_size[axis] <= 0.0001 {
+                continue;
+            }
+            bins.clear();
+            bins.resize(count, BvhLeafBin { aabb: Aabb::new(), cost: 0.0 });
+            
+            for i in node.first..node.first + node.count {
+                let leaf = leaves[self.indices[i as usize - self.offset] as usize];
+                let bin = ((leaf.centroid()[axis] - ca.min()[axis]) / bin_size[axis]).floor() as i32;
+                let bin = bin.clamp(0, count as i32 - 1) as usize;
+                bins[bin].aabb.expand(leaf.aabb());
+                bins[bin].cost += leaf.cost() as f32;
+            }
+
+            let mut left_areas = Vec::with_capacity(count - 1);
+            left_areas.resize(count - 1, 0.0f32);
+
+            let mut right_areas = Vec::with_capacity(count - 1);
+            right_areas.resize(count - 1, 0.0f32);
+
+            let mut left_counts = Vec::with_capacity(count - 1);
+            left_counts.resize(count - 1, 0.0f32);
+
+            let mut right_counts = Vec::with_capacity(count - 1);
+            right_counts.resize(count - 1, 0.0f32);
+
+            let mut left_total = 0f32;
+            let mut right_total = 0f32;
+            let mut left_bounds = Aabb::new();
+            let mut right_bounds = Aabb::new();
+
+            for i in 0..count - 1 {
+                left_total += bins[i].cost;
+                left_counts[i] = left_total;
+                left_bounds.expand( bins[i].aabb );
+                left_areas[i] = left_bounds.surface();
+
+                right_total += bins[count - 1 - i].cost;
+                right_counts[count - 2 - i] = right_total;
+                right_bounds.expand( bins[count - 1 - i].aabb );
+                right_areas[count - 2 - i] = right_bounds.surface();
+            }
+
+            for i in 0..count - 1 {
+                let plane_cost = left_counts[i] * left_areas[i] + right_counts[i] * right_areas[i];
+
+                let plane_cost = if left_counts[i] == 0.0 || right_counts[i] == 0.0 {
+                    f32::MAX
+                } else {
+                    plane_cost
+                };
+                if plane_cost < best_cost {
+                    best_axis = axis;
+                    best_split = ca.min()[axis] + bin_size[axis] * (i + 1) as f32;
+                    best_cost = plane_cost;
+                }
+            }
+
+        }
+        
+        (best_axis, best_split)
+       
+    }
+
+    fn find_split_approx<Leaf: BvhLeaf>(&self, leaves: &[Leaf], node: &BvhNode,  count: usize, aabb_cache: &Vec<Aabb>) -> (usize, f32) {
         let mut best_axis = 0;
         let mut best_split = 0.0;
         let mut best_cost = f32::MAX;
 
+        let ca = self.centroid_aabb(leaves, node);
+        let bin_size = (ca.max() - ca.min()) / count as f32;
         for axis in 0..3  as usize {
-            for i in 0..count {
-                let split = node.aabb.min()[axis] + ((i as f32 + 0.5) / count as f32) * (node.aabb.max()[axis]-node.aabb.min()[axis]);
-                let cost = self.evaluate_split(leaves, node, axis, split);
+            for i in 0..count - 1 {
+                let split = ca.min()[axis] + ((i as f32 + 1.0) * bin_size[axis]);
+                let cost = self.evaluate_split(leaves, node, axis, split, aabb_cache);
                 if cost < best_cost {
                     best_axis = axis;
                     best_cost = cost;
@@ -1782,17 +1940,31 @@ impl Bvh {
 
 
     // algorithm from https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
-    fn subdivide<Leaf: BvhLeaf>(&mut self, node_idx: usize, leaves: &[Leaf]) {
+    fn subdivide<Leaf: BvhLeaf>(&mut self, node_idx: usize, leaves: &[Leaf], aabb_cache: &Vec<Aabb>) {
         let node = self.nodes[node_idx];
      
         if node.count <= 2 {
             return;
         }
 
-        let (axis, split) = if node.count < 128 {
-            self.find_best_split(leaves, &node) 
-        } else {
-            self.find_split_approx(leaves, &node, 8) 
+        let (axis, split) = match self.method {
+            BvhSplitMethod::HybridSweep { threshold, bins } => {
+                if node.count < threshold {
+                    self.find_best_split(leaves, &node, aabb_cache) 
+                } else {
+                    self.find_split_binned(leaves, &node, bins as usize) 
+                }
+            },
+            BvhSplitMethod::Hybrid { threshold, bins } => {
+                if node.count < threshold {
+                    self.find_best_split(leaves, &node, aabb_cache) 
+                } else {
+                    self.find_split_approx(leaves, &node, bins as usize, aabb_cache) 
+                }
+            },
+            BvhSplitMethod::Sah => {
+                self.find_best_split(leaves, &node, aabb_cache)
+            },
         };
 
         let mut i = node.first as usize;
@@ -1818,17 +1990,20 @@ impl Bvh {
         let mut left = BvhNode::new();
         left.first = node.first;
         left.count = i  as u32 - node.first;
-        left.update_aabb(&self.indices, &leaves, self.offset);
+        left.update_aabb(&self.indices, &leaves, self.offset, aabb_cache);
 
-        // dont subdivide empty nodes
+        // don't subdivide empty nodes
         if left.count == 0 || left.count == node.count {
+            if node.count > 100 {
+                println!("Big Node: {} prims, {}-{} split", node.count, axis, split);
+            }
             return;
         }
 
         let mut right = BvhNode::new();
         right.first = i as u32;
         right.count = node.count - left.count;
-        right.update_aabb(&self.indices, &leaves, self.offset);
+        right.update_aabb(&self.indices, &leaves, self.offset, aabb_cache);
 
 
         // we no longer hold any triangles
@@ -1839,8 +2014,8 @@ impl Bvh {
         self.nodes.push(left);
         self.nodes.push(right);
 
-        self.subdivide(children_idx, leaves);
-        self.subdivide(children_idx + 1, leaves);
+        self.subdivide(children_idx, leaves, aabb_cache);
+        self.subdivide(children_idx + 1, leaves, aabb_cache);
     }
 
     // preserved for the eventual switch to rendering with indexed triangles on the GPU
@@ -1923,4 +2098,46 @@ impl Bvh {
             None
         }
     }
+
+
+    fn evaluate_tree<Leaf: BvhLeaf>(nodes: &Vec<BvhNode>, root: u32, leaves: &Vec<Leaf>) -> BvhEvaluation {
+        let node = nodes[root as usize];
+        if node.count == 0 {
+
+            let l = Self::evaluate_tree(nodes, node.first + 0, leaves);
+            let r = Self::evaluate_tree(nodes, node.first + 1, leaves);
+
+            let l_s = nodes[node.first as usize + 0].aabb.surface() as f64;
+            let r_s = nodes[node.first as usize + 1].aabb.surface() as f64;
+
+            BvhEvaluation { 
+                sah: 1.0 + (l_s * l.sah + r_s * r.sah) / node.aabb.surface() as f64, 
+                num_nodes: 1 + l.num_nodes + r.num_nodes, 
+                num_leaf_nodes: l.num_leaf_nodes + r.num_leaf_nodes, 
+                total_count: l.total_count + r.total_count, 
+                max_count: l.max_count.max(r.max_count), 
+            }
+
+        } else {
+            let mut sah = 0.0;
+            for i in 0..node.count as usize {
+                sah += leaves[node.first as usize + i].cost();
+            }
+            BvhEvaluation { 
+                sah, 
+                num_nodes: 1, 
+                num_leaf_nodes: 1, 
+                total_count: node.count as u64, 
+                max_count: node.count as u64 
+            }
+        }
+    }
+}
+
+struct BvhEvaluation {
+    sah: f64,
+    num_nodes: u64,
+    num_leaf_nodes: u64,
+    total_count: u64,
+    max_count: u64,
 }

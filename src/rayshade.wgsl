@@ -1,5 +1,7 @@
 #import "common.wgsl"
 
+// MARK: Hit helpers
+
 fn trace_transformed_tri(ray: Ray, prim: i32, tri: i32) -> Hit {
     var hit = intersect_full(transform_ray(ray, primitives[prim].inv_transform), tri);
     if hit.idx == -1 {
@@ -102,81 +104,7 @@ fn sample_hit(hit: Hit) -> ExtSample {
     return sample;
 }
 
-
-
-// fn trace_to_target(ray: Ray, prim: i32, tri: i32) -> Hit {
-//     var stack: Stack;
-//     stack.size = 0u;
-//     var node = bvh[globals.scene.node_count];
-
-//     var hit = trace_transformed_tri(ray, prim, tri);
-//     if hit.idx == -1 {
-//         return hit;
-//     }
-
-
-//     if intersect_aabb(ray, node.aabb) > hit.t {
-//         return hit_default();
-//     }
-//     while (true) {
-//         if node.count > 0u {
-//             // intersect BLAS(s) of node
-//             for (var i = node.first; i < node.first + node.count; i++) {
-//                 let scale_factor = length(transform_dir(ray.dir, primitives[i].inv_transform));
-//                 let t_ray = transform_ray(ray, primitives[i].inv_transform);
-//                 var new_t = hit.t * scale_factor;
-//                 let new_tri = trace_bvh(t_ray, primitives[i].bvh_idx, &new_t, primitives[i]);
-                
-//                 if new_tri >= 0 {
-//                     // hit something before target
-//                     return hit_default();
-//                 }
-//             }
-//             if stack.size == 0u {
-//                 break;
-//             }
-//             node = bvh[pop(&stack)];
-//         } else {
-//             // avoid pushing nodes onto the stack where possible
-//             // order nodes based on distance
-
-//             // TLAS is tacked onto end of bvh:
-//             let node_first = globals.scene.node_count + node.first;
-
-//             // try ordering the nodes
-//             let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
-//             let right = intersect_aabb(ray, bvh[node_first + 1u].aabb);
-    
-//             if (left > hit.t) && (right > hit.t) {
-//                 if stack.size == 0u {
-//                     break;
-//                 }
-//                 node = bvh[pop(&stack)];
-//             } else if (left > hit.t) {
-//                 node = bvh[node_first + 1u];
-//             } else if (right > hit.t) {
-//                 node = bvh[node_first + 0u];
-//             } else if right < left {
-//                 // push(&stack, node_first + 1u);
-//                 // node = bvh[node_first + 0u];
-
-//                 push(&stack, node_first + 0u);
-//                 node = bvh[node_first + 1u];
-
-//             } else {
-//                 // push(&stack, node_first + 0u);
-//                 // node = bvh[node_first + 1u];
-
-                
-//                 push(&stack, node_first + 1u);
-//                 node = bvh[node_first + 0u];
-//             }
-
-//         }
-//     }
-
-//     return hit;
-// }
+// MARK: -Tri Sample
 
 fn area_to_sa(area: f32, normal: vec3f, p: vec3f, reference: vec3f) -> f32 {
     let d = (p - reference);
@@ -289,7 +217,7 @@ fn sample_mesh_light_pdf(prim: i32, tri: i32, point: vec3f, reference: vec3f) ->
 }
 
 
-// MARK: Environment map
+// MARK: Env map
 
 fn env_map_to_dir(e: vec2f) -> vec3f {
     var v = vec3f(0.0);
@@ -381,27 +309,8 @@ fn evaluate_env_map(dir: vec3f) -> vec4f {
     return textureLoad(env_map, vec2u(uv * vec2f(textureDimensions(env_map))), 0); 
 }
 
+// MARK: - SRGB
 
-// from https://www.shadertoy.com/view/XtGGzG
-fn plasma_quintic( _x: f32 ) -> vec3f {
-	let x = saturate( _x );
-	let x1 = vec4f( 1.0, x, x * x, x * x * x ); // 1 x x2 x3
-	let x2 = x1 * x1.w * x; // x4 x5 x6 x7
-	return vec3f(
-		dot( x1.xyzw, vec4f(0.063861086, 1.992659096, -1.023901152, -0.490832805 ) ) + dot( x2.xy, vec2f( 1.308442123, -0.914547012 ) ),
-		dot( x1.xyzw, vec4f(0.049718590, -0.791144343, 2.892305078, 0.811726816 ) ) + dot( x2.xy, vec2f( -4.686502417, 2.717794514 ) ),
-		dot( x1.xyzw, vec4f(0.513275779, 1.580255060, -5.164414457, 4.559573646 ) ) + dot( x2.xy, vec2f( -1.916810682, 0.570638854 ) ) );
-}
-// from https://www.shadertoy.com/view/XtGGzG
-fn magma_quintic( _x: f32 ) -> vec3f {
-	let x = saturate( _x );
-	let x1 = vec4f( 1.0, x, x * x, x * x * x ); // 1 x x2 x3
-	let x2 = x1 * x1.w * x; // x4 x5 x6 x7
-	return vec3f(
-		dot( x1.xyzw, vec4( -0.023226960, 1.087154378, -0.109964741, 6.333665763 ) ) + dot( x2.xy, vec2( -11.640596589, 5.337625354 ) ),
-		dot( x1.xyzw, vec4( 0.010680993, 0.176613780, 1.638227448, -6.743522237 ) ) + dot( x2.xy, vec2( 11.426396979, -5.523236379 ) ),
-		dot( x1.xyzw, vec4( -0.008260782, 2.244286052, 3.005587601, -24.279769818 ) ) + dot( x2.xy, vec2( 32.484310068, -12.688259703 ) ) );
-}
 
 fn to_linear(srgb: vec3f) -> vec3f {
     // not correct but close enough for now
@@ -413,17 +322,6 @@ fn to_linear_4(srgb: vec4f) -> vec4f {
     return pow(srgb, vec4f(2.2));
 }
 
-// false color visualizations, x will be clamped from 0..1
-fn ramp(x: f32) -> vec3f {
-    if x < 0.0 {
-        return vec3f(0.0, 0.0, 1.0);
-    }
-    if x > 1.0 {
-        return vec3f(1.0, 1.0, 0.0);
-    }
-    return to_linear(clamp(magma_quintic(x), vec3f(0.0), vec3f(1.0)));
-}
-
 
 fn project_to_hemisphere(dir: vec3f, normal: vec3f) -> vec3f {
     if dot(dir, normal) < 0.0 {
@@ -432,6 +330,9 @@ fn project_to_hemisphere(dir: vec3f, normal: vec3f) -> vec3f {
         return dir;
     }
 }
+
+// MARK: - Lambert
+
 
 fn sample_lambert(normal: vec3f) -> vec3f {
     // from raytracing in one weekend
@@ -582,18 +483,6 @@ fn sample_ggx_smith_vndf_reflection_pdf(wo_tangent: vec3f, h_tangent: vec3f, r: 
     return pdf_h_times_jacobian;
 }
 
-fn invalid_refraction(v: vec3f) -> bool {
-    return v.x + v.y + v.z == 0.0;
-}
-
-// for refract(incident_ray, normal, eta)
-// wo is my incident ray (from the camera to the surface)
-fn refraction_jacobian(ior_i_ray: f32, ior_o_ray: f32, i_ray_dot_h: f32, o_ray_dot_h: f32) -> f32 {
-    let denom_sqrt = ior_o_ray * o_ray_dot_h + ior_i_ray * i_ray_dot_h;
-    let num = ior_o_ray * ior_o_ray * abs(o_ray_dot_h);
-    return num / (denom_sqrt * denom_sqrt);
-}
-
 /// D_Ve(Ne) = G1(Ve) * max(0, dot(Ve, Ne)) * D(Ne) / Ve.z
 fn sample_ggx_smith_vndf_pdf(h: vec3f, n: vec3f, v: vec3f, a2: f32) -> f32 {
     let NoH = dot(n, h);
@@ -634,7 +523,7 @@ fn sample_ndf_pdf(NoH: f32, a2: f32) -> f32 {
 
 
 /// returns the pdf with respect to the refracted direction wi_tangent
-/// wo_tangent is the incident ray from the camera
+/// wo_tangent points to the camera
 fn sample_ggx_smith_vndf_refraction_pdf(wi_tangent: vec3f, wo_tangent: vec3f, ior_i: f32, ior_o: f32, roughness: f32) -> f32 {
     let a2 = roughness * roughness * roughness * roughness;
 
@@ -660,8 +549,6 @@ fn sample_ggx_smith_vndf_refraction_pdf(wi_tangent: vec3f, wo_tangent: vec3f, io
 
     return pdf;
 }
-
-
 
 /// convert a direction in my coordinate space into the space used by the reference GLTF viewer
 fn compare_gltf_space(v: vec3f) -> vec3f {
@@ -741,7 +628,7 @@ fn sample_dielectric_bsdf_pdf(wi_tangent: vec3f, wo_tangent: vec3f, ior_i: f32, 
 }
 
 
-//MARK: Surface Hit
+//MARK: BSDF Sample
 fn sample_bsdf(wo: vec3f, ior_o: f32, ior_i: f32, sample: ExtSample, lighting: ptr<function, vec3f>, pdf: ptr<function, f32>, bsdf: ptr<function, vec3f>) -> vec3f {
     
     var debug_color = vec3f(0.0);
@@ -914,6 +801,8 @@ fn mis_power_heuristic_3(a: f32, b: f32, c: f32, a_prob: f32, b_prob: f32, c_pro
     //return (ap * ap) / (ap * ap + bp * bp + cp * cp);
 }
 
+// MARK: - NEE Sample
+ 
 const MESH_CHANCE: f32 = 0.5;
 
 struct LightSample {
@@ -983,7 +872,7 @@ fn sample_light_pdf(reference: vec3f, point: vec3f, prim: i32, tri: i32) -> f32 
 }
 
 
-
+// MARK: - On Hit
 
 fn on_hit(
     ray_state: RayState, 
@@ -1011,7 +900,6 @@ fn on_hit(
     let point = ray.origin + ray.dir * hit_state.t;
     let sample = sample_hit(hit);
 
-    // MARK: - Shade
     var lighting   = vec3f(0.0);
 
     
@@ -1110,7 +998,7 @@ fn on_hit(
     // }
 
     var rr_prob = clamp(1.0 - max(throughput.x, max(throughput.y, throughput.z)), 0.0, 0.95);
-    if flags.depth < 2u {
+    if flags.depth < 3u {
         rr_prob = 0.0;
     } else {
         rr_prob = max(rr_prob, 0.2);
@@ -1144,6 +1032,7 @@ fn on_hit(
 }
 
 
+// MARK: - On Miss
 fn on_miss(ray_state: RayState, hit_state: RayHit) {
     var flags = get_flags(ray_state);
     let point = ray_state.origin_max.xyz + ray_state.direction_min.xyz * 9999.0;
@@ -1157,7 +1046,7 @@ fn on_miss(ray_state: RayState, hit_state: RayHit) {
     add_contrib(ray_state.throughput_flags.rgb * bsdf_mis_weight * evaluate_env_map(ray_state.direction_min.xyz).rgb, ray_state.pixel);
 }
 
-var<workgroup> wg_base_idx: u32;
+
 var<workgroup> wg_offset_idx: atomic<u32>;
 /// returns (local offset, total)
 fn workgroup_offset(lane: u32, amount: u32) -> vec2u {
@@ -1166,7 +1055,7 @@ fn workgroup_offset(lane: u32, amount: u32) -> vec2u {
     }
     workgroupBarrier();
 
-    var offset: u32;
+    var offset = 0u;
     if amount > 0u {
         offset = atomicAdd(&wg_offset_idx, amount);
     }
@@ -1177,6 +1066,9 @@ fn workgroup_offset(lane: u32, amount: u32) -> vec2u {
 }
 
 
+var<workgroup> wg_base_idx: u32;
+
+// MARK: - rayshade Main
 @compute
 @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_index) wg_id: u32) {
@@ -1185,6 +1077,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_i
     if (lid >= atomicLoad(&ray_queue_meta.num_in_rays)) {
         return;
     }
+
+    if DEBUG && globals.debug_mode == 3u {
+        // visualize the BVH, disable shading
+        return;
+    }
+
     let ray_state = in_ray_queue[lid];
     let hit_state = ray_hit_queue[lid];
     

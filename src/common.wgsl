@@ -115,7 +115,7 @@ fn rand() -> f32 {
 
     // uint to 0-1 float from
     // https://www.shadertoy.com/view/4tXyWN and https://iquilezles.org/articles/sfrand/
-    return f32(hash21(vec2u(old, seed))) * (1.0 / f32(0xffffffffu));
+    return f32(hash21(vec2u(old, seed))) * (1.0 / f32(0xFFFFFFFFu));
 }
 
 // https://math.stackexchange.com/questions/44689/how-to-find-a-random-axis-or-unit-vector-in-3d
@@ -663,8 +663,19 @@ fn intersect_full(ray: Ray, idx: i32) -> Hit {
     return hit;
 }
 
+fn aabb_miss(ret: vec2f) -> bool {
+    return ret.x > ret.y || ret.y < 0.0;
+}
+
+fn aabb_close(ret: vec2f) -> f32 {
+    if aabb_miss(ret) {
+        return 1e30;
+    }
+    return max(ret.x, 0.0);
+}
+
 // from https://gist.github.com/DomNomNom/46bb1ce47f68d255fd5d
-fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
+fn intersect_aabb(ray: Ray, aabb: Aabb) -> vec2f {
 
     let bmin = aabb_min(aabb);
     let bmax = aabb_max(aabb);
@@ -678,9 +689,27 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> f32 {
     let t0 = max(tmin.x, max(tmin.y, tmin.z));
     let t1 = min(tmax.x, min(tmax.y, tmax.z));
 
-    if (t0 > t1 || t1 < 0.0) {
-        return 1e30;
-    }
+    return vec2f(t0, t1);
+}
 
-    return max(t0, 0.0);
+
+// from https://www.shadertoy.com/view/XtGGzG
+fn plasma_quintic( _x: f32 ) -> vec3f {
+	let x = saturate( _x );
+	let x1 = vec4f( 1.0, x, x * x, x * x * x ); // 1 x x2 x3
+	let x2 = x1 * x1.w * x; // x4 x5 x6 x7
+	return vec3f(
+		dot( x1.xyzw, vec4f(0.063861086, 1.992659096, -1.023901152, -0.490832805 ) ) + dot( x2.xy, vec2f( 1.308442123, -0.914547012 ) ),
+		dot( x1.xyzw, vec4f(0.049718590, -0.791144343, 2.892305078, 0.811726816 ) ) + dot( x2.xy, vec2f( -4.686502417, 2.717794514 ) ),
+		dot( x1.xyzw, vec4f(0.513275779, 1.580255060, -5.164414457, 4.559573646 ) ) + dot( x2.xy, vec2f( -1.916810682, 0.570638854 ) ) );
+}
+// from https://www.shadertoy.com/view/XtGGzG
+fn magma_quintic( _x: f32 ) -> vec3f {
+	let x = saturate( _x );
+	let x1 = vec4f( 1.0, x, x * x, x * x * x ); // 1 x x2 x3
+	let x2 = x1 * x1.w * x; // x4 x5 x6 x7
+	return vec3f(
+		dot( x1.xyzw, vec4( -0.023226960, 1.087154378, -0.109964741, 6.333665763 ) ) + dot( x2.xy, vec2( -11.640596589, 5.337625354 ) ),
+		dot( x1.xyzw, vec4( 0.010680993, 0.176613780, 1.638227448, -6.743522237 ) ) + dot( x2.xy, vec2( 11.426396979, -5.523236379 ) ),
+		dot( x1.xyzw, vec4( -0.008260782, 2.244286052, 3.005587601, -24.279769818 ) ) + dot( x2.xy, vec2( 32.484310068, -12.688259703 ) ) );
 }

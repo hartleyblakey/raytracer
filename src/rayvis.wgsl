@@ -6,7 +6,7 @@ fn trace_bvh_shadow(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primit
     var node = bvh[root];
     var best_t = *t_max;
 
-    if intersect_aabb(ray, node.aabb) >= best_t {
+    if aabb_close(intersect_aabb(ray, node.aabb)) >= best_t {
         return false;
     }
     
@@ -51,8 +51,8 @@ fn trace_bvh_shadow(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primit
             // order nodes based on distance
 
             // try ordering the nodes
-            var left  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
-            var right = intersect_aabb(ray, bvh[node.first + 1u].aabb);
+            var left  = aabb_close(intersect_aabb(ray, bvh[node.first + 0u].aabb));
+            var right = aabb_close(intersect_aabb(ray, bvh[node.first + 1u].aabb));
     
             if (left > best_t) && (right > best_t) {
                 if stack.size == 0u {
@@ -82,7 +82,7 @@ fn trace_shadow(ray: Ray, t: f32) -> bool {
     stack.size = 0u;
     var node = bvh[globals.scene.node_count];
     var best_t = t;
-    if intersect_aabb(ray, node.aabb) > best_t {
+    if aabb_close(intersect_aabb(ray, node.aabb)) > best_t {
         return false;
     }
     while (true) {
@@ -107,8 +107,8 @@ fn trace_shadow(ray: Ray, t: f32) -> bool {
             let node_first = globals.scene.node_count + node.first;
 
             // try ordering the nodes
-            let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
-            let right = intersect_aabb(ray, bvh[node_first + 1u].aabb);
+            let left  = aabb_close(intersect_aabb(ray, bvh[node_first + 0u].aabb));
+            let right = aabb_close(intersect_aabb(ray, bvh[node_first + 1u].aabb));
     
             if (left > best_t) && (right > best_t) {
                 if stack.size == 0u {
@@ -161,6 +161,6 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     ray.idir = 1.0 / ray.dir;
 
     if !trace_shadow(ray, state.origin_max.w - 0.001) {
-        screen[bitcast<u32>(state.contrib_pixel.w)] += vec4f(state.contrib_pixel.rgb, 0.0);
+        screen[bitcast<u32>(state.contrib_pixel.w)] += vec4f(max(state.contrib_pixel.rgb, vec3f(0.0)), 0.0);
     }
 }

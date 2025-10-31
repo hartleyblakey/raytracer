@@ -52,11 +52,25 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     // divide total by number of samples
     var col = scr.rgb / max(scr.a, 1.0);
 
+
+
     if DEBUG && globals.debug_mode == 8u {
         col = scr.rgb;
         if scr.r > 1.0 {
             col = vec3f(1.0, 0.0, 0.0);
         }
+    }
+
+    if DEBUG && globals.debug_mode == 3u {
+        let dbg = col.r;
+        col = magma_quintic(dbg / 256.0 * globals.scene.camera.exposure);
+        // if dbg > 12192.0 {
+        //     col = vec3f(1.0, 0.0, 0.0);
+        // }
+        // col = magma_quintic(dbg / 15.0);
+        // if dbg >= 16.0 {
+        //     col = vec3f(1.0, 0.0, 0.0);
+        // }
     }
 
     if !DEBUG || globals.debug_mode == 0u {
