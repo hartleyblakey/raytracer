@@ -1,3 +1,4 @@
+use core::time;
 use std::{mem::offset_of, sync::{Arc, Mutex}};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -158,22 +159,27 @@ struct Context {
     scene:                      RenderScene,
 
     should_reupload:            bool,
-    ray_buf_size: u64,
+    ray_buf_size:               u64,
+
+    timestamp_ssbo:             Buffer,
+    timestamp_staging_ssbo:     Buffer,
+    queries:                    wgpu::QuerySet,
+    max_queries:                u32,
 }
 
 impl Context {
     fn update_rt_binding(&mut self, gpu: &Gpu) {
 
         self.rt_data_binding = gpu.new_bind_group()
-            .with_buffer(&self.triangles_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.triangles_ext_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.bvh_ssbo.view_all(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.triangles_ssbo.view_all_read(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.triangles_ext_ssbo.view_all_read(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.bvh_ssbo.view_all_read(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.primitive_data_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.env_map_rows_cdf.view_all(),      wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.mesh_light_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&self.media_ssbo.view_all(),            wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.texture_data_ssbo.view_all_read(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.primitive_data_ssbo.view_all_read(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.env_map_rows_cdf.view_all_read(),      wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.mesh_light_ssbo.view_all_read(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&self.media_ssbo.view_all_read(),            wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_dyn_buffer(&self.ray_ab_ssbo.view(0, self.ray_buf_size),  wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_dyn_buffer(&self.ray_ab_ssbo.view(0, self.ray_buf_size),  wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&self.vis_ray_ssbo.view_all(),          wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
@@ -374,6 +380,9 @@ impl Context {
         let vis_ray_ssbo =   gpu.new_storage_buffer(num_pixels * size_of::<GpuVisRayState>() as u64);
         let hit_ssbo =   gpu.new_storage_buffer(num_pixels * size_of::<GpuRayHit>() as u64);
 
+        let timestamp_ssbo = gpu.new_buffer(1024 * 1024, wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
+        let timestamp_staging_ssbo = gpu.new_buffer(1024 * 1024, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+
         let ray_buf_size = align_to(num_pixels * size_of::<GpuRayState>() as u64, 256);
 
         let ray_ab_ssbo =   gpu.new_storage_buffer(ray_buf_size * 2);
@@ -383,15 +392,15 @@ impl Context {
         let env_map_pdf = gpu.new_texture(uvec2(2 * scene.env_map.height as u32, scene.env_map.height as u32), wgpu::TextureFormat::R32Float, false);
 
         let rt_data_bg = gpu.new_bind_group()
-            .with_buffer(&triangles_ssbo.view_all(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&triangles_ext_ssbo.view_all(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&bvh_ssbo.view_all(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&triangles_ssbo.view_all_read(),        wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&triangles_ext_ssbo.view_all_read(),    wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&bvh_ssbo.view_all_read(),              wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&screen_ssbo.view_all(),           wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&texture_data_ssbo.view_all(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&primitive_data_ssbo.view_all(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&env_map_rows_cdf.view_all(),      wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&mesh_light_ssbo.view_all(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
-            .with_buffer(&media_ssbo.view_all(),            wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&texture_data_ssbo.view_all_read(),     wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&primitive_data_ssbo.view_all_read(),   wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&env_map_rows_cdf.view_all_read(),      wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&mesh_light_ssbo.view_all_read(),       wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
+            .with_buffer(&media_ssbo.view_all_read(),            wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_dyn_buffer(&ray_ab_ssbo.view(0, ray_buf_size),  wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_dyn_buffer(&ray_ab_ssbo.view(0, ray_buf_size),  wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
             .with_buffer(&vis_ray_ssbo.view_all(),          wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT)
@@ -437,6 +446,9 @@ impl Context {
             &resources, &[&u_frame, &rt_data_bg]
         );
 
+        let max_queries = 256;
+        let queries = gpu.device.create_query_set(&wgpu::wgt::QuerySetDescriptor { label: Some("Timestamps"), ty: wgpu::QueryType::Timestamp, count: max_queries });
+        
         let should_reupload = true;
 
         let mut ctx = Context {
@@ -492,6 +504,11 @@ impl Context {
 
             should_reupload,
             ray_buf_size,
+
+            timestamp_ssbo,
+            timestamp_staging_ssbo,
+            queries,
+            max_queries,
         };
         ctx.create_pipelines(gpu);
         ctx
@@ -645,6 +662,20 @@ impl Context {
 }
 
 fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
+    let mut timestamps = gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
+    timestamps = false;
+
+    let mut timestamp_labels = Vec::new();
+    
+    let mut query_index = 0;
+    
+    let mut insert_timestamp = |ctx: &Context, cpass: &mut wgpu::ComputePass, label: &'static str| {
+        if timestamps {
+            cpass.write_timestamp(&ctx.queries, query_index);
+            query_index += 1;
+            timestamp_labels.push(label);
+        }
+    };
 
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: None,
@@ -678,17 +709,21 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
     );
 
     {   // ray gen
+        
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        insert_timestamp(ctx, &mut cpass, "before raygen");
         cpass.set_pipeline(&ctx.raygen_pipeline.as_ref().unwrap());
         cpass.set_bind_group(0, &ctx.frame_uniforms_binding.raw, &[]);
         cpass.set_bind_group(1, &ctx.rt_data_binding.raw, &[offset_in, offset_out]);
         cpass.dispatch_workgroups(screen_workgroups.x, screen_workgroups.y, 1);
+        insert_timestamp(ctx, &mut cpass, "after raygen");
     }
 
     {   
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        
+        insert_timestamp(ctx, &mut cpass, "before pt");
         for _ in 0..path_depth {
+            insert_timestamp(ctx, &mut cpass, "start wave");
             (offset_in, offset_out) = (offset_out, offset_in);
             cpass.set_bind_group(0, &ctx.frame_uniforms_binding.raw, &[]);
             cpass.set_bind_group(1, &ctx.rt_data_binding.raw, &[offset_in, offset_out]);
@@ -697,23 +732,39 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
             cpass.set_pipeline(&ctx.swap_pipeline.as_ref().unwrap());
             cpass.dispatch_workgroups(1, 1, 1);
 
+            insert_timestamp(ctx, &mut cpass, "update params");
+
             // extension trace
             cpass.set_pipeline(&ctx.raytrace_pipeline.as_ref().unwrap());
             cpass.dispatch_workgroups_indirect(&ctx.queue_meta_ssbo, GpuWavefrontQueueParams::IN_OFF);
+
+
+            insert_timestamp(ctx, &mut cpass, "trace extension");
 
             // shade
             cpass.set_pipeline(&ctx.rayshade_pipeline.as_ref().unwrap());
             cpass.dispatch_workgroups_indirect(&ctx.queue_meta_ssbo, GpuWavefrontQueueParams::IN_OFF);
 
+            insert_timestamp(ctx, &mut cpass, "shade");
+
             // visibility trace
-            if !single_frame_debug {   // visibility trace
+            if !single_frame_debug {
                 cpass.set_pipeline(&ctx.rayvis_pipeline.as_ref().unwrap());
                 cpass.dispatch_workgroups_indirect(&ctx.queue_meta_ssbo, GpuWavefrontQueueParams::VIS_OFF);
             }
+
+            insert_timestamp(ctx, &mut cpass, "visibility");
         }
+        insert_timestamp(ctx, &mut cpass, "after pt");
     }
 
-    let surface_texture = gpu.surface.get_current_texture().expect("Failed to acquire next surface texture");
+    let surface_texture = match gpu.surface.get_current_texture() {
+        Ok(st) => st,
+        Err(e) => {
+            panic!("Surface texture acquire failed: {e:?}");
+        }
+    };
+
     let surface_view = gpu.get_surface_view(&surface_texture);
 
     let rpass_desc = wgpu::RenderPassDescriptor {
@@ -734,9 +785,50 @@ fn frame(gpu: &Gpu, ctx: &mut Context, dt: f32) {
 
     ctx.frame_uniforms.reject_hist = 0;
     
+    if timestamps {
+        encoder.resolve_query_set(&ctx.queries, 0..query_index, &ctx.timestamp_ssbo, 0);
+        encoder.copy_buffer_to_buffer(&ctx.timestamp_ssbo, 0, &ctx.timestamp_staging_ssbo, 0, ctx.timestamp_ssbo.size());
+    }
+
+    gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    gpu.device.push_error_scope(wgpu::ErrorFilter::Internal);
+
     gpu.queue.submit(Some(encoder.finish()));
 
+    for _ in 0..3 {
+        if let Some(e) = pollster::block_on(gpu.device.pop_error_scope()) {
+            eprintln!("WGPU error scope: {e:?}");
+        }
+    }
+
     surface_texture.present();
+
+    if timestamps && ctx.frame_uniforms.frame % 200 == 0 {
+        println!("\n\n\nTIMESTAMPS");
+        let staging = ctx.timestamp_staging_ssbo.raw.clone();
+        let period = gpu.queue.get_timestamp_period();
+        ctx.timestamp_staging_ssbo.slice(..).map_async(wgpu::MapMode::Read, move |b| {
+            if b.is_err() {
+                println!("Map error:\n{b:?}");
+                return;
+            }
+            let range = staging.get_mapped_range(..);
+            let ticks: &[u64] = bytemuck::cast_slice(&range);
+            let base = ticks[0];
+            for (i, label) in timestamp_labels.iter().enumerate() {
+                let i_ticks = ticks[i] - ticks[i.checked_sub(1).unwrap_or(0)];
+                let i_nanos = i_ticks as f32 * period;
+                println!("{label:16}: {:20}ns timestamp : {:.5}ms relative", ((ticks[i] - base) as f32 * period) as u64, i_nanos as f64 / 1000.0 / 1000.0);
+            }
+            
+        });
+
+        gpu.device.poll(wgpu::PollType::Wait).ok();
+
+        ctx.timestamp_staging_ssbo.unmap();
+    }
+
 }
 
 #[cfg(target_arch = "wasm32")]

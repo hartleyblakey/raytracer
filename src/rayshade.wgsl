@@ -555,9 +555,37 @@ fn compare_gltf_space(v: vec3f) -> vec3f {
    return v.xzy * vec3f(-1.0, 1.0, 1.0);
 }
 
-fn background_volume() -> GpuVolume {
-    // return GpuVolume(vec3f(0.0), 1.0, vec3f(0.0), 0.0);
-    return media[0];
+fn sample_phase(in_dir: vec3f, volume: GpuVolume, pdf: ptr<function, f32>) -> vec3f {
+    rand_sphere();
+    if volume.g == 0.0 {
+        *pdf = 1.0 / (pi * 4.0);
+        return rand_sphere();
+    } else if volume.g >= 1.0 {
+        *pdf = 1.0;
+        return in_dir;
+    } else if volume.g <= -1.0 {
+        *pdf = 1.0;
+        return -in_dir;
+    }
+
+    let g = volume.g;
+    let us = rand();
+    let vs = 2.0 * pi * rand();
+    let z = (1.0+g*g-pow((1.0-g*g)/(2.0*g*(us+(1.0-g)/(2.0*g))),2.0))/(2.0*g);
+    let xy = vec2(cos(vs), sin(vs)) * sqrt(1.0-z*z);
+    let u = normalize(cross(in_dir, vec3f(1.2345, 2.3456, -3.4561)));
+    let v = cross(u, in_dir);
+    let out_dir = normalize(xy.x * u + xy.y * v + z * in_dir);
+    *pdf = evaluate_hg_phase(in_dir, out_dir, volume);
+    return out_dir;
+    
+}
+
+fn evaluate_hg_phase(in_dir: vec3f, out_dir: vec3f, volume: GpuVolume) -> f32 {
+    let cos_theta = dot(in_dir, out_dir);
+    let g = volume.g;
+    let denominator = pow(1.0 + g * g - 2.0 * g * cos_theta, 1.5);
+    return (1.0 - g * g) / (4.0 * pi * denominator);
 }
 
 fn sample_metallic_bsdf(wo_tangent: vec3f, h_tangent: vec3f, sample: ExtSample) -> vec3f {
@@ -885,9 +913,13 @@ fn on_hit(
 
     *cast_continuation = true;
 
+    // *cast_continuation = false;
+    // *cast_vis = false;
+
     var ray_volume = media[ray_state.medium];
+    ray_volume = background_volume();
+
     var throughput = ray_state.throughput_flags.rgb;
-    seed = ray_state.rng_state;
 
     var flags = get_flags(ray_state);
 
@@ -908,12 +940,10 @@ fn on_hit(
         hit_ior = background_volume().ior;
     }
 
-    if hit_ior == ray_volume.ior {
-        hit_ior = 1.6 * ray_volume.ior;
-    }
-
     if globals.debug_mode != 9u {
-        throughput *= exp(-ray_volume.absorption * hit.t);
+
+        throughput *= transmittance(ray_volume.absorption, hit_state.t);
+        
     }
 
     let nee_pdf = sample_light_pdf(ray.origin, point, hit.prim_idx, hit.idx);
@@ -922,6 +952,8 @@ fn on_hit(
         let bsdf_mis_weight = mis_power_heuristic(ray_state.last_pdf, nee_pdf, 1.0, 1.0);
         lighting += throughput * sample.emissive * bsdf_mis_weight;
     }
+
+
     
     let wo = -ray.dir;
 
@@ -937,7 +969,7 @@ fn on_hit(
         let nee_bsdf = evaluate_bsdf(light.wi, wo, hit_ior, ray_volume.ior, sample);
 
         (*vis_ray_state).contrib_pixel = vec4f(
-            throughput * nee_bsdf * abs(dot(light.wi, sample.normal)) * light.contrib * nee_mis_weight / light.pdf,
+            transmittance(background_volume().absorption + background_volume().scattering, light.t_max) * throughput * nee_bsdf * abs(dot(light.wi, sample.normal)) * light.contrib * nee_mis_weight / light.pdf,
             bitcast<f32>(ray_state.pixel)
         );
         *cast_vis = true;
@@ -1017,20 +1049,83 @@ fn on_hit(
     out_ray_state.last_pdf = bsdf_pdf;
     out_ray_state.medium = out_medium;
     out_ray_state.rng_state = seed;
+
     out_ray_state.throughput_flags = vec4f(throughput, 0.0);
 
-    flags.depth += 1u;
     set_flags(&out_ray_state, flags);
 
-    add_contrib(lighting, ray_state.pixel);
-
-    if flags.depth >= globals.max_depth {
+    if flags.depth + 1u >= globals.max_depth {
         *cast_continuation = false;
     }
+
+    add_contrib(lighting, ray_state.pixel);
 
     return out_ray_state;
 }
 
+// MARK: - On Volume Scatter
+fn on_scatter(
+    ray_state: RayState, 
+    hit_state: RayHit, 
+    lid: u32, 
+    cast_continuation: ptr<function, bool>, 
+    cast_vis: ptr<function, bool>, 
+    vis_ray_state: ptr<function, VisRayState>
+) -> RayState {
+    seed = ray_state.rng_state;
+    var out_ray = ray_state;
+    let volume = background_volume();
+    var phase_pdf = 0.0;
+    var dir = sample_phase(ray_state.direction_min.xyz, volume, &phase_pdf);
+    *cast_continuation = true;
+    *cast_vis = false;
+
+    var throughput = ray_state.throughput_flags.rgb;
+
+    out_ray.direction_min = vec4f(dir, 0.0);
+    out_ray.origin_max = vec4f(ray_state.origin_max.xyz + ray_state.direction_min.xyz * hit_state.t, 1e30);
+
+
+    out_ray.last_pdf = phase_pdf;
+
+    let wo = -ray_state.direction_min.xyz;
+
+    let light = sample_light(out_ray.origin_max.xyz);
+
+    if light.pdf > 0.0 {
+        (*vis_ray_state).origin_max = vec4f(out_ray.origin_max.xyz, light.t_max);
+        (*vis_ray_state).direction_min = vec4f(light.wi, 0.001);
+
+        let nee_ray_bsdf_pdf = evaluate_hg_phase(-wo, light.wi, volume); // perfect sampling
+        let nee_mis_weight = mis_power_heuristic(light.pdf, nee_ray_bsdf_pdf, 1.0, 1.0);
+        let nee_bsdf = evaluate_hg_phase(-wo, light.wi, volume);
+
+        (*vis_ray_state).contrib_pixel = vec4f(
+            transmittance(volume.absorption + volume.scattering, light.t_max) * throughput * nee_bsdf * light.contrib * nee_mis_weight / light.pdf,
+            bitcast<f32>(ray_state.pixel)
+        );
+        *cast_vis = true;
+    } else {
+        *cast_vis = false;
+    }
+
+    throughput *= volume.scattering * evaluate_hg_phase(ray_state.direction_min.xyz, dir, volume);
+    if phase_pdf > 0.0 {
+        throughput /= phase_pdf;
+    } else {
+        *cast_continuation = false;
+    }
+
+    out_ray.throughput_flags = vec4f(
+        throughput,
+        out_ray.throughput_flags.w
+    );
+
+
+
+
+    return out_ray;
+}
 
 // MARK: - On Miss
 fn on_miss(ray_state: RayState, hit_state: RayHit) {
@@ -1043,7 +1138,11 @@ fn on_miss(ray_state: RayState, hit_state: RayHit) {
         bsdf_mis_weight = mis_power_heuristic(ray_state.last_pdf, nee_pdf, 1.0, 1.0);
     }
 
-    add_contrib(ray_state.throughput_flags.rgb * bsdf_mis_weight * evaluate_env_map(ray_state.direction_min.xyz).rgb, ray_state.pixel);
+    var throughput = ray_state.throughput_flags.rgb * bsdf_mis_weight;
+
+    throughput *= transmittance(background_volume().absorption, hit_state.t);
+
+    add_contrib(throughput * evaluate_env_map(ray_state.direction_min.xyz).rgb, ray_state.pixel);
 }
 
 
@@ -1085,17 +1184,44 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_i
 
     let ray_state = in_ray_queue[lid];
     let hit_state = ray_hit_queue[lid];
+
+    seed = ray_state.rng_state;
     
     var alive = false;
     var cast_vis = false;
     var out_ray_state = ray_state;
     var vis_ray_state: VisRayState;
 
-    if hit_state.tri >= 0 {
+    if hit_state.tri >= 0  {
         out_ray_state = on_hit(ray_state, hit_state, lid, &alive, &cast_vis, &vis_ray_state);
+    } else if ray_state.origin_max.w < 1e30 {
+        out_ray_state = on_scatter(ray_state, hit_state, lid, &alive, &cast_vis, &vis_ray_state);
     } else {
         alive = false;
         on_miss(ray_state, hit_state);
+    }
+
+    if alive {
+        var pdf = 0.0;
+        let volume = background_volume();
+        var t_max = sample_transmittance(volume, &pdf);
+
+        // if (out_ray_state.origin_max.xyz + out_ray_state.direction_min.xyz * t_max).z > 1.0 {
+            // t_max = 1e30;
+        // }
+
+        // volume scattering
+        out_ray_state.origin_max.w = t_max;
+        out_ray_state.throughput_flags = vec4f(
+            out_ray_state.throughput_flags.rgb,
+            out_ray_state.throughput_flags.w
+        );
+
+        out_ray_state.rng_state = seed;
+
+        var flags = get_flags(out_ray_state);
+        flags.depth += 1u;
+        set_flags(&out_ray_state, flags);
     }
 
 

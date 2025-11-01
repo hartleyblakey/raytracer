@@ -76,7 +76,7 @@ fn fs_main(@builtin(position) p: vec4f) -> @location(0) vec4<f32> {
     if !DEBUG || globals.debug_mode == 0u {
         col = tonemap_pbr_neutral(col * globals.scene.camera.exposure);
     }
-    
+
     // col = to_linear(sample_texture(primitives[1].material.albedo, uv).rgb);
     // col = pow(col, vec3f(1.0 / 2.2));
     return vec4f(col, 1.0);

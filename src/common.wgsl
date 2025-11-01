@@ -1,13 +1,13 @@
 @group(0) @binding(0) var<uniform> globals : FrameUniforms;
-@group(1) @binding(0) var<storage, read_write> triangles :      array<Tri>;
-@group(1) @binding(1) var<storage, read_write> tri_exts :       array<TriExt>;
-@group(1) @binding(2) var<storage, read_write> bvh :            array<BvhNode>;
+@group(1) @binding(0) var<storage, read> triangles :      array<Tri>;
+@group(1) @binding(1) var<storage, read> tri_exts :       array<TriExt>;
+@group(1) @binding(2) var<storage, read> bvh :            array<BvhNode>;
 @group(1) @binding(3) var<storage, read_write> screen :         array<vec4f>;
-@group(1) @binding(4) var<storage, read_write> texture_data :   array<u32>;
-@group(1) @binding(5) var<storage, read_write> primitives :     array<Primitive>;
-@group(1) @binding(6) var<storage, read_write> env_map_rows_cdf:array<f32>;
-@group(1) @binding(7) var<storage, read_write> mesh_lights:     array<MeshLight>;
-@group(1) @binding(8) var<storage, read_write> media:           array<GpuVolume>;
+@group(1) @binding(4) var<storage, read> texture_data :   array<u32>;
+@group(1) @binding(5) var<storage, read> primitives :     array<Primitive>;
+@group(1) @binding(6) var<storage, read> env_map_rows_cdf:array<f32>;
+@group(1) @binding(7) var<storage, read> mesh_lights:     array<MeshLight>;
+@group(1) @binding(8) var<storage, read> media:           array<GpuVolume>;
 
 @group(1) @binding(9) var<storage, read_write> in_ray_queue:    array<RayState>;
 @group(1) @binding(10) var<storage, read_write> out_ray_queue:  array<RayState>;
@@ -93,8 +93,8 @@ struct VisRayState {
 struct RayHit {
     tri: i32,
     prim: i32,
-    t: f32,
-    uv_bf: u32,
+    t: f32, // negative if back facing hit
+    uv: u32, // 2x16
 }
 
 // IQ integer hash 3 https://www.shadertoy.com/view/4tXyWN
@@ -436,6 +436,11 @@ fn sample_texture(tex: GpuTextureRef, tc: vec2f) -> vec4f {
     let sub_pos = fract(fract(tc) * vec2f(size));
     let texel_pos = vec2u(fract(tc) * vec2f(size));
 
+    // if texture_filter_point(tex) { ... }
+    if true {
+        return unpack_rgba8(texture_data[tex.offset + texel_pos.y * size.x + texel_pos.x]);
+    }
+
     let x0 = clamp(texel_pos.x, 0u, size.x - 1u);
     let x1 = clamp(texel_pos.x + 1u, 0u, size.x - 1u);
     let y0 = clamp(texel_pos.y, 0u, size.y - 1u);
@@ -583,6 +588,8 @@ fn pop(stack: ptr<function, Stack>) -> u32 {
 
 
 
+// MARK: - Tri Intersect
+
 const TRI_EPS: f32 = 0.00000001;
 
 // https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
@@ -663,16 +670,7 @@ fn intersect_full(ray: Ray, idx: i32) -> Hit {
     return hit;
 }
 
-fn aabb_miss(ret: vec2f) -> bool {
-    return ret.x > ret.y || ret.y < 0.0;
-}
-
-fn aabb_close(ret: vec2f) -> f32 {
-    if aabb_miss(ret) {
-        return 1e30;
-    }
-    return max(ret.x, 0.0);
-}
+// MARK: - AABB Intersect
 
 // from https://gist.github.com/DomNomNom/46bb1ce47f68d255fd5d
 fn intersect_aabb(ray: Ray, aabb: Aabb) -> vec2f {
@@ -686,10 +684,14 @@ fn intersect_aabb(ray: Ray, aabb: Aabb) -> vec2f {
     let tmin = min(rmin, rmax);
     let tmax = max(rmin, rmax);
 
-    let t0 = max(tmin.x, max(tmin.y, tmin.z));
+    var t0 = max(tmin.x, max(tmin.y, tmin.z));
     let t1 = min(tmax.x, min(tmax.y, tmax.z));
 
-    return vec2f(t0, t1);
+    if t0 > t1 || t1 < 0.0 {
+        return vec2f(1e30);
+    }
+
+    return vec2f(max(t0, 0.0), t1);
 }
 
 
@@ -712,4 +714,45 @@ fn magma_quintic( _x: f32 ) -> vec3f {
 		dot( x1.xyzw, vec4( -0.023226960, 1.087154378, -0.109964741, 6.333665763 ) ) + dot( x2.xy, vec2( -11.640596589, 5.337625354 ) ),
 		dot( x1.xyzw, vec4( 0.010680993, 0.176613780, 1.638227448, -6.743522237 ) ) + dot( x2.xy, vec2( 11.426396979, -5.523236379 ) ),
 		dot( x1.xyzw, vec4( -0.008260782, 2.244286052, 3.005587601, -24.279769818 ) ) + dot( x2.xy, vec2( 32.484310068, -12.688259703 ) ) );
+}
+
+// MARK: - Media
+
+fn background_volume() -> GpuVolume {
+    if !DEBUG || globals.debug_mode == 0u {
+        return GpuVolume(vec3f(0.0), 1.0, vec3f(0.05), 0.80);
+    } else {
+        return GpuVolume(vec3f(0.0), 1.0, vec3f(0.0), 0.0);
+    }
+    
+    return media[0];
+}
+
+fn extinction(volume: GpuVolume) -> vec3f {
+    return volume.absorption + volume.scattering;
+}
+
+fn transmittance(e: vec3f, dist: f32) -> vec3f {
+    return max(exp(-e * dist), vec3f(0.0));
+}
+
+fn sample_transmittance(volume: GpuVolume, pdf: ptr<function, f32>) -> f32 {
+    let channel = i32(rand() * 3.0);
+    if channel < 10 {
+        *pdf = 1.0;
+        // return 1e30;
+    }
+    let e = extinction(volume);
+    *pdf = (e.x + e.y + e.z) * (1.0 / 3.0);
+    if e[channel] <= 0.001 {
+        return 1e30;
+    }
+
+    let t = -log(1.0 - rand()) / e[channel];
+    if false && (t > 100.0 || t <= 0.0) {
+        *pdf = 1.0;
+        return 1e30;
+    } else {
+        return t;
+    }
 }

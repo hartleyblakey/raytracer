@@ -10,7 +10,7 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
     var node = bvh[root];
     var best_t = *t_max;
     var best_i: i32 = -1;
-    if aabb_close(intersect_aabb(ray, node.aabb)) >= best_t {
+    if intersect_aabb(ray, node.aabb).x >= best_t {
         return best_i;
     }
     
@@ -20,7 +20,7 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
         debug += 0.5;
         // debug = max(debug, f32(stack.size + 1u));
 
-        // if aabb_close(intersect_aabb(ray, node.aabb)) > best_t {
+        // if intersect_aabb(ray, node.aabb).x > best_t {
         //     if stack.size == 0u {
         //         break;
         //     }
@@ -83,22 +83,20 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
             // try ordering the nodes
             let l_h  = intersect_aabb(ray, bvh[node.first + 0u].aabb);
             let r_h  = intersect_aabb(ray, bvh[node.first + 1u].aabb);
-            var left  = aabb_close(l_h);
-            var right = aabb_close(r_h);
     
-            if (left > best_t) && (right > best_t) {
+            if (l_h.x >= best_t) && (r_h.x >= best_t) {
                 if stack.size == 0u {
                     break;
                 }
                 node = bvh[pop(&stack)];
-            } else if (left > best_t) {
+            } else if (l_h.x > best_t) {
                 node = bvh[node.first + 1u];
-            } else if (right > best_t) {
+            } else if (r_h.x > best_t) {
                 node = bvh[node.first + 0u];
-            } else if right < left {
+            } else if r_h.x < l_h.x {
                 push(&stack, node.first + 0u);
                 node = bvh[node.first + 1u];
-            } else if left < right {
+            } else if l_h.x < r_h.x {
                 push(&stack, node.first + 1u);
                 node = bvh[node.first + 0u];
             } else if r_h.y < l_h.y {
@@ -118,24 +116,26 @@ fn trace_bvh(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primitive) ->
 
 
 
-fn trace(ray: Ray) -> Hit {
+fn trace(ray: Ray, t_max: f32) -> Hit {
     debug = 0.0;
     var stack: Stack;
     stack.size = 0u;
     var node = bvh[globals.scene.node_count];
-    var best_t = 99999999.0;
+    var best_t = min(t_max, 1e20);
     var closest_tri: i32 = -1;
     var closest_primitive: i32 = -1;
 
-    if aabb_close(intersect_aabb(ray, node.aabb)) > best_t {
-        return hit_default();
+    if intersect_aabb(ray, node.aabb).x > best_t {
+        var hit = hit_default();
+        hit.t = best_t;
+        return hit;
     }
     var tlas_steps = 0.0;
     while (true) {
         // visualize bvh steps
         debug += 1.0;
 
-        // if aabb_close(intersect_aabb(ray, node.aabb)) > best_t {
+        // if intersect_aabb(ray, node.aabb).x > best_t {
         //     if stack.size == 0u {
         //         break;
         //     }
@@ -162,7 +162,7 @@ fn trace(ray: Ray) -> Hit {
 
                     // var hit = hit_default();
                     // hit.prim_idx = i32(i);
-                    // hit.idx = i32(new_tri);
+                    // hit.idx = new_tri;
                     // hit.normal = -ray.dir;
                     // return hit;
                 }
@@ -179,40 +179,28 @@ fn trace(ray: Ray) -> Hit {
             let node_first = globals.scene.node_count + node.first;
 
             // try ordering the nodes
-            let l_h  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
-            let r_h = intersect_aabb(ray, bvh[node_first + 1u].aabb);
-            let left  = aabb_close(l_h);
-            let right = aabb_close(r_h);
+            var hit_1  = intersect_aabb(ray, bvh[node_first + 0u].aabb);
+            var hit_2 = intersect_aabb(ray, bvh[node_first + 1u].aabb);
+
+            var child_1 = node_first + 0u;
+            var child_2 = node_first + 1u;
+
+            if hit_2.x < hit_1.x || (hit_2.x == 0.0 && hit_2.y < hit_1.y) {
+                var h = hit_1; hit_1 = hit_2; hit_2 = h;
+                var c = child_1; child_1 = child_2; child_2 = c;
+            }
     
-            if (left > best_t) && (right > best_t) {
+            if hit_1.x > best_t {
                 if stack.size == 0u {
                     break;
                 }
                 node = bvh[pop(&stack)];
-            } else if (left > best_t) {
-                node = bvh[node_first + 1u];
-            } else if (right > best_t) {
-                node = bvh[node_first + 0u];
-            } else if right < left {
-                // push(&stack, node_first + 1u);
-                // node = bvh[node_first + 0u];
-
-                push(&stack, node_first + 0u);
-                node = bvh[node_first + 1u];
-
-            } else if left < right{
-
-                push(&stack, node_first + 1u);
-                node = bvh[node_first + 0u];
-            } else if r_h.y < l_h.y {
-                push(&stack, node_first + 0u);
-                node = bvh[node_first + 1u];
+            } else if hit_2.x > best_t {
+                node = bvh[child_1];
             } else {
-                
-                push(&stack, node_first + 1u);
-                node = bvh[node_first + 0u];
+                node = bvh[child_1];
+                push(&stack, child_2);
             }
-
         }
     }
 
@@ -244,8 +232,18 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     ray.dir = ray_state.direction_min.xyz;
     ray.origin = ray_state.origin_max.xyz;
     ray.idir = 1.0 / ray.dir;
+    // let zeroes = ray.dir == vec3f(0.0);
+    // if zeroes.x {
+    //     ray.idir.x = 1e30;
+    // }
+    // if zeroes.y {
+    //     ray.idir.y = 1e30;
+    // }
+    // if zeroes.z {
+    //     ray.idir.z = 1e30;
+    // }
     
-    let hit = trace(ray);
+    let hit = trace(ray, ray_state.origin_max.w);
 
     if DEBUG && globals.debug_mode == 3u {
         screen[ray_state.pixel] += vec4f(debug, 0.0, 0.0, 1.0);
@@ -257,7 +255,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     hit_state.prim = hit.prim_idx;
     hit_state.tri = hit.idx;
     hit_state.t = hit.t;
-    hit_state.uv_bf = 0u; // UNIMPLEMENTED
+    hit_state.uv = 0u; // UNIMPLEMENTED
     
     ray_hit_queue[lid] = hit_state;
 }

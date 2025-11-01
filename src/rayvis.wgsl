@@ -6,7 +6,7 @@ fn trace_bvh_shadow(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primit
     var node = bvh[root];
     var best_t = *t_max;
 
-    if aabb_close(intersect_aabb(ray, node.aabb)) >= best_t {
+    if intersect_aabb(ray, node.aabb).x >= best_t {
         return false;
     }
     
@@ -51,8 +51,8 @@ fn trace_bvh_shadow(ray: Ray, root: u32, t_max: ptr<function, f32>, prim: Primit
             // order nodes based on distance
 
             // try ordering the nodes
-            var left  = aabb_close(intersect_aabb(ray, bvh[node.first + 0u].aabb));
-            var right = aabb_close(intersect_aabb(ray, bvh[node.first + 1u].aabb));
+            var left  = intersect_aabb(ray, bvh[node.first + 0u].aabb).x;
+            var right = intersect_aabb(ray, bvh[node.first + 1u].aabb).x;
     
             if (left > best_t) && (right > best_t) {
                 if stack.size == 0u {
@@ -81,8 +81,8 @@ fn trace_shadow(ray: Ray, t: f32) -> bool {
     var stack: Stack;
     stack.size = 0u;
     var node = bvh[globals.scene.node_count];
-    var best_t = t;
-    if aabb_close(intersect_aabb(ray, node.aabb)) > best_t {
+    var best_t = min(t, 1e20);
+    if intersect_aabb(ray, node.aabb).x > best_t {
         return false;
     }
     while (true) {
@@ -107,8 +107,8 @@ fn trace_shadow(ray: Ray, t: f32) -> bool {
             let node_first = globals.scene.node_count + node.first;
 
             // try ordering the nodes
-            let left  = aabb_close(intersect_aabb(ray, bvh[node_first + 0u].aabb));
-            let right = aabb_close(intersect_aabb(ray, bvh[node_first + 1u].aabb));
+            let left  = intersect_aabb(ray, bvh[node_first + 0u].aabb).x;
+            let right = intersect_aabb(ray, bvh[node_first + 1u].aabb).x;
     
             if (left > best_t) && (right > best_t) {
                 if stack.size == 0u {

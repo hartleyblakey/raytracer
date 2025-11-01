@@ -52,12 +52,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
     let lid = id.y * globals.res.x + id.x;
 
-    var patch_size = 512u;
-
         // clear screen
     if globals.reject_hist == 1u {
         screen[lid] = vec4f(0.0);
-        patch_size = globals.res.x * globals.res.y;
     }
 
 
@@ -72,6 +69,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 
     let ray = camera_ray(id.xy);
 
+    var scene_root = bvh[globals.scene.node_count];
+    
+
     var state: RayState;
 
     state.direction_min = vec4f(ray.dir, 0.0);
@@ -81,6 +81,21 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     state.pixel = lid;
     state.throughput_flags = vec4f(1.0, 1.0, 1.0, bitcast<f32>(0u));
     state.rng_state = seed;
+
+
+    if !DEBUG || globals.debug_mode == 0u {
+        var pdf = 0.0;
+        let volume = background_volume();
+        var t_max = sample_transmittance(volume, &pdf);
+        // volume scattering
+        state.origin_max.w = t_max;
+        state.throughput_flags = vec4f(
+            state.throughput_flags.rgb,
+            state.throughput_flags.w
+        );
+    }
+
+
 
     out_ray_queue[lid] = state;
 }
