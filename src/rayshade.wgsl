@@ -1109,7 +1109,7 @@ fn on_scatter(
         *cast_vis = false;
     }
 
-    throughput *= volume.scattering * evaluate_hg_phase(ray_state.direction_min.xyz, dir, volume);
+    throughput *= volume_albedo(volume) * evaluate_hg_phase(ray_state.direction_min.xyz, dir, volume);
     if phase_pdf > 0.0 {
         throughput /= phase_pdf;
     } else {
@@ -1120,8 +1120,11 @@ fn on_scatter(
         throughput,
         out_ray.throughput_flags.w
     );
-
-
+    
+    var flags = get_flags(ray_state);
+    if flags.depth + 1u >= globals.max_depth {
+        *cast_continuation = false;
+    }
 
 
     return out_ray;

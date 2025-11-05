@@ -720,7 +720,7 @@ fn magma_quintic( _x: f32 ) -> vec3f {
 
 fn background_volume() -> GpuVolume {
     if !DEBUG || globals.debug_mode == 0u {
-        return GpuVolume(vec3f(0.0), 1.0, vec3f(0.05), 0.80);
+        return GpuVolume(vec3f(0.0), 1.0, vec3f(0.01), 0.60);
     } else {
         return GpuVolume(vec3f(0.0), 1.0, vec3f(0.0), 0.0);
     }
@@ -736,6 +736,11 @@ fn transmittance(e: vec3f, dist: f32) -> vec3f {
     return max(exp(-e * dist), vec3f(0.0));
 }
 
+fn volume_albedo(volume: GpuVolume) -> vec3f {
+    let a = select(volume.scattering / extinction(volume), vec3f(1.0), extinction(volume) == vec3f(0.0));
+    return a;
+}
+
 fn sample_transmittance(volume: GpuVolume, pdf: ptr<function, f32>) -> f32 {
     let channel = i32(rand() * 3.0);
     if channel < 10 {
@@ -744,7 +749,7 @@ fn sample_transmittance(volume: GpuVolume, pdf: ptr<function, f32>) -> f32 {
     }
     let e = extinction(volume);
     *pdf = (e.x + e.y + e.z) * (1.0 / 3.0);
-    if e[channel] <= 0.001 {
+    if e[channel] < 0.0001 {
         return 1e30;
     }
 

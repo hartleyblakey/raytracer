@@ -1,6 +1,7 @@
 use std::{cmp::Ordering, collections::HashMap, f32::consts::PI, sync::{Arc, Mutex}, time::{Duration, Instant}};
 
 use crate::glam::{uvec2, vec2, vec3, vec4, Mat4, UVec2, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use bytemuck::{Pod, Zeroable};
 use image::GenericImageView;
 use rand::random;
 
@@ -235,6 +236,42 @@ impl GpuPrimitive {
         self.flags |= Self::EMISSIVE_FLAG;
     }
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Zeroable, Pod, Default)]
+pub struct SceneVolume {
+    parameters: GpuVolume,
+    bounds: Aabb,
+}
+
+impl BvhLeaf for SceneVolume {
+    fn aabb(&self) -> Aabb {
+        self.bounds
+    }
+
+    fn closest_hit(&self, ro: Vec3, rd: Vec3) -> Option<f32> {
+        unimplemented!()
+    }
+}
+
+#[derive(Default)]
+pub struct VolumeTree {
+    volumes: Vec<SceneVolume>,
+    nodes: Vec<BvhNode>,
+}
+
+impl VolumeTree {
+    pub fn add_volume(&mut self, volume: GpuVolume, bounds: Aabb) {
+        self.volumes.push(SceneVolume {parameters: volume, bounds});
+    }
+    pub fn build(&mut self) {
+        let mut bvh = Bvh::new(&self.volumes, 0, self.volumes.len());
+        bvh.flatten_leaves::<_, ()>(&mut self.volumes, None);
+        self.nodes = bvh.nodes;
+    }
+}
+
+
 
 fn oct_wrap(v: Vec2) -> Vec2 {
     let scale = v.signum();
